@@ -1,0 +1,66 @@
+# backend/pyproject.toml
+# Defines the `widgetplatform` backend package: metadata, pinned dependencies,
+# and tool config for ruff (lint) and pytest (test).
+#
+# Version pins below were looked up on PyPI on 2026-09-19 (not recalled from
+# memory) and are newer than the December 2024 pins first recorded in
+# PROJECT_SPEC.md. See the task report for what changed between the old and
+# new pins.
+
+[build-system]
+# hatchling approved as a build-time-only dependency (not installed at
+# runtime); version verified on PyPI 2026-09-19.
+requires = ["hatchling==1.32.3"]
+build-backend = "hatchling.build"
+
+[project]
+name = "widgetplatform"
+version = "0.1.0"
+description = "VileSite embeddable agentic AI widget platform — backend"
+requires-python = "==3.12.*"
+
+dependencies = [
+    "fastapi==0.141.1",
+    "uvicorn==0.53.0",
+    "pydantic-settings==2.15.0",
+    "alembic==1.20.0",
+    "sqlalchemy==2.0.54",
+    "psycopg[binary]==3.3.6",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest==9.1.1",
+    "pytest-asyncio==1.4.0",
+    "httpx==0.28.1",
+    "ruff==0.16.8",
+]
+
+[tool.hatch.build.targets.wheel]
+# TODO(1.1.b): "app" does not exist yet — created by the whole-application
+# skeleton task. `pip install -e .` will not succeed until then.
+packages = ["app"]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+
+[tool.ruff.lint]
+# ruff 0.16 expanded its default rule set from 59 to 413 rules; an explicit
+# `select` is pinned here so future ruff upgrades don't silently change what
+# CI enforces. E/F = pycodestyle+pyflakes errors, I = import sorting,
+# UP = pyupgrade, B = bugbear, S = bandit (security).
+select = ["E", "F", "I", "UP", "B", "S"]
+
+[tool.ruff.lint.per-file-ignores]
+# S101 = use of `assert`: normal and expected in test files.
+"tests/*" = ["S101"]
+
+[tool.pytest]
+# Native TOML config table, new in pytest 9.0 (replaces [tool.pytest.ini_options]
+# INI-string style). asyncio_mode = "auto" lets async def test_* functions run
+# without per-test @pytest.mark.asyncio decorators.
+minversion = "9.1"
+addopts = ["-ra"]
+testpaths = ["tests"]
+asyncio_mode = "auto"

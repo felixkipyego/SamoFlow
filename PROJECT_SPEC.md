@@ -126,7 +126,11 @@ A production-ready, multi-tenant, embeddable AI widget platform: one website is 
 - 2026-09-19: A site key moves from `draft` to `live` only through a server-side check (at least one contact method and one allowed origin); draft keys work from allowed origins with a test-mode badge (SPEC §4.1, §6.3).
 - 2026-09-19: CI runs a Postgres service container so the Alembic upgrade-head test (1.1.h) runs in CI from day one; that test is an integration test reading `TEST_DATABASE_URL`, skipped locally with an explicit message when unset, and must fail (not skip) when `CI=true` and the var is missing. Qdrant is not needed in CI yet (Step 1.1).
 - 2026-09-19: Backend targets Python 3.12, pinned in pyproject.toml, the Dockerfile and CI (Step 1.1).
-- 2026-09-19: Step 1.1 dependencies approved (rule 8) — runtime: fastapi==0.115.6, uvicorn==0.34.0, pydantic-settings==2.7.1, alembic==1.14.0, sqlalchemy==2.0.36, psycopg[binary]==3.2.3; dev: pytest==8.3.4, httpx==0.28.1, ruff==0.8.4. Nothing else added.
+- 2026-09-19: Step 1.1 dependencies approved (rule 8) — runtime: fastapi==0.141.1, uvicorn==0.53.0, pydantic-settings==2.15.0, alembic==1.20.0, sqlalchemy==2.0.54, psycopg[binary]==3.3.6; dev: pytest==9.1.1, pytest-asyncio==1.4.0, httpx==0.28.1, ruff==0.16.8. Pins verified against PyPI on 2026-09-19 (task 1.1.a), replacing the December 2024 pins first recorded here.
+- 2026-09-19: Build backend is hatchling==1.32.3, approved as a build-time-only dependency (rule 8), version verified on PyPI (Step 1.1.a).
+- 2026-09-19: pytest-asyncio==1.4.0 approved as a dev dependency (rule 8; declares support for pytest>=8.4,<10, compatible with our pytest==9.1.1 pin); `[tool.pytest] asyncio_mode = "auto"` so async test functions need no per-test marker (Step 1.1.a).
+- 2026-09-19: ruff `[tool.ruff.lint] select` includes "B" (bugbear) and "S" (bandit/security) in addition to E/F/I/UP; `tests/*` is exempted from S101 (assert use) via per-file-ignores (Step 1.1.a).
+- 2026-09-19: Deviation — `pip install -e .` cannot succeed until `backend/app/` exists, so that check moves from 1.1.a to 1.1.b's tests; 1.1.a verifies `backend/pyproject.toml` by parsing it with `tomllib` only (Step 1.1.a; see task table note on 1.1.b).
 
 ### Estimates to measure
 
@@ -158,13 +162,13 @@ Do not modify (completed tasks): none yet.
 
 | ID | Goal | Status |
 |----|------|--------|
-| 1.1.a | pyproject.toml: `widgetplatform` package, Python 3.12, pinned runtime/dev dependencies | Not started |
-| 1.1.b | backend/app package skeleton (§21 subpackages: auth, tenancy, plans, chat, agent, retrieval, ingest, handoff, notifications, mcp, admin, telemetry) | Not started |
+| 1.1.a | pyproject.toml: `widgetplatform` package, Python 3.12, pinned runtime/dev dependencies | Done |
+| 1.1.b | backend/app package skeleton (§21 subpackages: auth, tenancy, plans, chat, agent, retrieval, ingest, handoff, notifications, mcp, admin, telemetry); also owns the `pip install -e .` check, deferred from 1.1.a because `backend/app/` doesn't exist until this task creates it | Not started |
 | 1.1.c | Settings module: env-var configuration, validated at startup | Not started |
 | 1.1.d | .env.example matching Settings | Not started |
 | 1.1.e | FastAPI app factory (`create_app`) + GET /health | Not started |
 | 1.1.f | Worker entrypoint stub | Not started |
-| 1.1.g | Dockerfile: pinned base image (no `latest`), non-root user, api/worker entrypoints, uvicorn started with `--factory` | Not started |
+| 1.1.g | Dockerfile: pinned base image (no `latest`), non-root user, api/worker entrypoints, uvicorn started with `--factory`. Open item to decide when this task is broken down: whether the production image installs psycopg from source against the system libpq instead of the `psycopg[binary]` wheel, which bundles its own libpq/OpenSSL (psycopg's docs advise the source build for production) | Not started |
 | 1.1.h | Alembic skeleton (no versions yet); upgrade-head integration test reads `TEST_DATABASE_URL` (skip locally if unset, fail in CI) | Not started |
 | 1.1.i | docker-compose.yml: postgres, qdrant, api, worker; only the api port published, bound to 127.0.0.1; postgres/qdrant ports not published; Qdrant healthcheck verified to work inside the pinned image | Not started |
 | 1.1.k | evals placeholder (moved before the Makefile, which calls it) | Not started |
@@ -172,11 +176,12 @@ Do not modify (completed tasks): none yet.
 | 1.1.l | widget/ and dashboard/ skeleton folders | Not started |
 | 1.1.m | CI workflow: lint + test, with a Postgres service container for the Alembic integration test; Qdrant not needed yet | Not started |
 | 1.1.n | .gitignore and .dockerignore: exclude .env/secrets, virtualenvs, caches and build output; keep .env.example tracked | Not started |
+| 1.1.o | Lockfile with hashes for backend dependencies (including transitive ones) and a vulnerability scan (pip-audit or equivalent) wired into CI. Tool choice needs approval under rule 8 when this task is broken down | Not started |
 
 ## 8. Task counter since the last duplication check
 
-n = 0 (run the duplication check at 3; never exceed 4)
+n = 1 (run the duplication check at 3; never exceed 4)
 
 ## 9. Open markers
 
-None yet.
+- TODO(1.1.b): `backend/pyproject.toml` declares `packages = ["app"]` for the wheel build; `pip install -e .` will not succeed until the `app` package skeleton exists. 1.1.b owns the `pip install -e .` check (moved from 1.1.a — see Decisions made).
