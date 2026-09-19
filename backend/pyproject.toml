@@ -37,8 +37,6 @@ dev = [
 ]
 
 [tool.hatch.build.targets.wheel]
-# TODO(1.1.b): "app" does not exist yet — created by the whole-application
-# skeleton task. `pip install -e .` will not succeed until then.
 packages = ["app"]
 
 [tool.ruff]

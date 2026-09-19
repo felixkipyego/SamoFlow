@@ -1,7 +1,6 @@
-# TODO(1.1.b): this file stands alone until the whole-application skeleton
-# task adds backend/app/ and the rest of backend/tests/. `pip install -e .`
-# is not exercised here (see PROJECT_SPEC.md decisions log) — this test only
-# parses pyproject.toml with tomllib, so it needs no installed package.
+# This test only parses pyproject.toml with tomllib, so it needs no
+# installed package. See test_app_skeleton.py for the import check and the
+# deferred `pip install -e .` check run in Step 1.1.b's task report.
 import tomllib
 from pathlib import Path
 

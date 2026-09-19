@@ -37,8 +37,8 @@ A production-ready, multi-tenant, embeddable AI widget platform: one website is 
 |------|-----------|--------|-------|
 | 0.1 | Understand the spec | Done | Completed 2026-09-19 |
 | 0.2 | Create PROJECT_SPEC.md | Done | Completed 2026-09-19 |
-| 1.1 | Repo skeleton and Compose | Not started | – |
-| 1.1b | Whole-application skeleton | Not started | – |
+| 1.1 | Repo skeleton and Compose | In progress | 1.1.a, 1.1.b done |
+| 1.1b | Whole-application skeleton | Not started | – distinct from subtask 1.1.b |
 | 1.1c | Marker check | Not started | – |
 | 1.2 | Database, migrations and tenant-scoped access | Not started | – |
 | 1.3 | Qdrant collection [SECURITY] | Not started | – |
@@ -131,6 +131,8 @@ A production-ready, multi-tenant, embeddable AI widget platform: one website is 
 - 2026-09-19: pytest-asyncio==1.4.0 approved as a dev dependency (rule 8; declares support for pytest>=8.4,<10, compatible with our pytest==9.1.1 pin); `[tool.pytest] asyncio_mode = "auto"` so async test functions need no per-test marker (Step 1.1.a).
 - 2026-09-19: ruff `[tool.ruff.lint] select` includes "B" (bugbear) and "S" (bandit/security) in addition to E/F/I/UP; `tests/*` is exempted from S101 (assert use) via per-file-ignores (Step 1.1.a).
 - 2026-09-19: Deviation — `pip install -e .` cannot succeed until `backend/app/` exists, so that check moves from 1.1.a to 1.1.b's tests; 1.1.a verifies `backend/pyproject.toml` by parsing it with `tomllib` only (Step 1.1.a; see task table note on 1.1.b).
+- 2026-09-19: Step 1.1.b — `backend/app` and its 12 §21 subpackages, plus `backend/tests`, are empty importable placeholders (no NotImplementedError stubs); each `__init__.py` carries a NOTE pointing to PROJECT_SPEC.md's component table instead of a TODO, since the table already tracks which future step fills each one in. The deferred `pip install -e ./backend[dev]` check and full test run needed Python 3.12: none was on PATH, but the user has a conda env `widgetplatform` at `/opt/miniconda3/envs/widgetplatform` with Python 3.12.14; the check ran in a clean venv created from that interpreter (`/opt/miniconda3/envs/widgetplatform/bin/python -m venv ...`), not the conda env itself.
+- 2026-09-19: Naming: subtasks of step 1.1 are written with dots (1.1.a to 1.1.n); steps 1.1b (whole-application skeleton) and 1.1c (marker check) are separate steps, written without a dot.
 
 ### Estimates to measure
 
@@ -154,16 +156,16 @@ A production-ready, multi-tenant, embeddable AI widget platform: one website is 
 
 ## 7. Current task and next task
 
-Current: Step 1.1 Repo skeleton and Compose.
-Next: Step 1.1b Whole-application skeleton.
-Do not modify (completed tasks): none yet.
+Current: Step 1.1 Repo skeleton and Compose, subtask 1.1.c Settings module.
+Next: Step 1.1.d .env.example matching Settings.
+Do not modify (completed tasks): 1.1.a, 1.1.b.
 
 ### Step 1.1 task list (approved)
 
 | ID | Goal | Status |
 |----|------|--------|
 | 1.1.a | pyproject.toml: `widgetplatform` package, Python 3.12, pinned runtime/dev dependencies | Done |
-| 1.1.b | backend/app package skeleton (§21 subpackages: auth, tenancy, plans, chat, agent, retrieval, ingest, handoff, notifications, mcp, admin, telemetry); also owns the `pip install -e .` check, deferred from 1.1.a because `backend/app/` doesn't exist until this task creates it | Not started |
+| 1.1.b | backend/app package skeleton (§21 subpackages: auth, tenancy, plans, chat, agent, retrieval, ingest, handoff, notifications, mcp, admin, telemetry); also owns the `pip install -e .` check, deferred from 1.1.a because `backend/app/` doesn't exist until this task creates it | Done |
 | 1.1.c | Settings module: env-var configuration, validated at startup | Not started |
 | 1.1.d | .env.example matching Settings | Not started |
 | 1.1.e | FastAPI app factory (`create_app`) + GET /health | Not started |
@@ -180,8 +182,8 @@ Do not modify (completed tasks): none yet.
 
 ## 8. Task counter since the last duplication check
 
-n = 1 (run the duplication check at 3; never exceed 4)
+n = 2 (run the duplication check at 3; never exceed 4)
 
 ## 9. Open markers
 
-- TODO(1.1.b): `backend/pyproject.toml` declares `packages = ["app"]` for the wheel build; `pip install -e .` will not succeed until the `app` package skeleton exists. 1.1.b owns the `pip install -e .` check (moved from 1.1.a — see Decisions made).
+None.
