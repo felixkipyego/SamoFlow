@@ -133,6 +133,11 @@ A production-ready, multi-tenant, embeddable AI widget platform: one website is 
 - 2026-09-19: Deviation — `pip install -e .` cannot succeed until `backend/app/` exists, so that check moves from 1.1.a to 1.1.b's tests; 1.1.a verifies `backend/pyproject.toml` by parsing it with `tomllib` only (Step 1.1.a; see task table note on 1.1.b).
 - 2026-09-19: Step 1.1.b — `backend/app` and its 12 §21 subpackages, plus `backend/tests`, are empty importable placeholders (no NotImplementedError stubs); each `__init__.py` carries a NOTE pointing to PROJECT_SPEC.md's component table instead of a TODO, since the table already tracks which future step fills each one in. The deferred `pip install -e ./backend[dev]` check and full test run needed Python 3.12: none was on PATH, but the user has a conda env `widgetplatform` at `/opt/miniconda3/envs/widgetplatform` with Python 3.12.14; the check ran in a clean venv created from that interpreter (`/opt/miniconda3/envs/widgetplatform/bin/python -m venv ...`), not the conda env itself.
 - 2026-09-19: Naming: subtasks of step 1.1 are written with dots (1.1.a to 1.1.n); steps 1.1b (whole-application skeleton) and 1.1c (marker check) are separate steps, written without a dot.
+- 2026-09-19: Step 1.1.c — Settings (backend/app/config.py) reads only the process environment (no env_file), is frozen, and is served through get_settings() (functools.lru_cache). DATABASE_URL is a SecretStr, validated to require the `postgresql+psycopg` scheme; QDRANT_URL is validated to require http/https. Verified against the installed pydantic 2.13.5 / pydantic-settings 2.15.0: `hide_input_in_errors=True` hides a bad value from str()/repr() of a ValidationError but not from the structured exc.errors() list, which still carries the raw input. Frozen-instance assignment raises pydantic_core.ValidationError, not TypeError.
+- 2026-09-19: Duplication check run after 1.1.c (nothing to consolidate).
+- 2026-09-19: Startup code reads settings only via get_settings(), which raises SettingsError with input-free messages; never log exc.errors().
+- 2026-09-19: DATABASE_URL must include scheme postgresql+psycopg, a hostname and a database name.
+- 2026-09-19: Guard test enforces that only get_settings() constructs settings, .errors() is never called, and database_url_str() has an explicit allow-list of callers.
 
 ### Estimates to measure
 
@@ -156,9 +161,9 @@ A production-ready, multi-tenant, embeddable AI widget platform: one website is 
 
 ## 7. Current task and next task
 
-Current: Step 1.1 Repo skeleton and Compose, subtask 1.1.c Settings module.
-Next: Step 1.1.d .env.example matching Settings.
-Do not modify (completed tasks): 1.1.a, 1.1.b.
+Current: Step 1.1 Repo skeleton and Compose, subtask 1.1.d .env.example matching Settings.
+Next: Step 1.1.e FastAPI app factory (`create_app`) + GET /health.
+Do not modify (completed tasks): 1.1.a, 1.1.b, 1.1.c.
 
 ### Step 1.1 task list (approved)
 
@@ -166,7 +171,7 @@ Do not modify (completed tasks): 1.1.a, 1.1.b.
 |----|------|--------|
 | 1.1.a | pyproject.toml: `widgetplatform` package, Python 3.12, pinned runtime/dev dependencies | Done |
 | 1.1.b | backend/app package skeleton (§21 subpackages: auth, tenancy, plans, chat, agent, retrieval, ingest, handoff, notifications, mcp, admin, telemetry); also owns the `pip install -e .` check, deferred from 1.1.a because `backend/app/` doesn't exist until this task creates it | Done |
-| 1.1.c | Settings module: env-var configuration, validated at startup | Not started |
+| 1.1.c | Settings module: env-var configuration, validated at startup | Done |
 | 1.1.d | .env.example matching Settings | Not started |
 | 1.1.e | FastAPI app factory (`create_app`) + GET /health | Not started |
 | 1.1.f | Worker entrypoint stub | Not started |
@@ -182,7 +187,7 @@ Do not modify (completed tasks): 1.1.a, 1.1.b.
 
 ## 8. Task counter since the last duplication check
 
-n = 2 (run the duplication check at 3; never exceed 4)
+n = 0 (run the duplication check at 3; never exceed 4)
 
 ## 9. Open markers
 
