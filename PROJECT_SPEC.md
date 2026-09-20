@@ -1,4 +1,4 @@
-# VileSite — PROJECT_SPEC (living context — read at the start of every session, update after every task)
+# SamoFlow — PROJECT_SPEC (living context — read at the start of every session, update after every task)
 
 ## 1. What we are building and why
 
@@ -138,6 +138,7 @@ A production-ready, multi-tenant, embeddable AI widget platform: one website is 
 - 2026-09-19: Startup code reads settings only via get_settings(), which raises SettingsError with input-free messages; never log exc.errors().
 - 2026-09-19: DATABASE_URL must include scheme postgresql+psycopg, a hostname and a database name.
 - 2026-09-19: Guard test enforces that only get_settings() constructs settings, .errors() is never called, and database_url_str() has an explicit allow-list of callers.
+- 2026-09-20: Product name: SamoFlow (renamed from VileSite on 2026-09-20; brand name only; code, packages and images keep the neutral name widgetplatform until a rename task is scheduled).
 
 ### Estimates to measure
 

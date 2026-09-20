@@ -1,4 +1,4 @@
-# VileSite — Embeddable Agentic AI Widget & Platform
+# SamoFlow — Embeddable Agentic AI Widget & Platform
 
 ## At the start of every session
 1. Read PROJECT_SPEC.md and follow its rules. It is the living context: working rules, engineering rules, decisions, component status, the current task and open markers.

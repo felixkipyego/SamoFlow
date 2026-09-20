@@ -1,4 +1,4 @@
-# VileSite — Project Specification: Embeddable Agentic AI Widget & Platform
+# SamoFlow — Project Specification: Embeddable Agentic AI Widget & Platform
 
 **Status:** Final for implementation. Every decision in this document has been confirmed by the project owner. Section 19 lists items deferred to later phases, and section 20 lists estimates to measure.
 

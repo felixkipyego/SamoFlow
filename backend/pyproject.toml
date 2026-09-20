@@ -16,7 +16,7 @@ build-backend = "hatchling.build"
 [project]
 name = "widgetplatform"
 version = "0.1.0"
-description = "VileSite embeddable agentic AI widget platform — backend"
+description = "SamoFlow embeddable agentic AI widget platform — backend"
 requires-python = "==3.12.*"
 
 dependencies = [
