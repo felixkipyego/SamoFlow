@@ -143,6 +143,7 @@ A production-ready, multi-tenant, embeddable AI widget platform: one website is 
 - 2026-09-20: Step 1.1.d — `.env.example` declares exactly the five variables Settings requires (no more, no less); required names are derived from `Settings.model_fields` in the test plus an `EXTRA_EXAMPLE_KEYS` constant (empty tuple today) for any future deliberate addition. `API_HOST=0.0.0.0` is the container-listen placeholder; `DATABASE_URL`'s password placeholder is exactly `change-me`, asserted by a dedicated test so a real secret pasted over it would be caught.
 - 2026-09-20: Step 1.1.e — `create_app(settings: Settings | None = None)` in `backend/app/main.py` builds the FastAPI app; a `None` settings argument goes through `get_settings()` only (never `Settings()` directly, enforced by the existing config guard test since it scans every file under `backend/app`). Nothing at module level reads the environment. Title is the neutral `"widgetplatform API"`; version comes from `importlib.metadata.version("widgetplatform")` (works because Task 1.1.b's editable install makes the package resolvable). `/health` (backend/app/health.py) is liveness-only and touches neither Postgres nor Qdrant. Docs/redoc/openapi are disabled only when `app_env == "production"`. No CORS, middleware, database or Qdrant code, and no module-level `app` variable (Compose/Docker will run `uvicorn app.main:create_app --factory` from 1.1.g/1.1.i onward).
 - 2026-09-20: Step 1.1.f — `backend/app/worker.py`'s `run(stop)` calls `get_settings()` only, logs one INFO line containing `app_env` only (never database_url/qdrant_url), then awaits the stop event; `main()` configures logging, registers SIGTERM/SIGINT handlers via `loop.add_signal_handler` that set the stop event, and exits 0 on clean shutdown or non-zero with no traceback on `SettingsError`. No job logic, no polling loop, no dependency on Postgres/Qdrant. Verified by hand: with the signal-handler registration removed, `SIGTERM`'s default OS disposition still terminates the (unhandled) process quickly rather than hanging it — the process exits with code -15 (terminated by signal), not 0, so the test still fails fast on `assert exit_code == 0` rather than by hitting the 10-second `wait_for` timeout.
+- 2026-09-20: Duplication check and simplification review after 1.1.d/e/f: shared conftest.py, three redundant tests deleted, env_file guard added; dependency-set test to be removed when the lockfile task (1.1.o) lands.
 
 ### Estimates to measure
 
@@ -192,7 +193,7 @@ Do not modify (completed tasks): 1.1.a, 1.1.b, 1.1.c, 1.1.d, 1.1.e, 1.1.f.
 
 ## 8. Task counter since the last duplication check
 
-n = 3 (run the duplication check at 3; never exceed 4)
+n = 0 (run the duplication check at 3; never exceed 4)
 
 ## 9. Open markers
 
@@ -204,3 +205,4 @@ n = 3 (run the duplication check at 3; never exceed 4)
 - Owner: to be scheduled — CORS and OPTIONS handling: decide with the widget and admin work (Phase 5 and 6); today OPTIONS returns 405.
 - Owner 1.1.g: the container entrypoint must exec the command (`exec python -m app.worker`, `exec uvicorn ...`) so the process is PID 1 and receives SIGTERM directly; verify with `docker compose stop` that the worker exits in under 10 seconds.
 - TODO(2.1): `backend/app/worker.py`'s `run()` has no job logic yet; the job queue consumer is added in Step 2.1.
+- Owner 1.1.o: remove the exact dependency-set test in test_pyproject.py when the lockfile and CI audit exist.

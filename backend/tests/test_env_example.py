@@ -5,14 +5,11 @@
 from pathlib import Path
 from urllib.parse import urlsplit
 
-import pytest
-
 from app.config import Settings, get_settings
+from tests.conftest import REQUIRED_VARS
 
 # NOTE: adding a key here is a deliberate decision; add it in the task that needs it
 EXTRA_EXAMPLE_KEYS: tuple[str, ...] = ()
-
-REQUIRED_VARS = [name.upper() for name in Settings.model_fields]
 
 HEADER_WARNING = "# Copy to .env and edit. Never commit .env."
 
@@ -70,15 +67,6 @@ def _parse_env_example():
         )
         values[key] = value
     return values
-
-
-@pytest.fixture(autouse=True)
-def _isolated_env(monkeypatch):
-    for name in REQUIRED_VARS:
-        monkeypatch.delenv(name, raising=False)
-    get_settings.cache_clear()
-    yield
-    get_settings.cache_clear()
 
 
 def test_no_settings_field_has_a_custom_alias():

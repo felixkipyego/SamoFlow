@@ -9,10 +9,10 @@ from pathlib import Path
 
 import pytest
 
-from app.config import SettingsError, get_settings
+from app.config import SettingsError
 from app.worker import run
+from tests.conftest import REQUIRED_VARS, TEST_PASSWORD, set_valid_env
 
-REQUIRED_VARS = ["APP_ENV", "DATABASE_URL", "QDRANT_URL", "API_HOST", "API_PORT"]
 BACKEND_DIR = Path(__file__).resolve().parent.parent
 
 VALID_ENV = {
@@ -24,22 +24,8 @@ VALID_ENV = {
 }
 
 
-@pytest.fixture(autouse=True)
-def _isolated_env(monkeypatch):
-    for name in REQUIRED_VARS:
-        monkeypatch.delenv(name, raising=False)
-    get_settings.cache_clear()
-    yield
-    get_settings.cache_clear()
-
-
-def _set_valid_env(monkeypatch, **overrides):
-    for key, value in {**VALID_ENV, **overrides}.items():
-        monkeypatch.setenv(key, value)
-
-
 async def test_run_returns_promptly_when_stop_is_already_set(monkeypatch, caplog):
-    _set_valid_env(monkeypatch)
+    set_valid_env(monkeypatch, VALID_ENV)
     stop = asyncio.Event()
     stop.set()
     with caplog.at_level(logging.INFO):
@@ -48,16 +34,16 @@ async def test_run_returns_promptly_when_stop_is_already_set(monkeypatch, caplog
 
 
 async def test_startup_log_never_contains_database_url_or_password(monkeypatch, caplog):
-    password = "sup3r-secret-pw"  # noqa: S105 (test fixture value, not a real secret)
-    _set_valid_env(
+    set_valid_env(
         monkeypatch,
-        DATABASE_URL=f"postgresql+psycopg://user:{password}@localhost:5432/widgetplatform",
+        VALID_ENV,
+        DATABASE_URL=f"postgresql+psycopg://user:{TEST_PASSWORD}@localhost:5432/widgetplatform",
     )
     stop = asyncio.Event()
     stop.set()
     with caplog.at_level(logging.INFO):
         await asyncio.wait_for(run(stop), timeout=2)
-    assert password not in caplog.text
+    assert TEST_PASSWORD not in caplog.text
     assert "postgresql+psycopg://" not in caplog.text
 
 
