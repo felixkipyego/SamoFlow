@@ -45,10 +45,15 @@ RUN groupadd --system --gid 10001 app \
 
 WORKDIR /app
 
-# Copied while still root, before USER below, so the venv and entrypoint end
-# up root-owned: readable and executable by the app user, not writable by it.
+# Copied while still root, before USER below, so the venv, entrypoint and
+# Alembic files end up root-owned: readable (and, for entrypoint.sh,
+# executable) by the app user, not writable by it. Alembic itself is
+# installed into /venv already; only its config and scripts are copied here,
+# so "alembic" (run with WORKDIR /app) finds alembic.ini next to it.
 COPY --from=builder /venv /venv
 COPY --chmod=0755 entrypoint.sh /usr/local/bin/entrypoint.sh
+COPY --chmod=0644 alembic.ini ./alembic.ini
+COPY --chmod=0755 alembic/ ./alembic/
 
 USER 10001
 

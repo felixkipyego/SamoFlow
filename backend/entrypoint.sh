@@ -1,7 +1,8 @@
 #!/bin/sh
-# Task 1.1.g: single entrypoint for both container modes ("api" and
-# "worker"). Always exec so the mode's process becomes PID 1 and receives
-# SIGTERM directly (no shell left in between to swallow the signal).
+# Task 1.1.g: single entrypoint for the container's modes ("api", "worker"
+# and, since Task 1.1.h, "migrate"). Always exec so the mode's process
+# becomes PID 1 and receives SIGTERM directly (no shell left in between to
+# swallow the signal).
 set -eu
 
 mode="${1:-}"
@@ -21,8 +22,14 @@ case "$mode" in
     worker)
         exec python -m app.worker
         ;;
+    migrate)
+        # No API_HOST/API_PORT check here: Settings validates DATABASE_URL
+        # (and every other required variable) itself when alembic/env.py
+        # calls get_settings().
+        exec alembic upgrade head
+        ;;
     *)
-        echo "Usage: entrypoint.sh {api|worker}" >&2
+        echo "Usage: entrypoint.sh {api|worker|migrate}" >&2
         exit 2
         ;;
 esac

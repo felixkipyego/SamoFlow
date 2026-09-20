@@ -3,15 +3,33 @@
 # duplicated across test_config.py, test_main.py, test_worker.py and
 # test_env_example.py (duplication check after Task 1.1.f): the required
 # env-var list, the autouse env-isolation fixture, the valid-environment
-# setter, the fresh-import helper and the shared test password.
+# setter, the fresh-import helper and the shared test password. Task 1.1.h
+# adds require_test_database(), the guard that keeps destructive
+# integration-test setup off a real database.
 import importlib
+import os
 import sys
+from urllib.parse import urlsplit
 
 import pytest
 
-from app.config import Settings, get_settings
+from app.config import POSTGRES_SCHEME, Settings, get_settings
 
 REQUIRED_VARS = [name.upper() for name in Settings.model_fields]
+
+# Always allowed: a database on the machine running the tests. Additional
+# hosts (e.g. a CI Postgres service container's name) are opted in via
+# TEST_DATABASE_ALLOWED_HOSTS, never hard-coded here.
+_DEFAULT_ALLOWED_TEST_HOSTS = frozenset({"localhost", "127.0.0.1"})
+
+_LOCAL_DOCKER_RUN_HINT = (
+    "TEST_DATABASE_URL is not set. Start a local test database with:\n"
+    "  docker run -d --name wp-test-db --rm -p 127.0.0.1:55432:5432 "
+    "-e POSTGRES_USER=widgetplatform -e POSTGRES_PASSWORD=change-me "
+    "-e POSTGRES_DB=widgetplatform_test <postgres-tag>\n"
+    "then set TEST_DATABASE_URL=postgresql+psycopg://widgetplatform:"
+    "change-me@127.0.0.1:55432/widgetplatform_test"
+)
 
 # Shared wherever a test needs a password value that must never leak into
 # logs, repr/str output or exception messages.
@@ -32,6 +50,57 @@ def _isolated_env(monkeypatch):
 def set_valid_env(monkeypatch, valid_env, **overrides):
     for key, value in {**valid_env, **overrides}.items():
         monkeypatch.setenv(key, value)
+
+
+def _allowed_test_hosts() -> frozenset[str]:
+    extra = os.environ.get("TEST_DATABASE_ALLOWED_HOSTS", "")
+    extra_hosts = {h.strip().lower() for h in extra.split(",") if h.strip()}
+    return _DEFAULT_ALLOWED_TEST_HOSTS | extra_hosts
+
+
+def require_test_database() -> str:
+    # Guards destructive integration-test setup (DROP SCHEMA, etc.) so it can
+    # never run against a real database:
+    #   - unset locally (CI != "true"): skip, with the docker command to
+    #     start a local test database;
+    #   - unset in CI (CI == "true"): fail, since CI must run this test, not
+    #     silently skip it;
+    #   - set but not a "..._test"-named postgresql+psycopg database: fail
+    #     (never skip) — a malformed URL must not be treated as "no database
+    #     configured";
+    #   - set, correctly named, but on a host that isn't localhost/127.0.0.1
+    #     or explicitly opted in via TEST_DATABASE_ALLOWED_HOSTS: fail — the
+    #     "_test" name alone doesn't prove the host is safe to drop schemas on.
+    url = os.environ.get("TEST_DATABASE_URL")
+    if not url:
+        if os.environ.get("CI") == "true":
+            pytest.fail(
+                "TEST_DATABASE_URL is not set and CI=true: this test must "
+                "fail, not skip, when CI is expected to provide a test "
+                "database. Check the CI workflow's Postgres service and env."
+            )
+        pytest.skip(_LOCAL_DOCKER_RUN_HINT)
+
+    parts = urlsplit(url)
+    database_name = parts.path.lstrip("/")
+    if parts.scheme != POSTGRES_SCHEME or not database_name.endswith("_test"):
+        pytest.fail(
+            "TEST_DATABASE_URL must use the "
+            f"'{POSTGRES_SCHEME}' scheme and name a database ending in "
+            "'_test' (this test drops and recreates its public schema, so "
+            "it must never be able to point at a real database)."
+        )
+
+    allowed_hosts = _allowed_test_hosts()
+    if (parts.hostname or "") not in allowed_hosts:
+        pytest.fail(
+            f"TEST_DATABASE_URL's host {parts.hostname!r} is not allowed. "
+            "Only 'localhost' and '127.0.0.1' are allowed by default; to "
+            "allow another host (e.g. a CI Postgres service container's "
+            "name), list it in TEST_DATABASE_ALLOWED_HOSTS "
+            "(comma-separated)."
+        )
+    return url
 
 
 def fresh_import(module_name):

@@ -1,7 +1,8 @@
 # backend/tests/test_config_guard.py
-# Guard test (Task 1.1.c refinement): parses every .py file under
-# backend/app with ast (not text search, so comments/strings never trigger
-# it) and enforces three rules from PROJECT_SPEC.md's decisions log:
+# Guard test (Task 1.1.c refinement; Task 1.1.h extends it to backend/alembic):
+# parses every .py file under backend/app and backend/alembic with ast (not
+# text search, so comments/strings never trigger it) and enforces three rules
+# from PROJECT_SPEC.md's decisions log:
 #   - only app/config.py may construct Settings() directly;
 #   - nothing calls a method named errors() (that leaks raw input, see
 #     config.py's model_config comment);
@@ -10,12 +11,14 @@
 import ast
 from pathlib import Path
 
-APP_DIR = Path(__file__).resolve().parent.parent / "app"
+BACKEND_DIR = Path(__file__).resolve().parent.parent
+APP_DIR = BACKEND_DIR / "app"
+ALEMBIC_DIR = BACKEND_DIR / "alembic"
 CONFIG_FILE = APP_DIR / "config.py"
 
 # NOTE: adding a file here is a deliberate decision: it means that file
 # receives the real database password. Review it by hand.
-ALLOWED_DATABASE_URL_CALLERS: tuple[str, ...] = ()
+ALLOWED_DATABASE_URL_CALLERS: tuple[str, ...] = ("alembic/env.py",)
 
 
 def _called_name(node: ast.Call) -> str | None:
@@ -27,16 +30,17 @@ def _called_name(node: ast.Call) -> str | None:
     return None
 
 
-def _app_python_files():
-    for path in sorted(APP_DIR.rglob("*.py")):
-        if "__pycache__" not in path.parts:
-            yield path
+def _scanned_python_files():
+    for directory in (APP_DIR, ALEMBIC_DIR):
+        for path in sorted(directory.rglob("*.py")):
+            if "__pycache__" not in path.parts:
+                yield path
 
 
 def test_config_guard():
     violations = []
-    for path in _app_python_files():
-        rel = path.relative_to(APP_DIR.parent).as_posix()
+    for path in _scanned_python_files():
+        rel = path.relative_to(BACKEND_DIR).as_posix()
         tree = ast.parse(path.read_text(), filename=str(path))
         for node in ast.walk(tree):
             if not isinstance(node, ast.Call):

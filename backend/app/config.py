@@ -17,7 +17,9 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 # SQLAlchemy 2.0 maps a plain "postgresql://" DSN to the psycopg2 driver,
 # which this project does not install (Step 1.1.a installs psycopg[binary],
 # i.e. psycopg 3). This scheme selects the psycopg (v3) driver instead.
-_POSTGRES_SCHEME = "postgresql+psycopg"
+# Public (no leading underscore): Task 1.1.h's test database guard imports
+# this instead of duplicating the literal.
+POSTGRES_SCHEME = "postgresql+psycopg"
 
 
 class Settings(BaseSettings):
@@ -41,12 +43,12 @@ class Settings(BaseSettings):
     def _require_postgres_psycopg_scheme(cls, value: SecretStr) -> SecretStr:
         parts = urlsplit(value.get_secret_value())
         database_name = parts.path.lstrip("/")
-        if parts.scheme != _POSTGRES_SCHEME or not parts.hostname or not database_name:
+        if parts.scheme != POSTGRES_SCHEME or not parts.hostname or not database_name:
             # Message names only the required scheme, never the value under
             # validation, so a bad DSN's password cannot leak here.
             raise ValueError(
                 "DATABASE_URL must be a PostgreSQL URL using the "
-                f"'{_POSTGRES_SCHEME}' scheme, with a hostname and a "
+                f"'{POSTGRES_SCHEME}' scheme, with a hostname and a "
                 "database name (SQLAlchemy 2.0 defaults plain "
                 "'postgresql://' to psycopg2, which is not installed)."
             )
