@@ -139,6 +139,7 @@ A production-ready, multi-tenant, embeddable AI widget platform: one website is 
 - 2026-09-19: DATABASE_URL must include scheme postgresql+psycopg, a hostname and a database name.
 - 2026-09-19: Guard test enforces that only get_settings() constructs settings, .errors() is never called, and database_url_str() has an explicit allow-list of callers.
 - 2026-09-20: Product name: SamoFlow (renamed from VileSite on 2026-09-20; brand name only; code, packages and images keep the neutral name widgetplatform until a rename task is scheduled).
+- 2026-09-20: Step 1.1.d — `.env.example` declares exactly the five variables Settings requires (no more, no less); required names are derived from `Settings.model_fields` in the test plus an `EXTRA_EXAMPLE_KEYS` constant (empty tuple today) for any future deliberate addition. `API_HOST=0.0.0.0` is the container-listen placeholder; `DATABASE_URL`'s password placeholder is exactly `change-me`, asserted by a dedicated test so a real secret pasted over it would be caught.
 
 ### Estimates to measure
 
@@ -162,9 +163,9 @@ A production-ready, multi-tenant, embeddable AI widget platform: one website is 
 
 ## 7. Current task and next task
 
-Current: Step 1.1 Repo skeleton and Compose, subtask 1.1.d .env.example matching Settings.
-Next: Step 1.1.e FastAPI app factory (`create_app`) + GET /health.
-Do not modify (completed tasks): 1.1.a, 1.1.b, 1.1.c.
+Current: Step 1.1 Repo skeleton and Compose, subtask 1.1.e FastAPI app factory (`create_app`) + GET /health.
+Next: Step 1.1.f Worker entrypoint stub.
+Do not modify (completed tasks): 1.1.a, 1.1.b, 1.1.c, 1.1.d.
 
 ### Step 1.1 task list (approved)
 
@@ -173,7 +174,7 @@ Do not modify (completed tasks): 1.1.a, 1.1.b, 1.1.c.
 | 1.1.a | pyproject.toml: `widgetplatform` package, Python 3.12, pinned runtime/dev dependencies | Done |
 | 1.1.b | backend/app package skeleton (§21 subpackages: auth, tenancy, plans, chat, agent, retrieval, ingest, handoff, notifications, mcp, admin, telemetry); also owns the `pip install -e .` check, deferred from 1.1.a because `backend/app/` doesn't exist until this task creates it | Done |
 | 1.1.c | Settings module: env-var configuration, validated at startup | Done |
-| 1.1.d | .env.example matching Settings | Not started |
+| 1.1.d | .env.example matching Settings | Done |
 | 1.1.e | FastAPI app factory (`create_app`) + GET /health | Not started |
 | 1.1.f | Worker entrypoint stub | Not started |
 | 1.1.g | Dockerfile: pinned base image (no `latest`), non-root user, api/worker entrypoints, uvicorn started with `--factory`. Open item to decide when this task is broken down: whether the production image installs psycopg from source against the system libpq instead of the `psycopg[binary]` wheel, which bundles its own libpq/OpenSSL (psycopg's docs advise the source build for production) | Not started |
@@ -188,8 +189,10 @@ Do not modify (completed tasks): 1.1.a, 1.1.b, 1.1.c.
 
 ## 8. Task counter since the last duplication check
 
-n = 0 (run the duplication check at 3; never exceed 4)
+n = 1 (run the duplication check at 3; never exceed 4)
 
 ## 9. Open markers
 
-None.
+- TODO(1.1.i): .env.example notes that Compose will also need POSTGRES_USER, POSTGRES_PASSWORD and POSTGRES_DB, which must match DATABASE_URL. Owned by task 1.1.i.
+- TODO(1.1.i): cross-check .env.example against docker-compose.yml — service host names (postgres, qdrant), ports, and that POSTGRES_USER, POSTGRES_PASSWORD and POSTGRES_DB match DATABASE_URL. Add a test for it in 1.1.i, and remove the TODO(1.1.i) header comment from .env.example when done.
+- Note (owner to be scheduled, not tied to a task yet): when APP_ENV=production, reject the placeholder password change-me at startup in get_settings(). Schedule it with the deployment steps (1.1.g / Phase 7) or a Settings refinement.
