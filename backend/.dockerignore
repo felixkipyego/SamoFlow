@@ -1,0 +1,19 @@
+# Tests and caches: not copied by the Dockerfile
+tests/
+.pytest_cache/
+.ruff_cache/
+__pycache__/
+**/__pycache__
+*.pyc
+
+# Secrets and local config
+.venv/
+.venv*/
+.env
+.env.*
+
+# VCS and editor/build tooling
+.git
+.gitignore
+.dockerignore
+Dockerfile
