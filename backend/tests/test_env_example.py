@@ -9,7 +9,9 @@ from app.config import Settings, get_settings
 from tests.conftest import REQUIRED_VARS
 
 # NOTE: adding a key here is a deliberate decision; add it in the task that needs it
-EXTRA_EXAMPLE_KEYS: tuple[str, ...] = ()
+# Task 1.1.i: docker-compose.yml's postgres service takes these three
+# directly (not via Settings), so .env.example must declare them too.
+EXTRA_EXAMPLE_KEYS: tuple[str, ...] = ("POSTGRES_USER", "POSTGRES_PASSWORD", "POSTGRES_DB")
 
 HEADER_WARNING = "# Copy to .env and edit. Never commit .env."
 

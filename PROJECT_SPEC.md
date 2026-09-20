@@ -157,6 +157,14 @@ A production-ready, multi-tenant, embeddable AI widget platform: one website is 
 - 2026-09-20: Step 1.1.h refinement — `app/config.py`'s `_POSTGRES_SCHEME` renamed to the public `POSTGRES_SCHEME` (no behavior change, two use sites, both in the same file); `backend/tests/conftest.py` imports it instead of duplicating the `"postgresql+psycopg"` literal.
 - 2026-09-20: Step 1.1.g — base image pinned to `python:3.12.14-slim-trixie` (Debian trixie is the current stable Debian release; 3.12.14 is the latest 3.12 patch published for it as of 2026-09-20); existence verified with `docker manifest inspect python:3.12.14-slim-trixie` before use (returned a valid multi-arch manifest list). `psycopg[binary]` kept for v1 instead of building from source against the system libpq: the container is rebuilt on every deploy to pick up base-image patches, and the vulnerability scan (1.1.o) will cover the bundled libpq/OpenSSL; revisit in Phase 7 if that scan flags them. `uvicorn --no-server-header` confirmed supported by the pinned uvicorn==0.53.0 (`uvicorn --help` lists `--server-header / --no-server-header`) and used in entrypoint.sh's `api` mode so the `server:` response header is suppressed. Non-root numeric UID/GID 10001 (no login shell, no home dir), WORKDIR /app, no HEALTHCHECK, no .dockerignore yet (1.1.n).
 - 2026-09-20: Step 1.1.g refinement — multi-stage build: a builder stage (pip + hatchling, both build-time only) installs the package into a venv at /venv; the final stage is the same pinned base image, copying in only /venv and entrypoint.sh, with `pip uninstall --yes pip` run against /venv at the end of the builder stage so pip never reaches the runtime image (verified: `python -m pip --version` in the built image fails with `No module named pip`). File modes come from `COPY --chmod=0755 entrypoint.sh ...` plus the builder's own root-owned-by-default output for /venv (both COPY instructions run before `USER 10001`), which is simpler than a separate `chmod`/`find` pass and gives the same result: /app and /venv are root-owned and not writable by the app user (verified by hand: `touch` inside either as uid 10001 fails with Permission denied). The `find __pycache__`/`*.pyc` cleanup step is removed — it only mattered when app/ was copied straight into the shipped image; now app/ is copied only into the discarded builder stage, and pip's wheel build already excludes bytecode. The Dockerfile documents UID 10001 as a fixed convention (not host-assigned), so file ownership stays stable across rebuilds and hosts; Compose (1.1.i) must reuse this same UID wherever it sets `user:` or touches ownership of files from this image. Image content size changed only marginally (63,312,007 → 62,831,945 bytes) since the prior single-stage build had no apt build tooling to strip — the main gain is removing pip/hatchling from the runtime image, not size. Entrypoint refinement: `api` mode now checks `API_HOST`/`API_PORT` itself (`[ -z ... ]` before the `exec`) and prints one `entrypoint.sh: <VAR> is required for mode 'api'` line to stderr with exit 2, instead of surfacing `set -u`'s raw "parameter not set" shell error; the script does not duplicate Settings' own validation (scheme checks, etc.) — only the two variables it uses itself.
+- 2026-09-20: Step 1.1.i — Qdrant tag `qdrant/qdrant:v1.19.1`: found via the Docker Hub tags API (all 418 tags of `qdrant/qdrant`, filtered to the `vX.Y.Z`-only stable pattern — excluding `dev-*`, `-preview-*` and other branch/experiment tags — then sorted by semver; v1.19.1 is the highest), then confirmed to exist with `docker manifest inspect qdrant/qdrant:v1.19.1` (valid manifest list). Postgres stays on the tag already pinned in 1.1.h, `postgres:18.2-trixie`, re-verified the same way.
+- 2026-09-20: Step 1.1.i — `postgres:18.2-trixie`'s declared `VOLUME` is `/var/lib/postgresql`, not the pre-18 `/var/lib/postgresql/data` path; `PGDATA` is a subdirectory of it (`/var/lib/postgresql/18/docker`) — verified with `docker image inspect postgres:18.2-trixie --format '{{json .Config.Volumes}}'` and `--format '{{json .Config.Env}}'`. The named volume (and test-db's tmpfs) mount at `/var/lib/postgresql`.
+- 2026-09-20: Step 1.1.i — healthcheck methods verified by hand inside the pinned images: qdrant has neither `curl` nor `wget`, only `bash`/`sh` (`sh` is `dash`, which has no `/dev/tcp`), so its healthcheck is `CMD` (not `CMD-SHELL`) invoking `bash -c` directly to speak raw HTTP to `/healthz` over `/dev/tcp` — proved working with a live container before writing it into Compose. The api image has no `curl` either (Task 1.1.g's slim runtime), so its healthcheck uses Python's stdlib `urllib.request` against `GET /health`, already on `PATH` via the app's own venv.
+- 2026-09-20: Step 1.1.i — `migrate` (`profiles: ["tools"]`) and `test-db` (`profiles: ["test"]`) never run on `docker compose up`; each needs its profile passed explicitly (`--profile tools`, `--profile test`).
+- 2026-09-20: Step 1.1.i — hardening (`read_only: true` + tmpfs `/tmp`, `cap_drop: [ALL]`, `security_opt: ["no-new-privileges:true"]`, `mem_limit: 512m`, `pids_limit: 200`) applied to api, worker and migrate only (our own image, built from `backend/`); not applied to postgres, qdrant or test-db (upstream images not audited for read-only-rootfs compatibility). Verified end to end: postgres/qdrant/api all reach "healthy", `migrate` exits 0 twice, and the full backend test suite (86 tests) passes against the compose-managed `test-db`, all with hardening in place on api/worker/migrate.
+- 2026-09-20: Step 1.1.i — environment passed explicitly via a `x-app-env` YAML anchor with `${NAME:?NAME must be set in .env}` interpolation (no `env_file:`), aliased as-is into api/worker/migrate's `environment:`; postgres's `POSTGRES_USER`/`POSTGRES_PASSWORD`/`POSTGRES_DB` use the same fail-fast form. Verified: `docker compose config` fails immediately (before any container starts) with a message naming the missing variable when `DATABASE_URL` is absent from the env file. Compose resolves `.env` from `deploy/` (this file's own folder), not the repo root, so every command in this repo must pass `--env-file .env` explicitly; documented in a header comment in `deploy/docker-compose.yml`.
+- 2026-09-20: Step 1.1.i — `.env.example` gained `POSTGRES_USER`/`POSTGRES_PASSWORD`/`POSTGRES_DB` (placeholders `widgetplatform`/`change-me`/`widgetplatform`, matching `DATABASE_URL`), each with a comment naming which container variable it must match; added to `test_env_example.py`'s `EXTRA_EXAMPLE_KEYS`. The `TODO(1.1.i)` header line is removed. New `backend/tests/test_env_consistency.py` cross-checks `DATABASE_URL`'s user/password/host/database against `POSTGRES_USER`/`POSTGRES_PASSWORD`/`"postgres"`/`POSTGRES_DB`, and `QDRANT_URL`'s host against `"qdrant"`; it reuses `test_env_example.py`'s parser (import, not duplication) and withholds the password from its failure message (proved by hand: a wrong `POSTGRES_PASSWORD` in a scratch edit fails without printing either value; a wrong host fails naming both non-secret values).
+- 2026-09-20: Step 1.1.i refinement (post-review) — api/worker/migrate's tmpfs `/tmp` now has an explicit `size=64m` (`tmpfs: - /tmp:size=64m`); verified inside a running container: `mount` shows `tmpfs on /tmp type tmpfs (rw,nosuid,nodev,noexec,relatime,size=65536k)`, i.e. the standard `noexec`/`nosuid`/`nodev` defaults are unchanged. Added short comments: the api healthcheck only proves the process is alive, not that Postgres is reachable; postgres's `POSTGRES_USER`/`PASSWORD`/`DB` apply only when the data volume is first created; the qdrant healthcheck's `bash`/`/dev/tcp` choice should be revisited if the image ever drops `bash`.
 
 ### Estimates to measure
 
@@ -180,9 +188,9 @@ A production-ready, multi-tenant, embeddable AI widget platform: one website is 
 
 ## 7. Current task and next task
 
-Current: Step 1.1 Repo skeleton and Compose, subtask 1.1.i docker-compose.yml.
-Next: Step 1.1.k evals placeholder.
-Do not modify (completed tasks): 1.1.a, 1.1.b, 1.1.c, 1.1.d, 1.1.e, 1.1.f, 1.1.g, 1.1.h.
+Current: Step 1.1 Repo skeleton and Compose, subtask 1.1.k evals placeholder.
+Next: Step 1.1.j Makefile.
+Do not modify (completed tasks): 1.1.a, 1.1.b, 1.1.c, 1.1.d, 1.1.e, 1.1.f, 1.1.g, 1.1.h, 1.1.i.
 
 ### Step 1.1 task list (approved)
 
@@ -196,7 +204,7 @@ Do not modify (completed tasks): 1.1.a, 1.1.b, 1.1.c, 1.1.d, 1.1.e, 1.1.f, 1.1.g
 | 1.1.f | Worker entrypoint stub | Done |
 | 1.1.g | Dockerfile: pinned base image (no `latest`), non-root user, api/worker entrypoints, uvicorn started with `--factory` | Done |
 | 1.1.h | Alembic skeleton (no versions yet); upgrade-head integration test reads `TEST_DATABASE_URL` (skip locally if unset, fail in CI) | Done |
-| 1.1.i | docker-compose.yml: postgres, qdrant, api, worker; only the api port published, bound to 127.0.0.1; postgres/qdrant ports not published; Qdrant healthcheck verified to work inside the pinned image | Not started |
+| 1.1.i | docker-compose.yml: postgres, qdrant, api, worker; only the api port published, bound to 127.0.0.1; postgres/qdrant ports not published; Qdrant healthcheck verified to work inside the pinned image | Done |
 | 1.1.k | evals placeholder (moved before the Makefile, which calls it) | Not started |
 | 1.1.j | Makefile: up, test, lint, migrate, evals | Not started |
 | 1.1.l | widget/ and dashboard/ skeleton folders | Not started |
@@ -206,28 +214,31 @@ Do not modify (completed tasks): 1.1.a, 1.1.b, 1.1.c, 1.1.d, 1.1.e, 1.1.f, 1.1.g
 
 ## 8. Task counter since the last duplication check
 
-n = 2 (run the duplication check at 3; never exceed 4)
+n = 3 (run the duplication check at 3; never exceed 4)
 
 ## 9. Open markers
 
-- TODO(1.1.i): .env.example notes that Compose will also need POSTGRES_USER, POSTGRES_PASSWORD and POSTGRES_DB, which must match DATABASE_URL. Owned by task 1.1.i.
-- TODO(1.1.i): cross-check .env.example against docker-compose.yml — service host names (postgres, qdrant), ports, and that POSTGRES_USER, POSTGRES_PASSWORD and POSTGRES_DB match DATABASE_URL. Add a test for it in 1.1.i, and remove the TODO(1.1.i) header comment from .env.example when done.
 - Note (owner to be scheduled, not tied to a task yet): when APP_ENV=production, reject the placeholder password change-me at startup in get_settings(). Schedule it with the deployment steps (1.1.g / Phase 7) or a Settings refinement.
-- Owner 1.1.i and Phase 7: allowed Host header validation (currently any Host is accepted; decide with the proxy configuration).
+- Owner Phase 7: allowed Host header validation (currently any Host is accepted; decide with the proxy configuration). Not addressed by 1.1.i — that is app-level middleware, out of docker-compose.yml's scope.
 - Owner: to be scheduled — CORS and OPTIONS handling: decide with the widget and admin work (Phase 5 and 6); today OPTIONS returns 405.
 - TODO(2.1): `backend/app/worker.py`'s `run()` has no job logic yet; the job queue consumer is added in Step 2.1.
 - Owner 1.1.o: remove the exact dependency-set test in test_pyproject.py when the lockfile and CI audit exist.
 - TODO(1.1.m): CI must build the widgetplatform-backend image and run the 1.1.g smoke checks (a to f) as part of the pipeline.
-- TODO(1.1.i): Compose's worker and api services must use the same built image and the same health probe rule (GET), per 1.1.g's `/health` verification.
 - Owner 1.1.n: .dockerignore must exclude __pycache__, *.pyc, .pytest_cache, .ruff_cache, tests, .env, .git (a stray .pyc was found in the image during the 1.1.h review).
-- Owner 1.1.i: Compose should run this image with a read-only root filesystem (tmpfs for /tmp if the app needs one), cap_drop ALL, memory and pids limits, and user 10001.
 - Owner 1.1.o: image vulnerability and secret scanning (the built image itself, not just the dependency lockfile).
 - Owner CI or Phase 7: verify the image builds and runs on arm64, not just the amd64 host it was built on so far.
-- Owner Phase 7: shutdown behaviour of the API under load (this task only verified graceful shutdown at idle).
-- Owner 1.1.i: Compose uses the same pinned Postgres tag (`postgres:18.2-trixie`) and provides the `widgetplatform_test` database for tests.
+- Owner Phase 7: shutdown behaviour of the API under load (1.1.g verified graceful shutdown at idle; 1.1.i verified api/worker stop in under 10 seconds via `docker compose stop`, still at idle, not under load).
 - Owner 1.1.j: `make migrate` runs `alembic upgrade head` from `backend/`, and a make target starts the local test database and sets `TEST_DATABASE_URL`.
 - Owner 1.1.j: `make migrate` must run from `backend/` or pass `-c backend/alembic.ini` explicitly; document that alembic finds `alembic.ini` through the working directory (confirmed in the 1.1.h review: running alembic from the repo root fails with "No 'script_location' key found in configuration").
+- Owner 1.1.j: the Makefile passes `--env-file .env` and `-f deploy/docker-compose.yml` on every compose call (Compose does not find `.env` on its own — 1.1.i's `.env` lives at the repo root, not `deploy/`), and adds targets for the test database (up and down, using the `test` profile against `test-db`) and for running `migrate` in Docker (the `tools` profile).
 - Owner 1.1.m: CI has a Postgres service with the same tag and sets `TEST_DATABASE_URL` and `CI=true`, so the integration test fails rather than skips.
 - Owner 1.1.m: CI test of migrate mode inside the container: empty environment and unreachable host must fail without a traceback or password; CI sets `TEST_DATABASE_ALLOWED_HOSTS` to the Postgres service name.
+- Owner 1.1.m: CI runs `docker compose config --services` with `.env.example` and checks that the services named in `DATABASE_URL` and `QDRANT_URL` (`postgres` and `qdrant`) exist among them; CI's own Postgres service container uses the same pinned tag as `deploy/docker-compose.yml`.
 - Owner 1.2: set `target_metadata` and create the first migration (`TODO(1.2)` in `backend/alembic/env.py`).
 - Owner Phase 7 (deployment): use a separate migration database role with DDL rights and application roles with data rights only; two different `DATABASE_URL`s for `migrate` and `api`/`worker`.
+- Owner Phase 7: tune `mem_limit`/`pids_limit` for api/worker/migrate from the load tests (7.1); the 512m/200 figures in 1.1.i are unmeasured starting points. Also consider limits and read-only-root settings for postgres and qdrant themselves (left unhardened in 1.1.i as upstream images not audited for it).
+- Owner 1.3: enable Qdrant authentication (`QDRANT__SERVICE__API_KEY`, sent by the app as an `api-key` header) and add the key to `.env.example`, Compose and Settings, with a test that an unauthenticated request is rejected.
+- Owner Phase 7: replace plaintext secrets in the environment with Docker secrets or an external secrets manager, and document that anyone with `docker inspect` access sees the current secrets.
+- Owner the task that first opens a database connection in the API (1.2 or 1.4): add a readiness check that touches Postgres, and use it for the Compose healthcheck (today's api healthcheck only proves the process is alive).
+- Owner 2.1: add a real worker healthcheck once the job loop exists.
+- Owner 1.1.o: the lockfile task also reviews the pinned Qdrant and Postgres image tags for staleness.

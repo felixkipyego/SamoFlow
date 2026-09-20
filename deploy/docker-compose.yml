@@ -1,0 +1,195 @@
+# Task 1.1.i: postgres, qdrant, api, worker, plus migrate and test-db behind
+# profiles. Build context is ../backend (this file's own directory is
+# deploy/), producing widgetplatform-backend:dev for api/worker/migrate.
+#
+# Compose reads .env from THIS FILE'S OWN FOLDER (deploy/), not the repo
+# root and not the caller's working directory. This repo keeps .env (and
+# .env.example) at the repo root, so every command below must pass
+# --env-file explicitly -- never rely on Compose finding .env by itself:
+#   docker compose --env-file .env -f deploy/docker-compose.yml up -d
+#   docker compose --env-file .env -f deploy/docker-compose.yml run --rm migrate
+#   docker compose --env-file .env -f deploy/docker-compose.yml --profile test up -d test-db
+
+name: widgetplatform
+
+# Application configuration, passed explicitly (no env_file:) so a missing
+# variable fails Compose's own interpolation immediately with a clear
+# message, instead of the app starting and failing later. Used as-is (not
+# merged) for the environment: of api, worker and migrate below.
+x-app-env: &app-env
+  APP_ENV: ${APP_ENV:?APP_ENV must be set in .env}
+  DATABASE_URL: ${DATABASE_URL:?DATABASE_URL must be set in .env}
+  QDRANT_URL: ${QDRANT_URL:?QDRANT_URL must be set in .env}
+  API_HOST: ${API_HOST:?API_HOST must be set in .env}
+  API_PORT: ${API_PORT:?API_PORT must be set in .env}
+
+# Hardening applied to api, worker and migrate only (our own code running
+# the widgetplatform-backend image): read-only root filesystem with a tmpfs
+# /tmp, all Linux capabilities dropped, no-new-privileges, and memory/pid
+# limits. Not applied to postgres, qdrant or test-db, which are upstream
+# images we did not audit for read-only-rootfs compatibility.
+x-app-hardening: &app-hardening
+  read_only: true
+  tmpfs:
+    - /tmp:size=64m
+  cap_drop:
+    - ALL
+  security_opt:
+    - "no-new-privileges:true"
+  mem_limit: 512m
+  pids_limit: 200
+
+services:
+  postgres:
+    # Tag verified with `docker manifest inspect postgres:18.2-trixie`
+    # (returned a valid manifest list) on 2026-09-20; same tag CI and the
+    # Alembic integration test (1.1.h) already use.
+    image: postgres:18.2-trixie
+    # POSTGRES_USER/PASSWORD/DB are applied only when the data volume is
+    # first created; changing them later needs "down -v" (destroys data)
+    # or changing the role password inside Postgres directly.
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:?POSTGRES_USER must be set in .env}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set in .env}
+      POSTGRES_DB: ${POSTGRES_DB:?POSTGRES_DB must be set in .env}
+    volumes:
+      # postgres:18.2-trixie declares its VOLUME at /var/lib/postgresql (not
+      # the pre-18 .../data path) and sets PGDATA to a subdirectory of it
+      # (/var/lib/postgresql/18/docker) -- verified with
+      # `docker image inspect postgres:18.2-trixie --format
+      # '{{json .Config.Volumes}}'` and `--format '{{json .Config.Env}}'`.
+      - postgres-data:/var/lib/postgresql
+    healthcheck:
+      # $$ escapes Compose's own interpolation so the literal shell
+      # variables (set via environment: above) are read inside the
+      # container, not substituted by Compose from the host's .env.
+      test: ["CMD-SHELL", "pg_isready -U \"$$POSTGRES_USER\" -d \"$$POSTGRES_DB\""]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+    # No published ports: only other Compose services reach postgres, over
+    # the default network, by service name.
+
+  qdrant:
+    # Newest stable tag verified via the Docker Hub tags API (v1.19.1 is the
+    # highest vX.Y.Z tag as of 2026-09-20, i.e. not a dev/preview/branch
+    # tag) and then with `docker manifest inspect qdrant/qdrant:v1.19.1`
+    # (returned a valid manifest list).
+    image: qdrant/qdrant:v1.19.1
+    volumes:
+      - qdrant-data:/qdrant/storage
+    healthcheck:
+      # The image has neither curl nor wget (checked with `which` inside
+      # the image); it does have bash, so the check speaks raw HTTP to
+      # qdrant's own /healthz endpoint over bash's /dev/tcp. CMD (not
+      # CMD-SHELL) invokes bash directly: the image's /bin/sh is dash,
+      # which does not support /dev/tcp. Revisit if the image drops bash.
+      test:
+        [
+          "CMD",
+          "bash",
+          "-c",
+          "exec 3<>/dev/tcp/127.0.0.1/6333 && printf 'GET /healthz HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n' >&3 && head -1 <&3 | grep -q '200 OK'",
+        ]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+    # No published ports: only other Compose services reach qdrant, over
+    # the default network, by service name.
+
+  api:
+    build:
+      context: ../backend
+    image: widgetplatform-backend:dev
+    command: ["api"]
+    environment: *app-env
+    ports:
+      # Host side fixed at 8000, bound to loopback only: nothing outside
+      # this machine can reach the API directly (a reverse proxy is a later
+      # deployment task).
+      - "127.0.0.1:8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      qdrant:
+        condition: service_healthy
+    healthcheck:
+      # The image has no curl (Task 1.1.g); Python's stdlib urllib is
+      # already on PATH via the app's own venv, so no extra tool is needed.
+      # This only proves the process is alive, not that Postgres is
+      # reachable -- /health is liveness-only (Task 1.1.e).
+      test:
+        [
+          "CMD",
+          "python3",
+          "-c",
+          "import sys,urllib.request; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3).status == 200 else 1)",
+        ]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+    <<: *app-hardening
+
+  worker:
+    build:
+      context: ../backend
+    image: widgetplatform-backend:dev
+    command: ["worker"]
+    environment: *app-env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      qdrant:
+        condition: service_healthy
+    # No healthcheck: the worker (Task 1.1.f) has no job loop or probe
+    # target yet (TODO(2.1)); it only awaits a shutdown signal.
+    restart: unless-stopped
+    <<: *app-hardening
+
+  migrate:
+    build:
+      context: ../backend
+    image: widgetplatform-backend:dev
+    command: ["migrate"]
+    environment: *app-env
+    # Not part of `up`: this is a deploy step, run explicitly with
+    #   docker compose --env-file .env -f deploy/docker-compose.yml run --rm migrate
+    profiles: ["tools"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+    <<: *app-hardening
+
+  test-db:
+    # Same pinned image as postgres above; a separate, disposable instance
+    # for backend/tests' integration tests (Task 1.1.h), never used by
+    # api/worker/migrate.
+    image: postgres:18.2-trixie
+    profiles: ["test"]
+    environment:
+      # Test-only credentials, written literally (not from .env): this
+      # database is throwaway, localhost-only, and never holds real data.
+      POSTGRES_USER: widgetplatform
+      POSTGRES_PASSWORD: change-me
+      POSTGRES_DB: widgetplatform_test
+    ports:
+      - "127.0.0.1:55432:5432"
+    tmpfs:
+      # Same path as postgres's named volume above (the image's declared
+      # VOLUME) -- tmpfs instead of a named volume, so nothing persists
+      # across restarts.
+      - /var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U widgetplatform -d widgetplatform_test"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    restart: "no"
+
+volumes:
+  postgres-data:
+  qdrant-data:
