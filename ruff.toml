@@ -1,0 +1,2 @@
+# evals/ and backend/ share one rule set: inherit backend's settings instead of ruff's defaults.
+extend = "backend/pyproject.toml"

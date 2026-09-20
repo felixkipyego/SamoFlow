@@ -166,6 +166,8 @@ A production-ready, multi-tenant, embeddable AI widget platform: one website is 
 - 2026-09-20: Step 1.1.i — `.env.example` gained `POSTGRES_USER`/`POSTGRES_PASSWORD`/`POSTGRES_DB` (placeholders `widgetplatform`/`change-me`/`widgetplatform`, matching `DATABASE_URL`), each with a comment naming which container variable it must match; added to `test_env_example.py`'s `EXTRA_EXAMPLE_KEYS`. The `TODO(1.1.i)` header line is removed. New `backend/tests/test_env_consistency.py` cross-checks `DATABASE_URL`'s user/password/host/database against `POSTGRES_USER`/`POSTGRES_PASSWORD`/`"postgres"`/`POSTGRES_DB`, and `QDRANT_URL`'s host against `"qdrant"`; it reuses `test_env_example.py`'s parser (import, not duplication) and withholds the password from its failure message (proved by hand: a wrong `POSTGRES_PASSWORD` in a scratch edit fails without printing either value; a wrong host fails naming both non-secret values).
 - 2026-09-20: Step 1.1.i refinement (post-review) — api/worker/migrate's tmpfs `/tmp` now has an explicit `size=64m` (`tmpfs: - /tmp:size=64m`); verified inside a running container: `mount` shows `tmpfs on /tmp type tmpfs (rw,nosuid,nodev,noexec,relatime,size=65536k)`, i.e. the standard `noexec`/`nosuid`/`nodev` defaults are unchanged. Added short comments: the api healthcheck only proves the process is alive, not that Postgres is reachable; postgres's `POSTGRES_USER`/`PASSWORD`/`DB` apply only when the data volume is first created; the qdrant healthcheck's `bash`/`/dev/tcp` choice should be revisited if the image ever drops `bash`.
 - 2026-09-20: Duplication check and simplification review after 1.1.g/h/i: Compose anchors, Dockerfile base-image ARG, shared VALID_ENV, hint points to Compose, test classes flattened, hardening guard test added; A8, B2, B3 declined.
+- 2026-09-20: Step 1.1.k — `evals/run.py` is a stdlib-only, ~15-line placeholder (`main()` prints `"no evals defined yet"`, returns 0; `sys.exit(main())` under `__main__`) for the golden-set runner (task 3.7); it imports nothing from `backend/app`, reads no environment variable and touches no network. `backend/tests/test_evals_placeholder.py` locates it via `Path(__file__).resolve().parents[2] / "evals" / "run.py"` and runs it as a subprocess with `cwd` a temporary directory and `env` limited to `PATH`/`HOME` (same restricted-env pattern as 1.1.h's `test_alembic.py`), asserting exit 0, exact stdout, and empty stderr; its `subprocess.run` call needed the same `# noqa: S603` reasoning already used there (fixed, test-internal argument list, not user input). Verified by hand in an isolated scratch copy (real files untouched) that the test fails correctly two ways: `run.py` exiting 1 (`AssertionError: assert 1 == 0`) and `run.py` printing a changed message (`AssertionError` diff showing the added `!`).
+- 2026-09-20: Step 1.1.k ruff finding, fixed: root-level `ruff.toml` (one line, `extend = "backend/pyproject.toml"`, plus a comment) makes `evals/` inherit backend's `select = ["E","F","I","UP","B","S"]` and `line-length = 100` instead of ruff 0.16.8's own defaults (line-length 88; a broader prefix set that still excludes some individual codes ruff treats as non-default even within an otherwise-enabled category — e.g. S101/S105 are not flagged bare but are flagged once `S` is explicitly selected, as backend does). Verified: `ruff check --show-settings` now reports an identical enabled-rule-code list and `line_length = 100` for `evals/run.py` and a `backend/` file; `ruff check backend evals` (repo root) and `cd backend && ruff check .` both pass; the `tests/*` → S101 per-file-ignore still resolves only against `backend/tests/*` (its `absolute_matcher` is anchored under `backend/pyproject.toml`'s own directory) regardless of which directory ruff is invoked from. Effectiveness proof (scratch file added under `evals/`, then removed; real `run.py`/`README.md` untouched): a file with `PASSWORD = "hunter2"` and a bare `assert` passed cleanly under ruff's bare defaults in an isolated directory with no config, but is flagged (S105, S101) once placed under `evals/` in this repo with the fix applied.
 
 ### Estimates to measure
 
@@ -189,9 +191,9 @@ A production-ready, multi-tenant, embeddable AI widget platform: one website is 
 
 ## 7. Current task and next task
 
-Current: Step 1.1 Repo skeleton and Compose, subtask 1.1.k evals placeholder.
-Next: Step 1.1.j Makefile.
-Do not modify (completed tasks): 1.1.a, 1.1.b, 1.1.c, 1.1.d, 1.1.e, 1.1.f, 1.1.g, 1.1.h, 1.1.i.
+Current: Step 1.1 Repo skeleton and Compose, subtask 1.1.j Makefile.
+Next: Step 1.1.l widget/ and dashboard/ skeleton folders.
+Do not modify (completed tasks): 1.1.a, 1.1.b, 1.1.c, 1.1.d, 1.1.e, 1.1.f, 1.1.g, 1.1.h, 1.1.i, 1.1.k.
 
 ### Step 1.1 task list (approved)
 
@@ -206,7 +208,7 @@ Do not modify (completed tasks): 1.1.a, 1.1.b, 1.1.c, 1.1.d, 1.1.e, 1.1.f, 1.1.g
 | 1.1.g | Dockerfile: pinned base image (no `latest`), non-root user, api/worker entrypoints, uvicorn started with `--factory` | Done |
 | 1.1.h | Alembic skeleton (no versions yet); upgrade-head integration test reads `TEST_DATABASE_URL` (skip locally if unset, fail in CI) | Done |
 | 1.1.i | docker-compose.yml: postgres, qdrant, api, worker; only the api port published, bound to 127.0.0.1; postgres/qdrant ports not published; Qdrant healthcheck verified to work inside the pinned image | Done |
-| 1.1.k | evals placeholder (moved before the Makefile, which calls it) | Not started |
+| 1.1.k | evals placeholder (moved before the Makefile, which calls it) | Done |
 | 1.1.j | Makefile: up, test, lint, migrate, evals | Not started |
 | 1.1.l | widget/ and dashboard/ skeleton folders | Not started |
 | 1.1.m | CI workflow: lint + test, with a Postgres service container for the Alembic integration test; Qdrant not needed yet | Not started |
@@ -215,7 +217,7 @@ Do not modify (completed tasks): 1.1.a, 1.1.b, 1.1.c, 1.1.d, 1.1.e, 1.1.f, 1.1.g
 
 ## 8. Task counter since the last duplication check
 
-n = 0 (run the duplication check at 3; never exceed 4)
+n = 1 (run the duplication check at 3; never exceed 4)
 
 ## 9. Open markers
 
@@ -243,3 +245,4 @@ n = 0 (run the duplication check at 3; never exceed 4)
 - Owner the task that first opens a database connection in the API (1.2 or 1.4): add a readiness check that touches Postgres, and use it for the Compose healthcheck (today's api healthcheck only proves the process is alive).
 - Owner 2.1: add a real worker healthcheck once the job loop exists.
 - Owner 1.1.o: the lockfile task also reviews the pinned Qdrant and Postgres image tags for staleness.
+- Owner 1.1.j: `make evals` runs `python evals/run.py` from the repo root; `make lint` runs `ruff check backend evals` from the repo root.
