@@ -16,6 +16,7 @@ A production-ready, multi-tenant, embeddable AI widget platform: one website is 
 8. Ask before adding any dependency (name, purpose, alternatives considered).
 9. Run a duplication check after every 3rd task, and never go past 4 tasks without one.
 10. Clean code means resolved markers: verify then remove ASSUMPTION, resolve then remove UNCERTAIN, finish then remove TODO. A phase is not accepted while any ASSUMPTION or UNCERTAIN marker remains, and every remaining TODO must be listed under Open markers with the task that owns it.
+11. Prefer the simplest solution that satisfies the spec and follows widely adopted industry practice and library defaults. Do not add abstractions, options, checks or tests the task does not need. When the choice is between a standard default and a custom rule, use the default unless the spec says otherwise. Design so things stay easy to change. If you think something is over-engineered or too rigid, say so before building it.
 
 ## 3. Engineering rules and commands
 
@@ -140,6 +141,7 @@ A production-ready, multi-tenant, embeddable AI widget platform: one website is 
 - 2026-09-19: Guard test enforces that only get_settings() constructs settings, .errors() is never called, and database_url_str() has an explicit allow-list of callers.
 - 2026-09-20: Product name: SamoFlow (renamed from VileSite on 2026-09-20; brand name only; code, packages and images keep the neutral name widgetplatform until a rename task is scheduled).
 - 2026-09-20: Step 1.1.d — `.env.example` declares exactly the five variables Settings requires (no more, no less); required names are derived from `Settings.model_fields` in the test plus an `EXTRA_EXAMPLE_KEYS` constant (empty tuple today) for any future deliberate addition. `API_HOST=0.0.0.0` is the container-listen placeholder; `DATABASE_URL`'s password placeholder is exactly `change-me`, asserted by a dedicated test so a real secret pasted over it would be caught.
+- 2026-09-20: Step 1.1.e — `create_app(settings: Settings | None = None)` in `backend/app/main.py` builds the FastAPI app; a `None` settings argument goes through `get_settings()` only (never `Settings()` directly, enforced by the existing config guard test since it scans every file under `backend/app`). Nothing at module level reads the environment. Title is the neutral `"widgetplatform API"`; version comes from `importlib.metadata.version("widgetplatform")` (works because Task 1.1.b's editable install makes the package resolvable). `/health` (backend/app/health.py) is liveness-only and touches neither Postgres nor Qdrant. Docs/redoc/openapi are disabled only when `app_env == "production"`. No CORS, middleware, database or Qdrant code, and no module-level `app` variable (Compose/Docker will run `uvicorn app.main:create_app --factory` from 1.1.g/1.1.i onward).
 
 ### Estimates to measure
 
@@ -163,9 +165,9 @@ A production-ready, multi-tenant, embeddable AI widget platform: one website is 
 
 ## 7. Current task and next task
 
-Current: Step 1.1 Repo skeleton and Compose, subtask 1.1.e FastAPI app factory (`create_app`) + GET /health.
-Next: Step 1.1.f Worker entrypoint stub.
-Do not modify (completed tasks): 1.1.a, 1.1.b, 1.1.c, 1.1.d.
+Current: Step 1.1 Repo skeleton and Compose, subtask 1.1.f Worker entrypoint stub.
+Next: Step 1.1.g Dockerfile.
+Do not modify (completed tasks): 1.1.a, 1.1.b, 1.1.c, 1.1.d, 1.1.e.
 
 ### Step 1.1 task list (approved)
 
@@ -175,7 +177,7 @@ Do not modify (completed tasks): 1.1.a, 1.1.b, 1.1.c, 1.1.d.
 | 1.1.b | backend/app package skeleton (§21 subpackages: auth, tenancy, plans, chat, agent, retrieval, ingest, handoff, notifications, mcp, admin, telemetry); also owns the `pip install -e .` check, deferred from 1.1.a because `backend/app/` doesn't exist until this task creates it | Done |
 | 1.1.c | Settings module: env-var configuration, validated at startup | Done |
 | 1.1.d | .env.example matching Settings | Done |
-| 1.1.e | FastAPI app factory (`create_app`) + GET /health | Not started |
+| 1.1.e | FastAPI app factory (`create_app`) + GET /health | Done |
 | 1.1.f | Worker entrypoint stub | Not started |
 | 1.1.g | Dockerfile: pinned base image (no `latest`), non-root user, api/worker entrypoints, uvicorn started with `--factory`. Open item to decide when this task is broken down: whether the production image installs psycopg from source against the system libpq instead of the `psycopg[binary]` wheel, which bundles its own libpq/OpenSSL (psycopg's docs advise the source build for production) | Not started |
 | 1.1.h | Alembic skeleton (no versions yet); upgrade-head integration test reads `TEST_DATABASE_URL` (skip locally if unset, fail in CI) | Not started |
@@ -189,10 +191,13 @@ Do not modify (completed tasks): 1.1.a, 1.1.b, 1.1.c, 1.1.d.
 
 ## 8. Task counter since the last duplication check
 
-n = 1 (run the duplication check at 3; never exceed 4)
+n = 2 (run the duplication check at 3; never exceed 4)
 
 ## 9. Open markers
 
 - TODO(1.1.i): .env.example notes that Compose will also need POSTGRES_USER, POSTGRES_PASSWORD and POSTGRES_DB, which must match DATABASE_URL. Owned by task 1.1.i.
 - TODO(1.1.i): cross-check .env.example against docker-compose.yml — service host names (postgres, qdrant), ports, and that POSTGRES_USER, POSTGRES_PASSWORD and POSTGRES_DB match DATABASE_URL. Add a test for it in 1.1.i, and remove the TODO(1.1.i) header comment from .env.example when done.
 - Note (owner to be scheduled, not tied to a task yet): when APP_ENV=production, reject the placeholder password change-me at startup in get_settings(). Schedule it with the deployment steps (1.1.g / Phase 7) or a Settings refinement.
+- Owner 1.1.i and Phase 7: allowed Host header validation (currently any Host is accepted; decide with the proxy configuration).
+- Owner 1.1.g: suppress the "server: uvicorn" response header with uvicorn's flag in the Dockerfile command, and make sure the health probe in Compose uses GET.
+- Owner: to be scheduled — CORS and OPTIONS handling: decide with the widget and admin work (Phase 5 and 6); today OPTIONS returns 405.
