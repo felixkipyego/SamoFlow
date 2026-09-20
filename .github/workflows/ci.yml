@@ -1,0 +1,86 @@
+# Task 1.1.m: CI for a public repository, so it must be safe against
+# pull requests from forks. The trigger below runs with the fork's own code
+# but a read-only GITHUB_TOKEN and no repository secrets -- a malicious
+# fork PR cannot exfiltrate a secret or push changes back to this repo.
+# Never switch the trigger to the target-repo-context variant (it would run
+# with this repo's token against untrusted fork code) and never reference a
+# repository secret in this file -- backend/tests/test_ci_guard.py enforces
+# both.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request: {}
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: backend/pyproject.toml
+
+      - name: Install backend package (with dev dependencies)
+        run: python -m pip install -e "./backend[dev]"
+
+      - name: Lint
+        run: make lint
+
+      # make test-all (Task 1.1.j) starts deploy/docker-compose.yml's
+      # test-db profile -- the same pinned Postgres tag used by local
+      # development -- runs the suite against it, and always tears it
+      # down. This is the single source of truth for the CI test database:
+      # there is no separate GitHub Actions Postgres service container.
+      # GitHub Actions runners set CI=true by default, which is what makes
+      # backend/tests/conftest.py's require_test_database() fail the
+      # Alembic integration test rather than skip it when
+      # TEST_DATABASE_URL is unexpectedly missing. TEST_DATABASE_ALLOWED_HOSTS
+      # is not needed: test-db is published on 127.0.0.1, already allowed
+      # by default.
+      - name: Test (lint already run above; full suite against test-db)
+        run: make test-all
+
+  image:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Create .env from .env.example
+        run: cp .env.example .env
+
+      - name: Verify Compose services
+        run: |
+          services=$(docker compose --env-file .env -f deploy/docker-compose.yml config --services)
+          for expected in postgres qdrant api worker; do
+            echo "$services" | grep -qx "$expected" || {
+              echo "Compose config is missing expected service: $expected" >&2
+              exit 1
+            }
+          done
+
+      - name: Build image
+        run: docker build -t widgetplatform-backend:ci backend
+
+      - name: Smoke test image
+        run: sh deploy/smoke-image.sh widgetplatform-backend:ci
