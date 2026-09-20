@@ -16,7 +16,7 @@ A production-ready, multi-tenant, embeddable AI widget platform: one website is 
 8. Ask before adding any dependency (name, purpose, alternatives considered).
 9. Run a duplication check after every 3rd task, and never go past 4 tasks without one.
 10. Clean code means resolved markers: verify then remove ASSUMPTION, resolve then remove UNCERTAIN, finish then remove TODO. A phase is not accepted while any ASSUMPTION or UNCERTAIN marker remains, and every remaining TODO must be listed under Open markers with the task that owns it.
-11. Prefer the simplest solution that satisfies the spec and follows widely adopted industry practice and library defaults. Do not add abstractions, options, checks or tests the task does not need. When the choice is between a standard default and a custom rule, use the default unless the spec says otherwise. Design so things stay easy to change. If you think something is over-engineered or too rigid, say so before building it.
+11. Follow widely adopted industry practice and library defaults, including standard security measures: validate input at trust boundaries, use least privilege and secure defaults, keep secrets and sensitive data out of code, logs and error messages, keep dependencies current, and use well-known framework or library mechanisms instead of custom security schemes. Do not add abstractions, options, checks or tests the task does not need. When the choice is between a standard default and a custom rule, use the default unless the spec says otherwise. Security requirements in the spec and in the engineering rules are never optional and always win over simplicity. If you are unsure whether something is needed for security, or you think something is over-engineered, too rigid or insecure, say so and ask me before building it.
 
 ## 3. Engineering rules and commands
 
@@ -142,6 +142,7 @@ A production-ready, multi-tenant, embeddable AI widget platform: one website is 
 - 2026-09-20: Product name: SamoFlow (renamed from VileSite on 2026-09-20; brand name only; code, packages and images keep the neutral name widgetplatform until a rename task is scheduled).
 - 2026-09-20: Step 1.1.d — `.env.example` declares exactly the five variables Settings requires (no more, no less); required names are derived from `Settings.model_fields` in the test plus an `EXTRA_EXAMPLE_KEYS` constant (empty tuple today) for any future deliberate addition. `API_HOST=0.0.0.0` is the container-listen placeholder; `DATABASE_URL`'s password placeholder is exactly `change-me`, asserted by a dedicated test so a real secret pasted over it would be caught.
 - 2026-09-20: Step 1.1.e — `create_app(settings: Settings | None = None)` in `backend/app/main.py` builds the FastAPI app; a `None` settings argument goes through `get_settings()` only (never `Settings()` directly, enforced by the existing config guard test since it scans every file under `backend/app`). Nothing at module level reads the environment. Title is the neutral `"widgetplatform API"`; version comes from `importlib.metadata.version("widgetplatform")` (works because Task 1.1.b's editable install makes the package resolvable). `/health` (backend/app/health.py) is liveness-only and touches neither Postgres nor Qdrant. Docs/redoc/openapi are disabled only when `app_env == "production"`. No CORS, middleware, database or Qdrant code, and no module-level `app` variable (Compose/Docker will run `uvicorn app.main:create_app --factory` from 1.1.g/1.1.i onward).
+- 2026-09-20: Step 1.1.f — `backend/app/worker.py`'s `run(stop)` calls `get_settings()` only, logs one INFO line containing `app_env` only (never database_url/qdrant_url), then awaits the stop event; `main()` configures logging, registers SIGTERM/SIGINT handlers via `loop.add_signal_handler` that set the stop event, and exits 0 on clean shutdown or non-zero with no traceback on `SettingsError`. No job logic, no polling loop, no dependency on Postgres/Qdrant. Verified by hand: with the signal-handler registration removed, `SIGTERM`'s default OS disposition still terminates the (unhandled) process quickly rather than hanging it — the process exits with code -15 (terminated by signal), not 0, so the test still fails fast on `assert exit_code == 0` rather than by hitting the 10-second `wait_for` timeout.
 
 ### Estimates to measure
 
@@ -165,9 +166,9 @@ A production-ready, multi-tenant, embeddable AI widget platform: one website is 
 
 ## 7. Current task and next task
 
-Current: Step 1.1 Repo skeleton and Compose, subtask 1.1.f Worker entrypoint stub.
-Next: Step 1.1.g Dockerfile.
-Do not modify (completed tasks): 1.1.a, 1.1.b, 1.1.c, 1.1.d, 1.1.e.
+Current: Step 1.1 Repo skeleton and Compose, subtask 1.1.g Dockerfile.
+Next: Step 1.1.h Alembic skeleton.
+Do not modify (completed tasks): 1.1.a, 1.1.b, 1.1.c, 1.1.d, 1.1.e, 1.1.f.
 
 ### Step 1.1 task list (approved)
 
@@ -178,7 +179,7 @@ Do not modify (completed tasks): 1.1.a, 1.1.b, 1.1.c, 1.1.d, 1.1.e.
 | 1.1.c | Settings module: env-var configuration, validated at startup | Done |
 | 1.1.d | .env.example matching Settings | Done |
 | 1.1.e | FastAPI app factory (`create_app`) + GET /health | Done |
-| 1.1.f | Worker entrypoint stub | Not started |
+| 1.1.f | Worker entrypoint stub | Done |
 | 1.1.g | Dockerfile: pinned base image (no `latest`), non-root user, api/worker entrypoints, uvicorn started with `--factory`. Open item to decide when this task is broken down: whether the production image installs psycopg from source against the system libpq instead of the `psycopg[binary]` wheel, which bundles its own libpq/OpenSSL (psycopg's docs advise the source build for production) | Not started |
 | 1.1.h | Alembic skeleton (no versions yet); upgrade-head integration test reads `TEST_DATABASE_URL` (skip locally if unset, fail in CI) | Not started |
 | 1.1.i | docker-compose.yml: postgres, qdrant, api, worker; only the api port published, bound to 127.0.0.1; postgres/qdrant ports not published; Qdrant healthcheck verified to work inside the pinned image | Not started |
@@ -191,7 +192,7 @@ Do not modify (completed tasks): 1.1.a, 1.1.b, 1.1.c, 1.1.d, 1.1.e.
 
 ## 8. Task counter since the last duplication check
 
-n = 2 (run the duplication check at 3; never exceed 4)
+n = 3 (run the duplication check at 3; never exceed 4)
 
 ## 9. Open markers
 
@@ -201,3 +202,5 @@ n = 2 (run the duplication check at 3; never exceed 4)
 - Owner 1.1.i and Phase 7: allowed Host header validation (currently any Host is accepted; decide with the proxy configuration).
 - Owner 1.1.g: suppress the "server: uvicorn" response header with uvicorn's flag in the Dockerfile command, and make sure the health probe in Compose uses GET.
 - Owner: to be scheduled — CORS and OPTIONS handling: decide with the widget and admin work (Phase 5 and 6); today OPTIONS returns 405.
+- Owner 1.1.g: the container entrypoint must exec the command (`exec python -m app.worker`, `exec uvicorn ...`) so the process is PID 1 and receives SIGTERM directly; verify with `docker compose stop` that the worker exits in under 10 seconds.
+- TODO(2.1): `backend/app/worker.py`'s `run()` has no job logic yet; the job queue consumer is added in Step 2.1.
