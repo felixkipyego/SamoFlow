@@ -42,7 +42,7 @@ _HARMLESS_ENV = {
 }
 
 
-def _subprocess_env(database_url):
+def _alembic_subprocess_env(database_url):
     # Explicit and minimal: only the five Settings variables (DATABASE_URL
     # set to the test URL, harmless values for the rest) plus PATH and HOME
     # inherited from the parent. Nothing else from the parent's environment
@@ -66,7 +66,7 @@ def _run_alembic(*args, engine):
     return subprocess.run(  # noqa: S603 (args are fixed test-internal strings, not user input)
         [sys.executable, "-m", "alembic", *args],
         cwd=BACKEND_DIR,
-        env=_subprocess_env(database_url),
+        env=_alembic_subprocess_env(database_url),
         capture_output=True,
         text=True,
         timeout=30,
@@ -111,91 +111,103 @@ def test_upgrade_head_with_empty_environment_exits_cleanly_without_traceback():
         assert field in result.stderr
 
 
-class TestRequireTestDatabase:
-    def test_unset_and_not_ci_skips_with_docker_hint(self, monkeypatch):
-        monkeypatch.delenv("TEST_DATABASE_URL", raising=False)
-        monkeypatch.delenv("CI", raising=False)
-        with pytest.raises(pytest.skip.Exception) as exc_info:
-            require_test_database()
-        assert "docker run" in str(exc_info.value)
+def test_require_test_database_unset_and_not_ci_skips_with_docker_hint(monkeypatch):
+    monkeypatch.delenv("TEST_DATABASE_URL", raising=False)
+    monkeypatch.delenv("CI", raising=False)
+    with pytest.raises(pytest.skip.Exception) as exc_info:
+        require_test_database()
+    assert "docker compose" in str(exc_info.value)
 
-    def test_unset_and_ci_true_fails(self, monkeypatch):
-        monkeypatch.delenv("TEST_DATABASE_URL", raising=False)
-        monkeypatch.setenv("CI", "true")
-        with pytest.raises(pytest.fail.Exception):
-            require_test_database()
 
-    @pytest.mark.parametrize(
-        "bad_url",
-        [
-            "postgresql+psycopg://user:pw@localhost:5432/widgetplatform",  # wrong suffix
-            "postgresql://user:pw@localhost:5432/widgetplatform_test",  # wrong scheme
-            "mysql://user:pw@localhost:3306/widgetplatform_test",  # wrong scheme
-        ],
+def test_require_test_database_unset_and_ci_true_fails(monkeypatch):
+    monkeypatch.delenv("TEST_DATABASE_URL", raising=False)
+    monkeypatch.setenv("CI", "true")
+    with pytest.raises(pytest.fail.Exception):
+        require_test_database()
+
+
+@pytest.mark.parametrize(
+    "bad_url",
+    [
+        "postgresql+psycopg://user:pw@localhost:5432/widgetplatform",  # wrong suffix
+        "postgresql://user:pw@localhost:5432/widgetplatform_test",  # wrong scheme
+        "mysql://user:pw@localhost:3306/widgetplatform_test",  # wrong scheme
+    ],
+)
+def test_require_test_database_set_but_unsafe_fails_never_skips(monkeypatch, bad_url):
+    monkeypatch.delenv("TEST_DATABASE_ALLOWED_HOSTS", raising=False)
+    monkeypatch.setenv("TEST_DATABASE_URL", bad_url)
+    monkeypatch.delenv("CI", raising=False)
+    with pytest.raises(pytest.fail.Exception):
+        require_test_database()
+
+
+def test_require_test_database_set_and_safe_returns_the_url(monkeypatch):
+    monkeypatch.delenv("TEST_DATABASE_ALLOWED_HOSTS", raising=False)
+    good_url = "postgresql+psycopg://user:pw@localhost:5432/widgetplatform_test"
+    monkeypatch.setenv("TEST_DATABASE_URL", good_url)
+    assert require_test_database() == good_url
+
+
+def test_require_test_database_127_0_0_1_host_passes(monkeypatch):
+    monkeypatch.delenv("TEST_DATABASE_ALLOWED_HOSTS", raising=False)
+    good_url = "postgresql+psycopg://user:pw@127.0.0.1:5432/widgetplatform_test"
+    monkeypatch.setenv("TEST_DATABASE_URL", good_url)
+    assert require_test_database() == good_url
+
+
+def test_require_test_database_remote_host_fails_even_with_a_correctly_named_database(monkeypatch):
+    # The earlier review's example: a "_test"-named database on a host
+    # that is neither localhost nor explicitly allowed must still fail.
+    monkeypatch.delenv("TEST_DATABASE_ALLOWED_HOSTS", raising=False)
+    monkeypatch.setenv(
+        "TEST_DATABASE_URL",
+        "postgresql+psycopg://prod_user:prod_pw@prod-db.internal.example.com:5432/legacy_customer_test",
     )
-    def test_set_but_unsafe_fails_never_skips(self, monkeypatch, bad_url):
-        monkeypatch.delenv("TEST_DATABASE_ALLOWED_HOSTS", raising=False)
-        monkeypatch.setenv("TEST_DATABASE_URL", bad_url)
-        monkeypatch.delenv("CI", raising=False)
-        with pytest.raises(pytest.fail.Exception):
-            require_test_database()
-
-    def test_set_and_safe_returns_the_url(self, monkeypatch):
-        monkeypatch.delenv("TEST_DATABASE_ALLOWED_HOSTS", raising=False)
-        good_url = "postgresql+psycopg://user:pw@localhost:5432/widgetplatform_test"
-        monkeypatch.setenv("TEST_DATABASE_URL", good_url)
-        assert require_test_database() == good_url
-
-    def test_127_0_0_1_host_passes(self, monkeypatch):
-        monkeypatch.delenv("TEST_DATABASE_ALLOWED_HOSTS", raising=False)
-        good_url = "postgresql+psycopg://user:pw@127.0.0.1:5432/widgetplatform_test"
-        monkeypatch.setenv("TEST_DATABASE_URL", good_url)
-        assert require_test_database() == good_url
-
-    def test_remote_host_fails_even_with_a_correctly_named_database(self, monkeypatch):
-        # The earlier review's example: a "_test"-named database on a host
-        # that is neither localhost nor explicitly allowed must still fail.
-        monkeypatch.delenv("TEST_DATABASE_ALLOWED_HOSTS", raising=False)
-        monkeypatch.setenv(
-            "TEST_DATABASE_URL",
-            "postgresql+psycopg://prod_user:prod_pw@prod-db.internal.example.com:5432/legacy_customer_test",
-        )
-        with pytest.raises(pytest.fail.Exception) as exc_info:
-            require_test_database()
-        assert "prod_pw" not in str(exc_info.value)
-
-    def test_host_listed_in_allowed_hosts_env_var_passes(self, monkeypatch):
-        monkeypatch.setenv("TEST_DATABASE_ALLOWED_HOSTS", "ci-postgres, other-host")
-        good_url = "postgresql+psycopg://user:pw@ci-postgres:5432/widgetplatform_test"
-        monkeypatch.setenv("TEST_DATABASE_URL", good_url)
-        assert require_test_database() == good_url
-
-    def test_host_not_in_allowed_hosts_env_var_still_fails(self, monkeypatch):
-        monkeypatch.setenv("TEST_DATABASE_ALLOWED_HOSTS", "ci-postgres")
-        monkeypatch.setenv(
-            "TEST_DATABASE_URL",
-            "postgresql+psycopg://user:pw@some-other-host:5432/widgetplatform_test",
-        )
-        with pytest.raises(pytest.fail.Exception):
-            require_test_database()
+    with pytest.raises(pytest.fail.Exception) as exc_info:
+        require_test_database()
+    assert "prod_pw" not in str(exc_info.value)
 
 
-class TestSubprocessEnv:
-    def test_stray_libpq_variables_never_reach_the_subprocess_env(self, monkeypatch):
-        monkeypatch.setenv("PGPASSWORD", "should-not-be-inherited")
-        monkeypatch.setenv("PGHOST", "should-not-be-inherited")
-        monkeypatch.setenv("PGUSER", "should-not-be-inherited")
-        env = _subprocess_env("postgresql+psycopg://user:pw@localhost:5432/widgetplatform_test")
-        assert "PGPASSWORD" not in env
-        assert "PGHOST" not in env
-        assert "PGUSER" not in env
+def test_require_test_database_host_listed_in_allowed_hosts_env_var_passes(monkeypatch):
+    monkeypatch.setenv("TEST_DATABASE_ALLOWED_HOSTS", "ci-postgres, other-host")
+    good_url = "postgresql+psycopg://user:pw@ci-postgres:5432/widgetplatform_test"
+    monkeypatch.setenv("TEST_DATABASE_URL", good_url)
+    assert require_test_database() == good_url
 
-    def test_env_has_exactly_the_five_settings_variables_plus_path_and_home(self, monkeypatch):
-        monkeypatch.setenv("SOME_OTHER_STRAY_VAR", "should-not-be-inherited")
-        env = _subprocess_env("postgresql+psycopg://user:pw@localhost:5432/widgetplatform_test")
-        expected_keys = {"APP_ENV", "DATABASE_URL", "QDRANT_URL", "API_HOST", "API_PORT"}
-        expected_keys |= {name for name in ("PATH", "HOME") if name in os.environ}
-        assert set(env) == expected_keys
+
+def test_require_test_database_host_not_in_allowed_hosts_env_var_still_fails(monkeypatch):
+    monkeypatch.setenv("TEST_DATABASE_ALLOWED_HOSTS", "ci-postgres")
+    monkeypatch.setenv(
+        "TEST_DATABASE_URL",
+        "postgresql+psycopg://user:pw@some-other-host:5432/widgetplatform_test",
+    )
+    with pytest.raises(pytest.fail.Exception):
+        require_test_database()
+
+
+def test_alembic_subprocess_env_excludes_stray_libpq_variables(monkeypatch):
+    monkeypatch.setenv("PGPASSWORD", "should-not-be-inherited")
+    monkeypatch.setenv("PGHOST", "should-not-be-inherited")
+    monkeypatch.setenv("PGUSER", "should-not-be-inherited")
+    env = _alembic_subprocess_env(
+        "postgresql+psycopg://user:pw@localhost:5432/widgetplatform_test"
+    )
+    assert "PGPASSWORD" not in env
+    assert "PGHOST" not in env
+    assert "PGUSER" not in env
+
+
+def test_alembic_subprocess_env_has_exactly_the_five_settings_variables_plus_path_and_home(
+    monkeypatch,
+):
+    monkeypatch.setenv("SOME_OTHER_STRAY_VAR", "should-not-be-inherited")
+    env = _alembic_subprocess_env(
+        "postgresql+psycopg://user:pw@localhost:5432/widgetplatform_test"
+    )
+    expected_keys = {"APP_ENV", "DATABASE_URL", "QDRANT_URL", "API_HOST", "API_PORT"}
+    expected_keys |= {name for name in ("PATH", "HOME") if name in os.environ}
+    assert set(env) == expected_keys
 
 
 def _reset_public_schema(engine):

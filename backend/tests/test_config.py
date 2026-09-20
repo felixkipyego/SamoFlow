@@ -4,15 +4,7 @@ import pytest
 from pydantic import ValidationError
 
 from app.config import Settings, SettingsError, get_settings
-from tests.conftest import REQUIRED_VARS, TEST_PASSWORD, fresh_import, set_valid_env
-
-VALID_ENV = {
-    "APP_ENV": "development",
-    "DATABASE_URL": "postgresql+psycopg://user:pw@localhost:5432/widgetplatform",
-    "QDRANT_URL": "http://localhost:6333",
-    "API_HOST": "127.0.0.1",
-    "API_PORT": "8000",
-}
+from tests.conftest import REQUIRED_VARS, TEST_PASSWORD, VALID_ENV, fresh_import, set_valid_env
 
 
 def test_valid_environment_loads_with_correct_types_and_values(monkeypatch):

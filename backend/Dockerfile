@@ -12,8 +12,14 @@
 # into a venv; the final stage is the same pinned base image with only the
 # built venv and the entrypoint copied in, so pip and the build toolchain
 # never reach the runtime image.
+#
+# One ARG for both FROM lines (duplication check after 1.1.g/h/i): an ARG
+# declared before the first FROM is visible to that first FROM only: the
+# second stage must re-declare it (empty, no default) to use the same
+# value -- otherwise it would silently fall back to being unset there.
+ARG PYTHON_IMAGE=python:3.12.14-slim-trixie
 
-FROM python:3.12.14-slim-trixie AS builder
+FROM ${PYTHON_IMAGE} AS builder
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1
@@ -29,7 +35,8 @@ RUN python -m venv /venv \
     && /venv/bin/pip uninstall --yes pip
 
 
-FROM python:3.12.14-slim-trixie
+ARG PYTHON_IMAGE
+FROM ${PYTHON_IMAGE}
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \

@@ -39,12 +39,31 @@ x-app-hardening: &app-hardening
   mem_limit: 512m
   pids_limit: 200
 
+# Same build, same image, for api, worker and migrate (duplication check
+# after 1.1.g/h/i): one context, one tag, merged into each service below.
+x-app-build: &app-build
+  build:
+    context: ../backend
+  image: widgetplatform-backend:dev
+
+# Shared by every healthcheck below; each service still supplies its own
+# test: and merges this in for the timing (duplication check after 1.1.i).
+x-healthcheck-timing: &healthcheck-timing
+  interval: 5s
+  timeout: 5s
+  retries: 5
+
+# postgres and test-db must always run the same Postgres version (test-db
+# exists to mirror postgres for backend/tests); one anchor keeps that true
+# by construction instead of by two people remembering to update both.
+x-postgres-image: &postgres-image postgres:18.2-trixie
+
 services:
   postgres:
     # Tag verified with `docker manifest inspect postgres:18.2-trixie`
     # (returned a valid manifest list) on 2026-09-20; same tag CI and the
     # Alembic integration test (1.1.h) already use.
-    image: postgres:18.2-trixie
+    image: *postgres-image
     # POSTGRES_USER/PASSWORD/DB are applied only when the data volume is
     # first created; changing them later needs "down -v" (destroys data)
     # or changing the role password inside Postgres directly.
@@ -64,9 +83,7 @@ services:
       # variables (set via environment: above) are read inside the
       # container, not substituted by Compose from the host's .env.
       test: ["CMD-SHELL", "pg_isready -U \"$$POSTGRES_USER\" -d \"$$POSTGRES_DB\""]
-      interval: 5s
-      timeout: 5s
-      retries: 5
+      <<: *healthcheck-timing
     restart: unless-stopped
     # No published ports: only other Compose services reach postgres, over
     # the default network, by service name.
@@ -92,17 +109,13 @@ services:
           "-c",
           "exec 3<>/dev/tcp/127.0.0.1/6333 && printf 'GET /healthz HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n' >&3 && head -1 <&3 | grep -q '200 OK'",
         ]
-      interval: 5s
-      timeout: 5s
-      retries: 5
+      <<: *healthcheck-timing
     restart: unless-stopped
     # No published ports: only other Compose services reach qdrant, over
     # the default network, by service name.
 
   api:
-    build:
-      context: ../backend
-    image: widgetplatform-backend:dev
+    <<: [*app-build, *app-hardening]
     command: ["api"]
     environment: *app-env
     ports:
@@ -127,16 +140,11 @@ services:
           "-c",
           "import sys,urllib.request; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3).status == 200 else 1)",
         ]
-      interval: 5s
-      timeout: 5s
-      retries: 5
+      <<: *healthcheck-timing
     restart: unless-stopped
-    <<: *app-hardening
 
   worker:
-    build:
-      context: ../backend
-    image: widgetplatform-backend:dev
+    <<: [*app-build, *app-hardening]
     command: ["worker"]
     environment: *app-env
     depends_on:
@@ -147,12 +155,9 @@ services:
     # No healthcheck: the worker (Task 1.1.f) has no job loop or probe
     # target yet (TODO(2.1)); it only awaits a shutdown signal.
     restart: unless-stopped
-    <<: *app-hardening
 
   migrate:
-    build:
-      context: ../backend
-    image: widgetplatform-backend:dev
+    <<: [*app-build, *app-hardening]
     command: ["migrate"]
     environment: *app-env
     # Not part of `up`: this is a deploy step, run explicitly with
@@ -162,13 +167,12 @@ services:
       postgres:
         condition: service_healthy
     restart: "no"
-    <<: *app-hardening
 
   test-db:
     # Same pinned image as postgres above; a separate, disposable instance
     # for backend/tests' integration tests (Task 1.1.h), never used by
     # api/worker/migrate.
-    image: postgres:18.2-trixie
+    image: *postgres-image
     profiles: ["test"]
     environment:
       # Test-only credentials, written literally (not from .env): this
@@ -185,9 +189,7 @@ services:
       - /var/lib/postgresql
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U widgetplatform -d widgetplatform_test"]
-      interval: 5s
-      timeout: 5s
-      retries: 5
+      <<: *healthcheck-timing
     restart: "no"
 
 volumes:

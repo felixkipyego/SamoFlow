@@ -11,17 +11,9 @@ import pytest
 
 from app.config import SettingsError
 from app.worker import run
-from tests.conftest import REQUIRED_VARS, TEST_PASSWORD, set_valid_env
+from tests.conftest import REQUIRED_VARS, TEST_PASSWORD, VALID_ENV, set_valid_env
 
 BACKEND_DIR = Path(__file__).resolve().parent.parent
-
-VALID_ENV = {
-    "APP_ENV": "development",
-    "DATABASE_URL": "postgresql+psycopg://user:pw@localhost:5432/widgetplatform",
-    "QDRANT_URL": "http://localhost:6333",
-    "API_HOST": "127.0.0.1",
-    "API_PORT": "8000",
-}
 
 
 async def test_run_returns_promptly_when_stop_is_already_set(monkeypatch, caplog):
@@ -52,7 +44,7 @@ async def test_run_with_no_environment_raises_settings_error():
         await run()
 
 
-def _subprocess_env(**overrides):
+def _worker_subprocess_env(**overrides):
     env = {k: v for k, v in os.environ.items() if k not in REQUIRED_VARS}
     env.update(overrides)
     return env
@@ -84,7 +76,7 @@ async def _wait_for_line_containing(stream, needle, timeout):
 
 
 async def test_sigterm_shuts_down_the_real_process_cleanly():
-    process = await _spawn_worker(_subprocess_env(**VALID_ENV))
+    process = await _spawn_worker(_worker_subprocess_env(**VALID_ENV))
     try:
         startup_line = await _wait_for_line_containing(
             process.stderr, "app_env=development", timeout=10
@@ -100,7 +92,7 @@ async def test_sigterm_shuts_down_the_real_process_cleanly():
 
 
 async def test_worker_with_empty_environment_exits_nonzero_without_traceback():
-    process = await _spawn_worker(_subprocess_env())
+    process = await _spawn_worker(_worker_subprocess_env())
     try:
         _, stderr = await asyncio.wait_for(process.communicate(), timeout=10)
     finally:

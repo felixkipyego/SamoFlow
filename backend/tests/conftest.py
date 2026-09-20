@@ -5,7 +5,11 @@
 # env-var list, the autouse env-isolation fixture, the valid-environment
 # setter, the fresh-import helper and the shared test password. Task 1.1.h
 # adds require_test_database(), the guard that keeps destructive
-# integration-test setup off a real database.
+# integration-test setup off a real database. Duplication check after
+# 1.1.g/h/i also moves VALID_ENV here (was byte-identical in test_config.py
+# and test_worker.py) and points the local-test-db hint at deploy/
+# docker-compose.yml's test-db profile, the canonical way to start one
+# since Task 1.1.i (rather than a hand-typed "docker run").
 import importlib
 import os
 import sys
@@ -17,16 +21,27 @@ from app.config import POSTGRES_SCHEME, Settings, get_settings
 
 REQUIRED_VARS = [name.upper() for name in Settings.model_fields]
 
+# Shared by test_config.py and test_worker.py: a minimal environment that
+# passes every Settings validator, with values chosen only to be valid, not
+# to resemble anything real. test_main.py keeps its own (TEST-NET-3
+# addresses, to prove /health never contacts anything).
+VALID_ENV = {
+    "APP_ENV": "development",
+    "DATABASE_URL": "postgresql+psycopg://user:pw@localhost:5432/widgetplatform",
+    "QDRANT_URL": "http://localhost:6333",
+    "API_HOST": "127.0.0.1",
+    "API_PORT": "8000",
+}
+
 # Always allowed: a database on the machine running the tests. Additional
 # hosts (e.g. a CI Postgres service container's name) are opted in via
 # TEST_DATABASE_ALLOWED_HOSTS, never hard-coded here.
 _DEFAULT_ALLOWED_TEST_HOSTS = frozenset({"localhost", "127.0.0.1"})
 
 _LOCAL_DOCKER_RUN_HINT = (
-    "TEST_DATABASE_URL is not set. Start a local test database with:\n"
-    "  docker run -d --name wp-test-db --rm -p 127.0.0.1:55432:5432 "
-    "-e POSTGRES_USER=widgetplatform -e POSTGRES_PASSWORD=change-me "
-    "-e POSTGRES_DB=widgetplatform_test <postgres-tag>\n"
+    "TEST_DATABASE_URL is not set. Start the local test database with:\n"
+    "  docker compose --env-file .env -f deploy/docker-compose.yml "
+    "--profile test up -d test-db\n"
     "then set TEST_DATABASE_URL=postgresql+psycopg://widgetplatform:"
     "change-me@127.0.0.1:55432/widgetplatform_test"
 )

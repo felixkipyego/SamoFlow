@@ -165,6 +165,7 @@ A production-ready, multi-tenant, embeddable AI widget platform: one website is 
 - 2026-09-20: Step 1.1.i — environment passed explicitly via a `x-app-env` YAML anchor with `${NAME:?NAME must be set in .env}` interpolation (no `env_file:`), aliased as-is into api/worker/migrate's `environment:`; postgres's `POSTGRES_USER`/`POSTGRES_PASSWORD`/`POSTGRES_DB` use the same fail-fast form. Verified: `docker compose config` fails immediately (before any container starts) with a message naming the missing variable when `DATABASE_URL` is absent from the env file. Compose resolves `.env` from `deploy/` (this file's own folder), not the repo root, so every command in this repo must pass `--env-file .env` explicitly; documented in a header comment in `deploy/docker-compose.yml`.
 - 2026-09-20: Step 1.1.i — `.env.example` gained `POSTGRES_USER`/`POSTGRES_PASSWORD`/`POSTGRES_DB` (placeholders `widgetplatform`/`change-me`/`widgetplatform`, matching `DATABASE_URL`), each with a comment naming which container variable it must match; added to `test_env_example.py`'s `EXTRA_EXAMPLE_KEYS`. The `TODO(1.1.i)` header line is removed. New `backend/tests/test_env_consistency.py` cross-checks `DATABASE_URL`'s user/password/host/database against `POSTGRES_USER`/`POSTGRES_PASSWORD`/`"postgres"`/`POSTGRES_DB`, and `QDRANT_URL`'s host against `"qdrant"`; it reuses `test_env_example.py`'s parser (import, not duplication) and withholds the password from its failure message (proved by hand: a wrong `POSTGRES_PASSWORD` in a scratch edit fails without printing either value; a wrong host fails naming both non-secret values).
 - 2026-09-20: Step 1.1.i refinement (post-review) — api/worker/migrate's tmpfs `/tmp` now has an explicit `size=64m` (`tmpfs: - /tmp:size=64m`); verified inside a running container: `mount` shows `tmpfs on /tmp type tmpfs (rw,nosuid,nodev,noexec,relatime,size=65536k)`, i.e. the standard `noexec`/`nosuid`/`nodev` defaults are unchanged. Added short comments: the api healthcheck only proves the process is alive, not that Postgres is reachable; postgres's `POSTGRES_USER`/`PASSWORD`/`DB` apply only when the data volume is first created; the qdrant healthcheck's `bash`/`/dev/tcp` choice should be revisited if the image ever drops `bash`.
+- 2026-09-20: Duplication check and simplification review after 1.1.g/h/i: Compose anchors, Dockerfile base-image ARG, shared VALID_ENV, hint points to Compose, test classes flattened, hardening guard test added; A8, B2, B3 declined.
 
 ### Estimates to measure
 
@@ -214,7 +215,7 @@ Do not modify (completed tasks): 1.1.a, 1.1.b, 1.1.c, 1.1.d, 1.1.e, 1.1.f, 1.1.g
 
 ## 8. Task counter since the last duplication check
 
-n = 3 (run the duplication check at 3; never exceed 4)
+n = 0 (run the duplication check at 3; never exceed 4)
 
 ## 9. Open markers
 
