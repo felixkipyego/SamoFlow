@@ -38,7 +38,7 @@ A production-ready, multi-tenant, embeddable AI widget platform: one website is 
 |------|-----------|--------|-------|
 | 0.1 | Understand the spec | Done | Completed 2026-09-19 |
 | 0.2 | Create PROJECT_SPEC.md | Done | Completed 2026-09-19 |
-| 1.1 | Repo skeleton and Compose | In progress | 1.1.a, 1.1.b done |
+| 1.1 | Repo skeleton and Compose | In progress | 1.1.a–1.1.g done |
 | 1.1b | Whole-application skeleton | Not started | – distinct from subtask 1.1.b |
 | 1.1c | Marker check | Not started | – |
 | 1.2 | Database, migrations and tenant-scoped access | Not started | – |
@@ -144,6 +144,8 @@ A production-ready, multi-tenant, embeddable AI widget platform: one website is 
 - 2026-09-20: Step 1.1.e — `create_app(settings: Settings | None = None)` in `backend/app/main.py` builds the FastAPI app; a `None` settings argument goes through `get_settings()` only (never `Settings()` directly, enforced by the existing config guard test since it scans every file under `backend/app`). Nothing at module level reads the environment. Title is the neutral `"widgetplatform API"`; version comes from `importlib.metadata.version("widgetplatform")` (works because Task 1.1.b's editable install makes the package resolvable). `/health` (backend/app/health.py) is liveness-only and touches neither Postgres nor Qdrant. Docs/redoc/openapi are disabled only when `app_env == "production"`. No CORS, middleware, database or Qdrant code, and no module-level `app` variable (Compose/Docker will run `uvicorn app.main:create_app --factory` from 1.1.g/1.1.i onward).
 - 2026-09-20: Step 1.1.f — `backend/app/worker.py`'s `run(stop)` calls `get_settings()` only, logs one INFO line containing `app_env` only (never database_url/qdrant_url), then awaits the stop event; `main()` configures logging, registers SIGTERM/SIGINT handlers via `loop.add_signal_handler` that set the stop event, and exits 0 on clean shutdown or non-zero with no traceback on `SettingsError`. No job logic, no polling loop, no dependency on Postgres/Qdrant. Verified by hand: with the signal-handler registration removed, `SIGTERM`'s default OS disposition still terminates the (unhandled) process quickly rather than hanging it — the process exits with code -15 (terminated by signal), not 0, so the test still fails fast on `assert exit_code == 0` rather than by hitting the 10-second `wait_for` timeout.
 - 2026-09-20: Duplication check and simplification review after 1.1.d/e/f: shared conftest.py, three redundant tests deleted, env_file guard added; dependency-set test to be removed when the lockfile task (1.1.o) lands.
+- 2026-09-20: Step 1.1.g — base image pinned to `python:3.12.14-slim-trixie` (Debian trixie is the current stable Debian release; 3.12.14 is the latest 3.12 patch published for it as of 2026-09-20); existence verified with `docker manifest inspect python:3.12.14-slim-trixie` before use (returned a valid multi-arch manifest list). `psycopg[binary]` kept for v1 instead of building from source against the system libpq: the container is rebuilt on every deploy to pick up base-image patches, and the vulnerability scan (1.1.o) will cover the bundled libpq/OpenSSL; revisit in Phase 7 if that scan flags them. `uvicorn --no-server-header` confirmed supported by the pinned uvicorn==0.53.0 (`uvicorn --help` lists `--server-header / --no-server-header`) and used in entrypoint.sh's `api` mode so the `server:` response header is suppressed. Non-root numeric UID/GID 10001 (no login shell, no home dir), WORKDIR /app, no HEALTHCHECK, no .dockerignore yet (1.1.n).
+- 2026-09-20: Step 1.1.g refinement — multi-stage build: a builder stage (pip + hatchling, both build-time only) installs the package into a venv at /venv; the final stage is the same pinned base image, copying in only /venv and entrypoint.sh, with `pip uninstall --yes pip` run against /venv at the end of the builder stage so pip never reaches the runtime image (verified: `python -m pip --version` in the built image fails with `No module named pip`). File modes come from `COPY --chmod=0755 entrypoint.sh ...` plus the builder's own root-owned-by-default output for /venv (both COPY instructions run before `USER 10001`), which is simpler than a separate `chmod`/`find` pass and gives the same result: /app and /venv are root-owned and not writable by the app user (verified by hand: `touch` inside either as uid 10001 fails with Permission denied). The `find __pycache__`/`*.pyc` cleanup step is removed — it only mattered when app/ was copied straight into the shipped image; now app/ is copied only into the discarded builder stage, and pip's wheel build already excludes bytecode. The Dockerfile documents UID 10001 as a fixed convention (not host-assigned), so file ownership stays stable across rebuilds and hosts; Compose (1.1.i) must reuse this same UID wherever it sets `user:` or touches ownership of files from this image. Image content size changed only marginally (63,312,007 → 62,831,945 bytes) since the prior single-stage build had no apt build tooling to strip — the main gain is removing pip/hatchling from the runtime image, not size. Entrypoint refinement: `api` mode now checks `API_HOST`/`API_PORT` itself (`[ -z ... ]` before the `exec`) and prints one `entrypoint.sh: <VAR> is required for mode 'api'` line to stderr with exit 2, instead of surfacing `set -u`'s raw "parameter not set" shell error; the script does not duplicate Settings' own validation (scheme checks, etc.) — only the two variables it uses itself.
 
 ### Estimates to measure
 
@@ -167,9 +169,9 @@ A production-ready, multi-tenant, embeddable AI widget platform: one website is 
 
 ## 7. Current task and next task
 
-Current: Step 1.1 Repo skeleton and Compose, subtask 1.1.g Dockerfile.
-Next: Step 1.1.h Alembic skeleton.
-Do not modify (completed tasks): 1.1.a, 1.1.b, 1.1.c, 1.1.d, 1.1.e, 1.1.f.
+Current: Step 1.1 Repo skeleton and Compose, subtask 1.1.h Alembic skeleton.
+Next: Step 1.1.i docker-compose.yml.
+Do not modify (completed tasks): 1.1.a, 1.1.b, 1.1.c, 1.1.d, 1.1.e, 1.1.f, 1.1.g.
 
 ### Step 1.1 task list (approved)
 
@@ -181,7 +183,7 @@ Do not modify (completed tasks): 1.1.a, 1.1.b, 1.1.c, 1.1.d, 1.1.e, 1.1.f.
 | 1.1.d | .env.example matching Settings | Done |
 | 1.1.e | FastAPI app factory (`create_app`) + GET /health | Done |
 | 1.1.f | Worker entrypoint stub | Done |
-| 1.1.g | Dockerfile: pinned base image (no `latest`), non-root user, api/worker entrypoints, uvicorn started with `--factory`. Open item to decide when this task is broken down: whether the production image installs psycopg from source against the system libpq instead of the `psycopg[binary]` wheel, which bundles its own libpq/OpenSSL (psycopg's docs advise the source build for production) | Not started |
+| 1.1.g | Dockerfile: pinned base image (no `latest`), non-root user, api/worker entrypoints, uvicorn started with `--factory` | Done |
 | 1.1.h | Alembic skeleton (no versions yet); upgrade-head integration test reads `TEST_DATABASE_URL` (skip locally if unset, fail in CI) | Not started |
 | 1.1.i | docker-compose.yml: postgres, qdrant, api, worker; only the api port published, bound to 127.0.0.1; postgres/qdrant ports not published; Qdrant healthcheck verified to work inside the pinned image | Not started |
 | 1.1.k | evals placeholder (moved before the Makefile, which calls it) | Not started |
@@ -193,7 +195,7 @@ Do not modify (completed tasks): 1.1.a, 1.1.b, 1.1.c, 1.1.d, 1.1.e, 1.1.f.
 
 ## 8. Task counter since the last duplication check
 
-n = 0 (run the duplication check at 3; never exceed 4)
+n = 1 (run the duplication check at 3; never exceed 4)
 
 ## 9. Open markers
 
@@ -201,8 +203,14 @@ n = 0 (run the duplication check at 3; never exceed 4)
 - TODO(1.1.i): cross-check .env.example against docker-compose.yml — service host names (postgres, qdrant), ports, and that POSTGRES_USER, POSTGRES_PASSWORD and POSTGRES_DB match DATABASE_URL. Add a test for it in 1.1.i, and remove the TODO(1.1.i) header comment from .env.example when done.
 - Note (owner to be scheduled, not tied to a task yet): when APP_ENV=production, reject the placeholder password change-me at startup in get_settings(). Schedule it with the deployment steps (1.1.g / Phase 7) or a Settings refinement.
 - Owner 1.1.i and Phase 7: allowed Host header validation (currently any Host is accepted; decide with the proxy configuration).
-- Owner 1.1.g: suppress the "server: uvicorn" response header with uvicorn's flag in the Dockerfile command, and make sure the health probe in Compose uses GET.
 - Owner: to be scheduled — CORS and OPTIONS handling: decide with the widget and admin work (Phase 5 and 6); today OPTIONS returns 405.
-- Owner 1.1.g: the container entrypoint must exec the command (`exec python -m app.worker`, `exec uvicorn ...`) so the process is PID 1 and receives SIGTERM directly; verify with `docker compose stop` that the worker exits in under 10 seconds.
 - TODO(2.1): `backend/app/worker.py`'s `run()` has no job logic yet; the job queue consumer is added in Step 2.1.
 - Owner 1.1.o: remove the exact dependency-set test in test_pyproject.py when the lockfile and CI audit exist.
+- TODO(1.1.h): the Dockerfile must also copy the Alembic files (alembic.ini and the alembic folder) when they exist — backend/Dockerfile's `COPY` list only has pyproject.toml and app/ today.
+- TODO(1.1.m): CI must build the widgetplatform-backend image and run the 1.1.g smoke checks (a to f) as part of the pipeline.
+- TODO(1.1.i): Compose's worker and api services must use the same built image and the same health probe rule (GET), per 1.1.g's `/health` verification.
+- Owner 1.1.n: add .dockerignore entries for __pycache__, .pytest_cache, .ruff_cache, tests, .env, .git so the image build context is clean.
+- Owner 1.1.i: Compose should run this image with a read-only root filesystem (tmpfs for /tmp if the app needs one), cap_drop ALL, memory and pids limits, and user 10001.
+- Owner 1.1.o: image vulnerability and secret scanning (the built image itself, not just the dependency lockfile).
+- Owner CI or Phase 7: verify the image builds and runs on arm64, not just the amd64 host it was built on so far.
+- Owner Phase 7: shutdown behaviour of the API under load (this task only verified graceful shutdown at idle).
