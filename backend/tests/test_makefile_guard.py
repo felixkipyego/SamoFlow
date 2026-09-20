@@ -4,9 +4,10 @@
 # $(COMPOSE) variable (see deploy/docker-compose.yml's own header comment on
 # why every compose call must pass --env-file/-f explicitly).
 import re
-from pathlib import Path
 
-_MAKEFILE = Path(__file__).resolve().parents[2] / "Makefile"
+from tests.conftest import REPO_ROOT
+
+_MAKEFILE = REPO_ROOT / "Makefile"
 
 _EXPECTED_TARGETS = {
     "help",
@@ -32,7 +33,7 @@ _TARGET_LINE = re.compile(r"^([A-Za-z][A-Za-z0-9_-]*):(?!=)")
 def _lines():
     assert _MAKEFILE.is_file(), (
         f"Makefile not found at {_MAKEFILE}. If it moved, update the path "
-        "derivation in this test (Path(__file__).resolve().parents[2])."
+        "derivation in this test (Makefile relative to REPO_ROOT)."
     )
     return _MAKEFILE.read_text().splitlines()
 

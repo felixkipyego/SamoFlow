@@ -9,15 +9,21 @@
 # 1.1.g/h/i also moves VALID_ENV here (was byte-identical in test_config.py
 # and test_worker.py) and points the local-test-db hint at deploy/
 # docker-compose.yml's test-db profile, the canonical way to start one
-# since Task 1.1.i (rather than a hand-typed "docker run").
+# since Task 1.1.i (rather than a hand-typed "docker run"). Duplication
+# check after 1.1.k/j/l moves REPO_ROOT here (byte-identical
+# Path(__file__).resolve().parents[2] in test_evals_placeholder.py,
+# test_makefile_guard.py and test_layout_placeholders.py).
 import importlib
 import os
 import sys
+from pathlib import Path
 from urllib.parse import urlsplit
 
 import pytest
 
 from app.config import POSTGRES_SCHEME, Settings, get_settings
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
 
 REQUIRED_VARS = [name.upper() for name in Settings.model_fields]
 

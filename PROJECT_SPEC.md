@@ -172,6 +172,8 @@ A production-ready, multi-tenant, embeddable AI widget platform: one website is 
 - 2026-09-20: Step 1.1.j implementation notes — `docker compose run/up/exec/stop/rm` all work on an explicitly-named service without its profile being activated (verified by hand: `run --rm migrate` and `up -d test-db`/`exec`/`stop`/`rm` on `test-db` all succeeded without `--profile`); `--profile test` is still passed on the `test-db` calls to match the convention `deploy/docker-compose.yml`'s own header comment already established in 1.1.i, `--profile tools` is not added to `migrate` for the same reason (that convention omits it). `test-all`'s recipe wraps its `cd backend && ... pytest` step in a subshell `(...)`: without it, the `cd` would still be in effect for the rest of the same shell recipe, and the following `$(MAKE) test-db-down` call would then resolve `deploy/docker-compose.yml` relative to `backend/` instead of the repo root.
 - 2026-09-20: Step 1.1.j — `backend/tests/test_makefile_guard.py` (stdlib-only, path derived from `Path(__file__).resolve().parents[2] / "Makefile"`) parses the Makefile into a target → recipe-lines map and asserts: all 12 targets declared; `.PHONY` lists them; the `COMPOSE` variable contains both `--env-file .env` and `-f deploy/docker-compose.yml`; no recipe line contains the literal text `docker compose` outside the `COMPOSE` variable's own definition (i.e. every compose call goes through the variable); no recipe line starts with `-`; no recipe line contains `|| true`; `down`'s recipe never contains `-v` while `down-volumes`'s does. Verified by hand in a scratch copy (real Makefile untouched) that each of the 7 assertions fails correctly when the rule it guards is broken (missing target, `.PHONY` gap, missing `COMPOSE` flag, a direct `docker compose` call, a leading `-`, an added `|| true`, and `-v` on the wrong target).
 - 2026-09-20: Step 1.1.j verification — `make help`/bare `make` lists all 11 non-`.PHONY`-only targets; `make env` run twice leaves `.env` byte-identical (SHA-256 compared); `make lint`, `make evals`, `make test` (96 passed, 1 skipped) all pass; `make up` brings postgres/qdrant/api to `healthy`, `/health` returns 200, `make migrate` exits 0 twice, `make down` empties `docker compose ps -a`, and `make up` again succeeds; `make test-all` passes 97 tests with none skipped and leaves no `test-db` container running afterward; a scratch copy of the Makefile with a wrong `TEST_DATABASE_URL` password proved `make test-all` returns a non-zero exit while still removing the `test-db` container; `make test-db` / `make test-db-down` bring the container up healthy and remove it cleanly; `make down-volumes` removed the leftover `postgres-data`/`qdrant-data` volumes and the network, and with `.env` then deleted, no widgetplatform containers/volumes/networks remained and `git status` showed no `.env`. `make -C <repo root> lint` from `/tmp` passed, confirming no dependency on the caller's working directory.
+- 2026-09-20: Step 1.1.l — `widget/loader/README.md`, `widget/chat/README.md` and `dashboard/README.md` are the only files under `widget/` and `dashboard/`, each under 12 lines, naming its owning step (5.1; 5.2–5.5; 6.1–6.5) and docs/SPEC.md section (§11 widget, §12 dashboard), and stating it is a placeholder with no build tooling — the bundler is chosen in step 5.1 (both widget folders share one bundle), dashboard tooling in step 6.1; no framework/bundler is pre-decided beyond what §11/§12 already fix (Preact widget in a shadow DOM, React dashboard SPA). `backend/tests/test_layout_placeholders.py` (stdlib only) asserts each README exists, is non-empty, names its step and says "placeholder" (case-insensitive), and that `widget/`/`dashboard/` contain no file other than `README.md` anywhere in their trees (`Path.rglob("*")`, skipping directories) — the failure message names the rule (tooling must be decided in the owning step). Verified by hand in a scratch copy (real files untouched) that deleting a README and adding a `package.json` each fail the test correctly.
+- 2026-09-20: Duplication check after 1.1.k/j/l (rule 9, triggered at n=3): `Path(__file__).resolve().parents[2]` (repo root) was byte-identical across `test_evals_placeholder.py`, `test_makefile_guard.py` and the new `test_layout_placeholders.py`; moved to `conftest.py` as `REPO_ROOT`, imported the same way `VALID_ENV` already is (`from tests.conftest import REPO_ROOT`). Verified: full suite still 99 passed, 1 skipped; lint clean. Counter reset to n=0 after the check (matching the reset after the 1.1.c and 1.1.g/h/i checks), rather than left at the triggering value.
 
 ### Estimates to measure
 
@@ -195,9 +197,9 @@ A production-ready, multi-tenant, embeddable AI widget platform: one website is 
 
 ## 7. Current task and next task
 
-Current: Step 1.1 Repo skeleton and Compose, subtask 1.1.l widget/ and dashboard/ skeleton folders.
-Next: Step 1.1.m CI workflow.
-Do not modify (completed tasks): 1.1.a, 1.1.b, 1.1.c, 1.1.d, 1.1.e, 1.1.f, 1.1.g, 1.1.h, 1.1.i, 1.1.j, 1.1.k.
+Current: Step 1.1 Repo skeleton and Compose, subtask 1.1.m CI workflow.
+Next: Step 1.1.n .gitignore and .dockerignore.
+Do not modify (completed tasks): 1.1.a, 1.1.b, 1.1.c, 1.1.d, 1.1.e, 1.1.f, 1.1.g, 1.1.h, 1.1.i, 1.1.j, 1.1.k, 1.1.l.
 
 ### Step 1.1 task list (approved)
 
@@ -214,14 +216,14 @@ Do not modify (completed tasks): 1.1.a, 1.1.b, 1.1.c, 1.1.d, 1.1.e, 1.1.f, 1.1.g
 | 1.1.i | docker-compose.yml: postgres, qdrant, api, worker; only the api port published, bound to 127.0.0.1; postgres/qdrant ports not published; Qdrant healthcheck verified to work inside the pinned image | Done |
 | 1.1.k | evals placeholder (moved before the Makefile, which calls it) | Done |
 | 1.1.j | Makefile: up, test, lint, migrate, evals | Done |
-| 1.1.l | widget/ and dashboard/ skeleton folders | Not started |
+| 1.1.l | widget/ and dashboard/ skeleton folders | Done |
 | 1.1.m | CI workflow: lint + test, with a Postgres service container for the Alembic integration test; Qdrant not needed yet | Not started |
 | 1.1.n | .gitignore and .dockerignore: exclude .env/secrets, virtualenvs, caches and build output; keep .env.example tracked | Not started |
 | 1.1.o | Lockfile with hashes for backend dependencies (including transitive ones) and a vulnerability scan (pip-audit or equivalent) wired into CI. Tool choice needs approval under rule 8 when this task is broken down | Not started |
 
 ## 8. Task counter since the last duplication check
 
-n = 2 (run the duplication check at 3; never exceed 4)
+n = 0 (run the duplication check at 3; never exceed 4) — reset after the 1.1.k/j/l check
 
 ## 9. Open markers
 
@@ -248,3 +250,5 @@ n = 2 (run the duplication check at 3; never exceed 4)
 - Owner 1.1.o: the lockfile task also reviews the pinned Qdrant and Postgres image tags for staleness.
 - Owner 1.1.m: CI calls `make lint` and `make test`, and also runs the database-backed suite (a Postgres service container, `TEST_DATABASE_URL` and `CI=true` set so the Alembic integration test fails rather than skips).
 - Owner 1.1.n: finalize `.gitignore` — keep `.env`, `.venv/`, caches (`__pycache__/`, `*.pyc`, `.pytest_cache/`, `.ruff_cache/`) ignored; keep `.env.example` tracked.
+- Owner 5.1: remove or update `backend/tests/test_layout_placeholders.py` when tooling is added to `widget/`; the test exists to stop tooling being added before the bundler decision.
+- Owner 6.1: remove or update `backend/tests/test_layout_placeholders.py` when tooling is added to `dashboard/`; the test exists to stop tooling being added before the dashboard tooling decision.

@@ -7,9 +7,10 @@ import os
 import subprocess
 import sys
 import tempfile
-from pathlib import Path
 
-_RUN_PY = Path(__file__).resolve().parents[2] / "evals" / "run.py"
+from tests.conftest import REPO_ROOT
+
+_RUN_PY = REPO_ROOT / "evals" / "run.py"
 
 
 # NOTE: test_alembic.py's _alembic_subprocess_env() builds a similar
@@ -26,7 +27,7 @@ def _subprocess_env():
 def test_run_py_exists():
     assert _RUN_PY.is_file(), (
         f"evals/run.py not found at {_RUN_PY}. If it moved, update the "
-        "path derivation in this test (Path(__file__).resolve().parents[2])."
+        "path derivation in this test (evals/run.py relative to REPO_ROOT)."
     )
 
 
