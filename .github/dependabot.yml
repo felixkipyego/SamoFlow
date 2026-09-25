@@ -34,6 +34,33 @@
 #    ARG-substituted FROM line, so a `docker` entry here would silently
 #    find nothing to update. The Python base image tag is reviewed as part
 #    of the same manual routine referenced above.
+#
+# 3. Dependabot's own docker-compose ecosystem cannot auto-update the
+#    `postgres` image below (deploy/docker-compose.yml's x-postgres-image
+#    anchor, shared by the postgres and test-db services). Confirmed
+#    2026-09-25 against dependabot-core's actual source at the commit a
+#    real failed run used: the file parser resolves YAML aliases correctly
+#    (`YAML.safe_load(..., aliases: true)` in docker_compose/file_parser.rb)
+#    and correctly detects a newer tag, but the file *updater*
+#    (docker_compose/file_updater.rb -> shared/shared_file_updater.rb) never
+#    re-parses the YAML -- it rewrites the raw file text with a regex
+#    requiring the literal tag to appear immediately after `image:`. Since
+#    the literal tag exists only on the anchor-definition line (preceded by
+#    `&postgres-image`, not `image:`) and both service `image:` lines
+#    contain only the alias (`*postgres-image`), the regex never matches,
+#    the rewrite is a no-op, and dependabot-core's own
+#    `raise "Expected content to change!"` fires -- a Ruby RuntimeError
+#    inside Dependabot's own update-scan, not a CI or security-workflow
+#    failure. No dependabot.yml option changes this (it isn't a config
+#    knob, it's this code path), and unwinding the anchor/alias just to
+#    satisfy Dependabot is rejected: the anchor is the single source of
+#    truth keeping postgres and test-db on the same tag (see 1.1.i's
+#    decisions), and that reason still holds. No dependabot-core issue
+#    describing this exact anchor+alias scenario was found despite a
+#    thorough search of its issue tracker. The Postgres tag is already
+#    covered by the same manual routine referenced above (its own wording
+#    already names "Postgres" explicitly). qdrant is not affected: its
+#    image is a plain inline string with no anchor (only one consumer).
 version: 2
 updates:
   - package-ecosystem: "github-actions"
