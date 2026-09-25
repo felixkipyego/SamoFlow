@@ -45,3 +45,15 @@ updates:
         patterns:
           - "*"
     open-pull-requests-limit: 5
+    # TEMPORARY, not a decision to stop tracking Postgres updates: silences
+    # the known Dependabot YAML-anchor/alias file-updater bug documented in
+    # gap 3 above (confirmed 2026-09-25), which fails every postgres update
+    # attempt rather than skipping it cleanly. qdrant/qdrant and
+    # widgetplatform-backend in this same ecosystem entry are unaffected
+    # and continue to update normally. Remove this rule once any of:
+    # dependabot-core fixes the anchor-handling bug, the anchor is manually
+    # removed from deploy/docker-compose.yml, or at the next scheduled
+    # review of Project constraints' manual image-tag routine -- whichever
+    # comes first.
+    ignore:
+      - dependency-name: "postgres"

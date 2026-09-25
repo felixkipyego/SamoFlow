@@ -70,3 +70,53 @@ def test_dependabot_yml_explains_the_dockerfile_arg_gap():
         "backend/ is omitted (the ARG-substituted FROM line Dependabot "
         "cannot resolve)"
     )
+
+
+def _ignore_rules(lines):
+    # Maps every "ignore:" block to its rules; each rule is the set of
+    # "key: value" pairs under one "- " list item, so a rule missing
+    # "dependency-name" (which would ignore every dependency in that
+    # ecosystem entry, not just the intended one) can be detected.
+    rules = []
+    for i, line in enumerate(lines):
+        if line.strip() != "ignore:":
+            continue
+        indent = len(line) - len(line.lstrip(" "))
+        current = None
+        for later in lines[i + 1 :]:
+            if later.strip() == "":
+                continue
+            later_indent = len(later) - len(later.lstrip(" "))
+            if later_indent <= indent:
+                break
+            stripped = later.strip()
+            if stripped.startswith("- "):
+                current = {}
+                rules.append(current)
+                stripped = stripped[2:].strip()
+            if current is not None and ":" in stripped:
+                key, _, value = stripped.partition(":")
+                current[key.strip()] = value.strip().strip("\"'")
+    return rules
+
+
+def test_dependabot_yml_ignores_postgres_scoped_by_dependency_name_only():
+    # Task 1.1.o.g follow-up: a temporary ignore rule silences the known
+    # Dependabot YAML-anchor/alias bug for postgres specifically -- it must
+    # never widen into ignoring the whole docker-compose ecosystem entry
+    # (which would also silently stop qdrant/qdrant and
+    # widgetplatform-backend updates).
+    rules = _ignore_rules(read_lines(DEPENDABOT_YML_PATH))
+    assert rules, "no 'ignore:' rule found (expected one scoping out postgres)"
+
+    for rule in rules:
+        assert "dependency-name" in rule, (
+            "an ignore rule has no dependency-name filter -- this would "
+            f"ignore every dependency in its ecosystem entry, not just "
+            f"postgres: {rule!r}"
+        )
+
+    postgres_rules = [r for r in rules if r.get("dependency-name") == "postgres"]
+    assert postgres_rules, (
+        'no ignore rule scoped to dependency-name: "postgres" was found'
+    )
