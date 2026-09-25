@@ -1,0 +1,57 @@
+# Task 1.1.o.g: automated dependency-update PRs for the two ecosystems
+# Dependabot can actually cover safely in this repo's layout. Version
+# updates only (no security-updates config here; those run on their own
+# platform default regardless). No auto-merge: every PR needs a human
+# review, same as any other change.
+#
+# Two known, deliberate gaps -- NOT configured here, and NOT safe to add
+# blindly later without re-checking the reasoning below:
+#
+# 1. No Python/pip/uv package-ecosystem entry for backend/. Verified
+#    2026-09-20 (see PROJECT_SPEC.md's 1.1.o decisions): the native `uv`
+#    ecosystem only regenerates locks for a real uv-managed project (a
+#    `uv.lock` file, or a `name.in`/`name.txt` pip-compile pair) -- neither
+#    matches backend/requirements.lock / requirements-dev.lock, which are
+#    compiled directly from pyproject.toml with no `.in` source and no
+#    `[tool.uv]` project. The plain `pip` ecosystem would edit a version
+#    pin in-place without regenerating the file's --hash entries, silently
+#    breaking `pip install --require-hashes` everywhere those lockfiles are
+#    used (Makefile, backend/Dockerfile, ci.yml, security.yml). Backend
+#    dependency updates go through the manual routine already recorded in
+#    PROJECT_SPEC.md's Project constraints ("Manual dependency/image
+#    maintenance routine (Step 1.1.o)": `make lock-upgrade`, `make
+#    test-all`, review the diff, commit -- monthly or whenever pip-audit
+#    reports something).
+#
+# 2. No `docker` package-ecosystem entry for backend/ (only
+#    `docker-compose` below, for deploy/docker-compose.yml). Re-verified
+#    2026-09-25 directly against dependabot-core's own issue tracker (not
+#    just docs): backend/Dockerfile's base image is set via
+#    `ARG PYTHON_IMAGE=python:3.12.14-slim-trixie` then `FROM
+#    ${PYTHON_IMAGE}`; dependabot-core issue #2057 ("Add global ARG support
+#    for Dockerfiles") is still open as of 2026-08-04 and describes this
+#    exact pattern -- Dependabot's docker ecosystem cannot resolve an
+#    ARG-substituted FROM line, so a `docker` entry here would silently
+#    find nothing to update. The Python base image tag is reviewed as part
+#    of the same manual routine referenced above.
+version: 2
+updates:
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    groups:
+      github-actions:
+        patterns:
+          - "*"
+    open-pull-requests-limit: 5
+
+  - package-ecosystem: "docker-compose"
+    directory: "/deploy"
+    schedule:
+      interval: "weekly"
+    groups:
+      docker-compose:
+        patterns:
+          - "*"
+    open-pull-requests-limit: 5
