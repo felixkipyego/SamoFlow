@@ -83,6 +83,9 @@ jobs:
       # verified). fail-build/severity-cutoff/only-fixed: fail the job on
       # any high-or-worse finding that has a fix available; lower-severity
       # or fix-unavailable findings are reported but do not fail the build.
+      # Grype auto-detects .grype.yaml at the repo root (no config: input
+      # set here) -- see that file for the one documented ignore rule and
+      # why it exists.
       - name: Scan image
         uses: anchore/scan-action@27805bf3b4e84b4a5c980df22ed233c00390a439 # v7.4.2
         with:
