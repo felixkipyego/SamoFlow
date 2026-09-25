@@ -1,0 +1,93 @@
+# Task 1.1.o.f: weekly + change-triggered vulnerability scanning, separate
+# from ci.yml (Task 1.1.m) so a slow/flaky scanner never blocks the fast
+# lint/test feedback loop. Same fork-PR safety rules as ci.yml: read-only
+# GITHUB_TOKEN, no repository secrets, never the target-repo-context trigger
+# -- backend/tests/test_ci_guard.py enforces both, for every workflow file
+# under .github/workflows/, not just this one.
+#
+# No SARIF upload / security-events: write in this task: that is a possible
+# future upgrade (would need elevated permissions), not part of 1.1.o.f.
+name: Security
+
+on:
+  schedule:
+    # Monday 03:17 UTC: start of the work week, so a finding is fresh when
+    # someone looks Monday morning; a non-zero minute avoids the top-of-hour
+    # congestion GitHub's own docs warn scheduled workflows about.
+    - cron: "17 3 * * 1"
+  workflow_dispatch: {}
+  push:
+    branches: [main]
+    paths:
+      - backend/pyproject.toml
+      - backend/requirements.lock
+      - backend/requirements-dev.lock
+      - backend/Dockerfile
+      - deploy/docker-compose.yml
+      - .github/workflows/security.yml
+  pull_request:
+    paths:
+      - backend/pyproject.toml
+      - backend/requirements.lock
+      - backend/requirements-dev.lock
+      - backend/Dockerfile
+      - deploy/docker-compose.yml
+      - .github/workflows/security.yml
+
+concurrency:
+  group: security-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  python-audit:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: backend/requirements-dev.lock
+
+      - name: Install
+        run: make install
+
+      # pip-audit's own default: exits non-zero on any finding. Never
+      # soften this with a fail-on-severity-style flag.
+      - name: Audit
+        run: make audit
+
+  image-scan:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Build image
+        run: docker build -t widgetplatform-backend:scan backend
+
+      # Grype version pinned above the action's own bundled default (kept
+      # current at each review -- see PROJECT_SPEC.md for how it was
+      # verified). fail-build/severity-cutoff/only-fixed: fail the job on
+      # any high-or-worse finding that has a fix available; lower-severity
+      # or fix-unavailable findings are reported but do not fail the build.
+      - name: Scan image
+        uses: anchore/scan-action@27805bf3b4e84b4a5c980df22ed233c00390a439 # v7.4.2
+        with:
+          image: widgetplatform-backend:scan
+          fail-build: true
+          severity-cutoff: high
+          only-fixed: true
+          grype-version: v0.119.0

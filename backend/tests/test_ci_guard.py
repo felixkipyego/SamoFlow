@@ -1,22 +1,29 @@
 # backend/tests/test_ci_guard.py
-# Task 1.1.m: static checks on .github/workflows/ci.yml, so a future edit
-# cannot silently widen permissions, switch to the target-repo-context
-# trigger, reference a secret, use a floating/mutable action reference, run
-# on a "latest" runner, drop a job timeout, stop running lint/tests, stop
-# building/smoke-testing the image, or let a checkout step persist
-# credentials. Deliberately no YAML parser (no new dependency): line-based
-# text checks only, the same style test_makefile_guard.py and
-# test_hardening_guard.py already use. _check() takes the file text as a
-# plain string, not a path, so each rule can be proved able to fail on an
-# edited copy of the text without ever touching the real file.
+# Task 1.1.m, generalized in 1.1.o.f: static checks on every workflow file
+# under .github/workflows/, so a future edit cannot silently widen
+# permissions, switch to the target-repo-context trigger, reference a
+# secret, use a floating/mutable action reference, run on a "latest"
+# runner, drop a job timeout, or let a checkout step persist credentials --
+# in any workflow file, not just ci.yml. ci.yml and security.yml each also
+# get their own specific checks (ci.yml: install/lock-check/lint/test-all
+# order, the image job's build+smoke steps; security.yml: the paths filter,
+# the schedule trigger, the audit and image-scan steps). Deliberately no
+# YAML parser (no new dependency): line-based text checks only, the same
+# style test_makefile_guard.py and test_hardening_guard.py already use.
+# Every _*_violations() function takes the file text as a plain string, not
+# a path, so each rule can be proved able to fail on an edited copy of the
+# text without ever touching the real file.
 import re
 
 from tests.conftest import REPO_ROOT, is_comment_or_blank, read_lines
 
-CI_YML_PATH = REPO_ROOT / ".github" / "workflows" / "ci.yml"
+WORKFLOWS_DIR = REPO_ROOT / ".github" / "workflows"
+CI_YML_PATH = WORKFLOWS_DIR / "ci.yml"
+SECURITY_YML_PATH = WORKFLOWS_DIR / "security.yml"
 
 _USES_LINE = re.compile(r"^\s*uses:\s*(\S+)")
 _CHECKOUT_USES = re.compile(r"^\s*uses:\s*actions/checkout@")
+_ANCHORE_USES = re.compile(r"^\s*uses:\s*anchore/scan-action@")
 _STEP_HEADER = re.compile(r"^\s*- name:")
 _RUN_LINE = re.compile(r"^\s*run:\s*(.*)$")
 _WRITE_PERMISSION = re.compile(r"^\s*[\w-]+:\s*write\b")
@@ -24,13 +31,27 @@ _RUNS_ON = re.compile(r"^\s*runs-on:\s*(\S+)")
 _TIMEOUT = re.compile(r"^\s*timeout-minutes:\s*\d+")
 _JOB_HEADER = re.compile(r"^  (\w[\w-]*):\s*$")
 
+_EXPECTED_SECURITY_PATHS = (
+    "backend/pyproject.toml",
+    "backend/requirements.lock",
+    "backend/requirements-dev.lock",
+    "backend/Dockerfile",
+    "deploy/docker-compose.yml",
+    ".github/workflows/security.yml",
+)
 
-def _checkout_step_blocks(lines):
-    # Each block starts at a "uses: actions/checkout@..." line and runs
-    # until the next step header ("- name: ..."), or EOF.
+
+def _all_workflow_files():
+    return sorted(WORKFLOWS_DIR.glob("*.yml")) + sorted(WORKFLOWS_DIR.glob("*.yaml"))
+
+
+def _step_blocks(lines, uses_pattern):
+    # Each block starts at a line matching uses_pattern (e.g. a specific
+    # action's "uses:" line) and runs until the next step header
+    # ("- name: ..."), or EOF.
     blocks = []
     for i, line in enumerate(lines):
-        if not _CHECKOUT_USES.match(line):
+        if not uses_pattern.match(line):
             continue
         block = [line]
         for later in lines[i + 1 :]:
@@ -76,7 +97,9 @@ def _jobs(lines):
     return jobs
 
 
-def _check(text: str) -> list[str]:
+def _generic_workflow_violations(text: str) -> list[str]:
+    # Rules every workflow file under .github/workflows/ must follow,
+    # regardless of what it does.
     lines = text.splitlines()
     violations = []
 
@@ -117,6 +140,21 @@ def _check(text: str) -> list[str]:
         if not any(_TIMEOUT.match(line) for line in job_lines):
             violations.append(f"job {name!r} has no timeout-minutes")
 
+    for block in _step_blocks(lines, _CHECKOUT_USES):
+        if not any("persist-credentials: false" in line for line in block):
+            violations.append(
+                "an actions/checkout step does not set persist-credentials: "
+                "false (needed so a job running an untrusted fork PR's code "
+                f"cannot push back with this repo's token): {block[0].strip()!r}"
+            )
+
+    return violations
+
+
+def _ci_specific_violations(text: str) -> list[str]:
+    jobs = _jobs(text.splitlines())
+    violations = []
+
     # Task 1.1.o.e: install and lockfile-drift-check must run, and in the
     # right relative order -- install first (it puts uv on PATH, which
     # lock-check needs), then lock-check before lint/test-all (fail fast on
@@ -138,26 +176,7 @@ def _check(text: str) -> list[str]:
                 f"{required_order} in that relative order: got {indexes}"
             )
 
-    return violations
-
-
-def _checkout_persist_credentials_violations(text: str) -> list[str]:
-    lines = text.splitlines()
-    violations = []
-    for block in _checkout_step_blocks(lines):
-        if not any("persist-credentials: false" in line for line in block):
-            violations.append(
-                "an actions/checkout step does not set persist-credentials: "
-                "false (needed so a job running an untrusted fork PR's code "
-                f"cannot push back with this repo's token): {block[0].strip()!r}"
-            )
-    return violations
-
-
-def _image_job_build_and_smoke_violations(text: str) -> list[str]:
-    jobs = _jobs(text.splitlines())
     image_commands = _run_commands(jobs.get("image", []))
-    violations = []
     if not any("docker build" in cmd for cmd in image_commands):
         violations.append(
             "job 'image' does not run a 'docker build' command (needed "
@@ -169,19 +188,57 @@ def _image_job_build_and_smoke_violations(text: str) -> list[str]:
             "catches non-root, missing-server-header and password-leak "
             "regressions in the built image)"
         )
+
     return violations
 
 
+def _security_specific_violations(text: str) -> list[str]:
+    lines = text.splitlines()
+    violations = []
+
+    if "paths:" not in text:
+        violations.append("no 'paths:' filter found (push/pull_request should be scoped)")
+    for path in _EXPECTED_SECURITY_PATHS:
+        if path not in text:
+            violations.append(f"paths filter is missing {path!r}")
+
+    if "schedule:" not in text or "cron:" not in text:
+        violations.append("no 'schedule:'/'cron:' trigger found (this workflow must run weekly)")
+
+    jobs = _jobs(lines)
+
+    audit_commands = _run_commands(jobs.get("python-audit", []))
+    if not any("make audit" in cmd for cmd in audit_commands):
+        violations.append("job 'python-audit' does not run 'make audit'")
+
+    image_scan_commands = _run_commands(jobs.get("image-scan", []))
+    if not any("docker build" in cmd for cmd in image_scan_commands):
+        violations.append("job 'image-scan' does not run a 'docker build' command")
+
+    scan_blocks = _step_blocks(jobs.get("image-scan", []), _ANCHORE_USES)
+    if not scan_blocks:
+        violations.append("job 'image-scan' does not run anchore/scan-action")
+    else:
+        block_text = "\n".join(scan_blocks[0])
+        if "fail-build: true" not in block_text:
+            violations.append("anchore/scan-action step does not set fail-build: true")
+        if "severity-cutoff: high" not in block_text:
+            violations.append("anchore/scan-action step does not set severity-cutoff: high")
+
+    return violations
+
+
+def test_every_workflow_file_passes_generic_checks():
+    for path in _all_workflow_files():
+        violations = _generic_workflow_violations("\n".join(read_lines(path)))
+        assert not violations, f"{path} violations:\n" + "\n".join(violations)
+
+
 def test_ci_workflow():
-    violations = _check("\n".join(read_lines(CI_YML_PATH)))
+    violations = _ci_specific_violations("\n".join(read_lines(CI_YML_PATH)))
     assert not violations, ".github/workflows/ci.yml violations:\n" + "\n".join(violations)
 
 
-def test_checkout_steps_never_persist_credentials():
-    violations = _checkout_persist_credentials_violations("\n".join(read_lines(CI_YML_PATH)))
-    assert not violations, ".github/workflows/ci.yml violations:\n" + "\n".join(violations)
-
-
-def test_image_job_builds_and_smoke_tests_the_image():
-    violations = _image_job_build_and_smoke_violations("\n".join(read_lines(CI_YML_PATH)))
-    assert not violations, ".github/workflows/ci.yml violations:\n" + "\n".join(violations)
+def test_security_workflow():
+    violations = _security_specific_violations("\n".join(read_lines(SECURITY_YML_PATH)))
+    assert not violations, ".github/workflows/security.yml violations:\n" + "\n".join(violations)
