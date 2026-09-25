@@ -4,63 +4,26 @@
 # platform default regardless). No auto-merge: every PR needs a human
 # review, same as any other change.
 #
-# Two known, deliberate gaps -- NOT configured here, and NOT safe to add
-# blindly later without re-checking the reasoning below:
+# Three known, deliberate gaps -- NOT configured here, and NOT safe to add
+# blindly later without re-checking the reasoning below. Full investigation
+# for each is recorded in PROJECT_SPEC.md, Step 1.1.o.g decisions.
 #
-# 1. No Python/pip/uv package-ecosystem entry for backend/. Verified
-#    2026-09-20 (see PROJECT_SPEC.md's 1.1.o decisions): the native `uv`
-#    ecosystem only regenerates locks for a real uv-managed project (a
-#    `uv.lock` file, or a `name.in`/`name.txt` pip-compile pair) -- neither
-#    matches backend/requirements.lock / requirements-dev.lock, which are
-#    compiled directly from pyproject.toml with no `.in` source and no
-#    `[tool.uv]` project. The plain `pip` ecosystem would edit a version
-#    pin in-place without regenerating the file's --hash entries, silently
-#    breaking `pip install --require-hashes` everywhere those lockfiles are
-#    used (Makefile, backend/Dockerfile, ci.yml, security.yml). Backend
-#    dependency updates go through the manual routine already recorded in
-#    PROJECT_SPEC.md's Project constraints ("Manual dependency/image
-#    maintenance routine (Step 1.1.o)": `make lock-upgrade`, `make
-#    test-all`, review the diff, commit -- monthly or whenever pip-audit
-#    reports something).
+# 1. No Python/pip/uv package-ecosystem entry for backend/: neither
+#    ecosystem safely regenerates backend's hash-pinned lockfiles. Covered
+#    by the manual routine in PROJECT_SPEC.md's Project constraints
+#    ("Manual dependency/image maintenance routine (Step 1.1.o)").
 #
 # 2. No `docker` package-ecosystem entry for backend/ (only
-#    `docker-compose` below, for deploy/docker-compose.yml). Re-verified
-#    2026-09-25 directly against dependabot-core's own issue tracker (not
-#    just docs): backend/Dockerfile's base image is set via
-#    `ARG PYTHON_IMAGE=python:3.12.14-slim-trixie` then `FROM
-#    ${PYTHON_IMAGE}`; dependabot-core issue #2057 ("Add global ARG support
-#    for Dockerfiles") is still open as of 2026-08-04 and describes this
-#    exact pattern -- Dependabot's docker ecosystem cannot resolve an
-#    ARG-substituted FROM line, so a `docker` entry here would silently
-#    find nothing to update. The Python base image tag is reviewed as part
-#    of the same manual routine referenced above.
+#    `docker-compose` below): Dependabot's docker ecosystem cannot resolve
+#    backend/Dockerfile's `ARG PYTHON_IMAGE=...`-substituted FROM line.
+#    Covered by the same manual routine referenced above.
 #
-# 3. Dependabot's own docker-compose ecosystem cannot auto-update the
-#    `postgres` image below (deploy/docker-compose.yml's x-postgres-image
-#    anchor, shared by the postgres and test-db services). Confirmed
-#    2026-09-25 against dependabot-core's actual source at the commit a
-#    real failed run used: the file parser resolves YAML aliases correctly
-#    (`YAML.safe_load(..., aliases: true)` in docker_compose/file_parser.rb)
-#    and correctly detects a newer tag, but the file *updater*
-#    (docker_compose/file_updater.rb -> shared/shared_file_updater.rb) never
-#    re-parses the YAML -- it rewrites the raw file text with a regex
-#    requiring the literal tag to appear immediately after `image:`. Since
-#    the literal tag exists only on the anchor-definition line (preceded by
-#    `&postgres-image`, not `image:`) and both service `image:` lines
-#    contain only the alias (`*postgres-image`), the regex never matches,
-#    the rewrite is a no-op, and dependabot-core's own
-#    `raise "Expected content to change!"` fires -- a Ruby RuntimeError
-#    inside Dependabot's own update-scan, not a CI or security-workflow
-#    failure. No dependabot.yml option changes this (it isn't a config
-#    knob, it's this code path), and unwinding the anchor/alias just to
-#    satisfy Dependabot is rejected: the anchor is the single source of
-#    truth keeping postgres and test-db on the same tag (see 1.1.i's
-#    decisions), and that reason still holds. No dependabot-core issue
-#    describing this exact anchor+alias scenario was found despite a
-#    thorough search of its issue tracker. The Postgres tag is already
-#    covered by the same manual routine referenced above (its own wording
-#    already names "Postgres" explicitly). qdrant is not affected: its
-#    image is a plain inline string with no anchor (only one consumer).
+# 3. Dependabot's docker-compose ecosystem cannot auto-update the
+#    `postgres` image below (deploy/docker-compose.yml's shared
+#    x-postgres-image anchor): its file updater rewrites raw text with a
+#    regex that never resolves YAML aliases, so it silently fails
+#    (`RuntimeError: Expected content to change!`) rather than editing the
+#    anchor. Covered by the same manual routine referenced above.
 version: 2
 updates:
   - package-ecosystem: "github-actions"

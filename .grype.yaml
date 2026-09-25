@@ -1,30 +1,14 @@
 # Grype ignore rules for the widgetplatform-backend image scan
-# (.github/workflows/security.yml, Task 1.1.o.f). Auto-detected by `grype`
-# from the repo root (and by anchore/scan-action, which shells out to
-# grype) -- no --config input needed, confirmed both against the action's
-# own action.yml at the pinned commit ("Setting this will disable
-# auto-detection of configuration files (e.g. .grype.yaml)") and by running
-# grype locally against this file with no --config flag.
+# (.github/workflows/security.yml). Loaded via that workflow's explicit
+# `config: ${{ github.workspace }}/.grype.yaml` input, not auto-detection
+# (auto-detection proved unreliable in a real run; see PROJECT_SPEC.md,
+# Step 1.1.o.f follow-up).
 ignore:
-  # CVE-2026-82049 (High): tarfile module flaw in CPython -- a crafted
-  # archive containing a hard link to a symlink can let extraction write
-  # outside the destination directory. Reported against the base image's
-  # own python 3.12.14 (python:3.12.14-slim-trixie).
-  #
-  # Ignored because:
-  #   1. No patch release exists for the 3.12.x or 3.13.x lines yet -- the
-  #      fix has only landed in the 3.14 development branch (3.14.0b1).
-  #      There is nothing to upgrade to.
-  #   2. The vulnerable code path is tarfile extraction of untrusted
-  #      archives; nothing in this image calls tarfile on untrusted input,
-  #      and pip -- the most plausible caller -- has already been removed
-  #      from both Python interpreters in this image (Tasks 1.1.g, 1.1.o.d).
-  #
-  # Scoped to the exact package version reported (python 3.12.14), so this
-  # rule stops matching automatically the next time the base image's Python
-  # version changes (backend/Dockerfile's PYTHON_IMAGE ARG) -- at that
-  # point it must be re-evaluated (does a real patch exist yet? is the
-  # version still 3.12.14?), not blindly kept or copied forward.
+  # CVE-2026-82049 (High), python 3.12.14: no 3.12.x/3.13.x patch exists yet
+  # (fixed only in 3.14.0b1), and the vulnerable tarfile-extraction code
+  # path is unreachable in this image (pip is removed from both Pythons).
+  # Re-evaluate on the next Python base image bump. Full investigation:
+  # PROJECT_SPEC.md, Step 1.1.o.f decisions.
   - vulnerability: CVE-2026-82049
     package:
       name: python

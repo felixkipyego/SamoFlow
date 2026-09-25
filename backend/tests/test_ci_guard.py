@@ -37,6 +37,7 @@ _EXPECTED_SECURITY_PATHS = (
     "backend/requirements-dev.lock",
     "backend/Dockerfile",
     "deploy/docker-compose.yml",
+    ".grype.yaml",
     ".github/workflows/security.yml",
 )
 
@@ -73,6 +74,28 @@ def _run_commands(job_lines):
         for run_match in [_RUN_LINE.match(line)]
         if run_match
     ]
+
+
+def _paths_filter_entries(lines):
+    # Collects every path listed under any "paths:" key (there may be more
+    # than one, e.g. separate push/pull_request triggers), so a path can be
+    # checked as actually configured *there* -- not just present anywhere
+    # else in the file (e.g. a step's "config:" input or a comment).
+    entries = []
+    for i, line in enumerate(lines):
+        if line.strip() != "paths:":
+            continue
+        indent = len(line) - len(line.lstrip(" "))
+        for later in lines[i + 1 :]:
+            if later.strip() == "":
+                continue
+            later_indent = len(later) - len(later.lstrip(" "))
+            if later_indent <= indent:
+                break
+            stripped = later.strip()
+            if stripped.startswith("- "):
+                entries.append(stripped[2:].strip())
+    return entries
 
 
 def _jobs(lines):
@@ -198,9 +221,11 @@ def _security_specific_violations(text: str) -> list[str]:
 
     if "paths:" not in text:
         violations.append("no 'paths:' filter found (push/pull_request should be scoped)")
-    for path in _EXPECTED_SECURITY_PATHS:
-        if path not in text:
-            violations.append(f"paths filter is missing {path!r}")
+    else:
+        paths_entries = _paths_filter_entries(lines)
+        for path in _EXPECTED_SECURITY_PATHS:
+            if path not in paths_entries:
+                violations.append(f"paths filter is missing {path!r}")
 
     if "schedule:" not in text or "cron:" not in text:
         violations.append("no 'schedule:'/'cron:' trigger found (this workflow must run weekly)")

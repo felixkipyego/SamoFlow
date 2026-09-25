@@ -24,6 +24,7 @@ on:
       - backend/requirements-dev.lock
       - backend/Dockerfile
       - deploy/docker-compose.yml
+      - .grype.yaml
       - .github/workflows/security.yml
   pull_request:
     paths:
@@ -32,6 +33,7 @@ on:
       - backend/requirements-dev.lock
       - backend/Dockerfile
       - deploy/docker-compose.yml
+      - .grype.yaml
       - .github/workflows/security.yml
 
 concurrency:
