@@ -224,6 +224,17 @@ def _security_specific_violations(text: str) -> list[str]:
             violations.append("anchore/scan-action step does not set fail-build: true")
         if "severity-cutoff: high" not in block_text:
             violations.append("anchore/scan-action step does not set severity-cutoff: high")
+        # An explicit, absolute config: input is required -- grype's own
+        # auto-detection of .grype.yaml (relative to its process's working
+        # directory) was proven unreliable in a real run; see
+        # PROJECT_SPEC.md, Step 1.1.o.f follow-up. A relative path would
+        # carry the same risk, so this also requires the absolute
+        # ${{ github.workspace }} prefix, not just any "config:" line.
+        if "config: ${{ github.workspace }}/.grype.yaml" not in block_text:
+            violations.append(
+                "anchore/scan-action step does not set an absolute "
+                "config: ${{ github.workspace }}/.grype.yaml input"
+            )
 
     return violations
 

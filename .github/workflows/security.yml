@@ -83,9 +83,19 @@ jobs:
       # verified). fail-build/severity-cutoff/only-fixed: fail the job on
       # any high-or-worse finding that has a fix available; lower-severity
       # or fix-unavailable findings are reported but do not fail the build.
-      # Grype auto-detects .grype.yaml at the repo root (no config: input
-      # set here) -- see that file for the one documented ignore rule and
-      # why it exists.
+      #
+      # config: points explicitly at .grype.yaml via the absolute
+      # ${{ github.workspace }} path (see PROJECT_SPEC.md, Step 1.1.o.f
+      # follow-up, for the full investigation): grype's own auto-detection
+      # searches "./.grype.yaml" relative to its process's working
+      # directory, and while that *should* be $GITHUB_WORKSPACE for a
+      # standard checkout, a real run here still missed the file -- rather
+      # than depend on that assumption, the config path is pinned
+      # explicitly and absolutely, which was proven (locally, with the
+      # process's cwd deliberately pointed elsewhere) to load correctly
+      # regardless of whatever the actual working directory turns out to
+      # be. See that file for the one documented ignore rule and why it
+      # exists.
       - name: Scan image
         uses: anchore/scan-action@27805bf3b4e84b4a5c980df22ed233c00390a439 # v7.4.2
         with:
@@ -94,3 +104,4 @@ jobs:
           severity-cutoff: high
           only-fixed: true
           grype-version: v0.119.0
+          config: ${{ github.workspace }}/.grype.yaml
