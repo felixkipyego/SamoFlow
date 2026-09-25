@@ -11,7 +11,7 @@ COMPOSE = docker compose --env-file .env -f deploy/docker-compose.yml
 
 .DEFAULT_GOAL := help
 
-.PHONY: help env up down down-volumes migrate test test-db test-db-down test-all lint evals
+.PHONY: help env up down down-volumes migrate test test-db test-db-down test-all lint evals install lock lock-upgrade lock-check audit
 
 help:
 	@echo "make env          create .env from .env.example if it does not exist yet"
@@ -25,6 +25,11 @@ help:
 	@echo "make test-all     run the full suite against test-db, always cleaning up"
 	@echo "make lint         ruff check backend and evals"
 	@echo "make evals        run the eval placeholder"
+	@echo "make install      install hashed runtime+dev deps, then the backend package"
+	@echo "make lock         regenerate both lockfiles (no upgrade)"
+	@echo "make lock-upgrade regenerate both lockfiles, allowing newer versions"
+	@echo "make lock-check   fail if the committed lockfiles are out of date"
+	@echo "make audit        pip-audit against both lockfiles"
 
 # Never overwrites an existing .env. Every target below that touches
 # $(COMPOSE) depends on this.
@@ -84,3 +89,42 @@ lint:
 
 evals:
 	python evals/run.py
+
+# Installs from the hash-pinned dev lockfile (never resolves versions itself,
+# see Task 1.1.o.b), then the backend package with no dependency resolution
+# of its own (--no-deps: its dependencies already came from the lockfile).
+install:
+	pip install --require-hashes -r backend/requirements-dev.lock
+	pip install --no-deps -e ./backend
+
+# Regenerates both lockfiles with the same uv invocations as Task 1.1.o.b,
+# overwriting the committed files. No --upgrade: existing pins are kept
+# unless something about the dependency graph itself changed. --no-header:
+# uv's default header embeds the literal -o path used, which would make
+# lock-check's tmp-directory comparison below always show a spurious diff.
+lock:
+	uv pip compile backend/pyproject.toml --universal --python-version 3.12 --generate-hashes --no-header -o backend/requirements.lock
+	uv pip compile backend/pyproject.toml --universal --python-version 3.12 --extra dev --generate-hashes --no-header -o backend/requirements-dev.lock
+
+lock-upgrade:
+	uv pip compile backend/pyproject.toml --universal --python-version 3.12 --generate-hashes --no-header --upgrade -o backend/requirements.lock
+	uv pip compile backend/pyproject.toml --universal --python-version 3.12 --extra dev --generate-hashes --no-header --upgrade -o backend/requirements-dev.lock
+	@echo "Review the lockfile diff, run 'make test-all', then commit."
+
+# Regenerates both lockfiles into a throwaway directory and diffs each
+# against the committed version -- the committed files are never touched.
+# The temp directory is always removed, whether the diff passes or fails.
+lock-check:
+	@tmp=$$(mktemp -d); \
+	uv pip compile backend/pyproject.toml --universal --python-version 3.12 --generate-hashes --no-header -o $$tmp/requirements.lock; \
+	uv pip compile backend/pyproject.toml --universal --python-version 3.12 --extra dev --generate-hashes --no-header -o $$tmp/requirements-dev.lock; \
+	diff -u backend/requirements.lock $$tmp/requirements.lock; rc1=$$?; \
+	diff -u backend/requirements-dev.lock $$tmp/requirements-dev.lock; rc2=$$?; \
+	rm -rf $$tmp; \
+	if [ $$rc1 -ne 0 ] || [ $$rc2 -ne 0 ]; then echo "Lockfiles are out of date: run 'make lock' and review the change." >&2; exit 1; fi
+
+# --require-hashes is already implied by the lockfiles' own --hash entries;
+# kept explicit for readability. Exits non-zero on any finding (pip-audit's
+# default) -- never swallowed here.
+audit:
+	pip-audit --require-hashes -r backend/requirements.lock -r backend/requirements-dev.lock

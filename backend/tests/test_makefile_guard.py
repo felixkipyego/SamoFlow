@@ -22,6 +22,11 @@ _EXPECTED_TARGETS = {
     "test-all",
     "lint",
     "evals",
+    "install",
+    "lock",
+    "lock-upgrade",
+    "lock-check",
+    "audit",
 }
 
 # A real target line ("name:" or "name: prereq"), not a variable assignment
