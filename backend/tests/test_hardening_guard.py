@@ -66,6 +66,22 @@ def _check_dockerfile(text: str) -> list[str]:
         if stripped.startswith("COPY") and ".env" in stripped:
             violations.append(f"copies .env into the image: {stripped!r}")
 
+    # Task 1.1.o.d: the runtime install must be hash-checked against the
+    # lockfile, not a bare "pip install ." trusting whatever PyPI serves.
+    lock_install_lines = [
+        line for line in lines if "pip install" in line and "requirements.lock" in line
+    ]
+    if not lock_install_lines:
+        violations.append(
+            "no 'pip install ... requirements.lock' line found (the runtime "
+            "install must be hash-checked against the lockfile)"
+        )
+    for line in lock_install_lines:
+        if "--require-hashes" not in line:
+            violations.append(
+                f"install from requirements.lock does not use --require-hashes: {line.strip()!r}"
+            )
+
     return violations
 
 

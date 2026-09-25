@@ -27,11 +27,17 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 WORKDIR /app
 
 # Only what the runtime needs: no tests/, no .env, no dev dependencies.
+# requirements.lock (not requirements-dev.lock: the image never needs dev
+# tools) is hash-checked via --require-hashes, then the project itself is
+# installed with --no-deps since its dependencies already came from the
+# lockfile (Task 1.1.o.d; mirrors the Makefile's "install" target).
 COPY pyproject.toml ./pyproject.toml
+COPY requirements.lock ./requirements.lock
 COPY app/ ./app/
 
 RUN python -m venv /venv \
-    && /venv/bin/pip install --no-cache-dir . \
+    && /venv/bin/pip install --no-cache-dir --require-hashes -r requirements.lock \
+    && /venv/bin/pip install --no-cache-dir --no-deps . \
     && /venv/bin/pip uninstall --yes pip
 
 
@@ -49,6 +55,18 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 # UID wherever it sets a user: or touches ownership of files from this image.
 RUN groupadd --system --gid 10001 app \
     && useradd --system --uid 10001 --gid app --no-create-home --shell /usr/sbin/nologin app
+
+# The base image's own system Python ships pip via ensurepip at build time
+# (not a dpkg package -- there is no "apt remove" for it, and the official
+# image never removes it). "pip uninstall" alone is not enough: ensurepip
+# keeps a fully offline bundled pip wheel that reinstates a working pip with
+# one command (verified by hand: uninstalling pip, then running
+# "python3 -m ensurepip" successfully reinstalled it). Task 1.1.o.d removes
+# both. sysconfig (not a hard-coded "python3.12" path) finds ensurepip's
+# directory, so this does not silently stop working if PYTHON_IMAGE above is
+# ever bumped to a different Python minor version.
+RUN python3 -m pip uninstall --yes pip \
+    && rm -rf "$(python3 -c 'import sysconfig; print(sysconfig.get_path("stdlib"))')/ensurepip"
 
 WORKDIR /app
 

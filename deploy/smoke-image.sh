@@ -45,14 +45,19 @@ uid=$(docker run --rm --entrypoint id "$image" -u)
 [ "$uid" = "10001" ] || fail "container uid is $uid, expected 10001"
 echo "PASS: runs as uid 10001"
 
-# (b) the app venv has no pip module (1.1.g removes it from /venv).
-# NOTE: the base image's own system Python separately ships its own pip,
-# still on PATH -- out of scope for this check (see PROJECT_SPEC.md open
-# markers, owner 1.1.o/Phase 7).
+# (b) neither Python has a working pip: the app venv's own pip is removed
+# in the builder stage (1.1.g), and the base image's system Python's pip
+# (installed via ensurepip at image-build time -- not a dpkg package, so
+# there is no "apt remove" for it) is removed in the final stage (1.1.o.d).
+# "python" resolves to the venv (PATH="/venv/bin:$PATH"); the system
+# interpreter is checked by its absolute path so it can't be shadowed.
 if docker run --rm --entrypoint sh "$image" -c 'python -m pip --version' >/dev/null 2>&1; then
     fail "pip is present in the app venv"
 fi
-echo "PASS: pip not present in the app venv"
+if docker run --rm --entrypoint sh "$image" -c '/usr/local/bin/python3 -m pip --version' >/dev/null 2>&1; then
+    fail "pip is present in the system Python"
+fi
+echo "PASS: pip not present in the app venv or the system Python"
 
 # (c) a bogus mode is rejected with the usage line and exit code 2
 set +e
