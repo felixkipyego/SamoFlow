@@ -117,11 +117,26 @@ def _check(text: str) -> list[str]:
         if not any(_TIMEOUT.match(line) for line in job_lines):
             violations.append(f"job {name!r} has no timeout-minutes")
 
+    # Task 1.1.o.e: install and lockfile-drift-check must run, and in the
+    # right relative order -- install first (it puts uv on PATH, which
+    # lock-check needs), then lock-check before lint/test-all (fail fast on
+    # drift before spending time on anything else).
     test_commands = _run_commands(jobs.get("test", []))
-    if not any("make lint" in cmd for cmd in test_commands):
-        violations.append("job 'test' does not run 'make lint'")
-    if not any("make test-all" in cmd for cmd in test_commands):
-        violations.append("job 'test' does not run 'make test-all'")
+    required_order = ["make install", "make lock-check", "make lint", "make test-all"]
+    indexes = {}
+    for required in required_order:
+        matches = [i for i, cmd in enumerate(test_commands) if required in cmd]
+        if not matches:
+            violations.append(f"job 'test' does not run {required!r}")
+        else:
+            indexes[required] = matches[0]
+    if len(indexes) == len(required_order):
+        ordered = [indexes[r] for r in required_order]
+        if ordered != sorted(ordered):
+            violations.append(
+                "job 'test' does not run "
+                f"{required_order} in that relative order: got {indexes}"
+            )
 
     return violations
 
