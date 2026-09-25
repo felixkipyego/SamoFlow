@@ -194,6 +194,7 @@ A production-ready, multi-tenant, embeddable AI widget platform: one website is 
 - 2026-09-20: Step 1.1.o residual risk, owner Phase 7 — `pip install --require-hashes` (implied automatically by any already-hashed requirements file) does not extend to `[build-system] requires` packages: by default, `pip install --no-deps .` (and `pip install -e .`) builds in an isolated environment that downloads the build backend (hatchling) and its own transitive dependencies with no hash verification, regardless of `--require-hashes` on the main install. Confirmed empirically against the installed pip 26.2.1: `pip install --help`'s `--no-build-isolation` text reads "Build dependencies specified by PEP 518 must be already installed if this option is used" (i.e. isolation is on, and those build dependencies are fetched fresh and unpinned, by default); this matches a filed, still-open pip issue describing exactly this gap as an undocumented bypass (`pypa/pip#13984`). No discrepancy from how the user described the risk. 1.1.o does not add `--no-build-isolation` or wheel-building machinery (that would require independently pinning and hash-verifying hatchling's own dependency tree — out of scope here). Accepted as a residual risk for now because: hatchling is already pinned to an exact version in `[build-system] requires` (not a floating range); the runtime image ships no build tools or pip at all once 1.1.o.d lands, so a compromised build backend cannot act again after the image is built, only during it; and CI has no secrets for a malicious build step to exfiltrate.
 - 2026-09-20: Step 1.1.o task counter — the 8 approved sub-tasks (1.1.o.a–1.1.o.h) each count individually toward the rule 9 counter. It reaches n=3 after 1.1.o.a, so a report-only duplication check runs then and is given to the user before 1.1.o.b starts (not run automatically). Counter left at n=2 until that check happens.
 - 2026-09-20: Step 1.1.o.f pre-approved: factor the line-based workflow-guard checker (currently `backend/tests/test_ci_guard.py`) into one shared module used by both `ci.yml` and the new `security.yml`, instead of duplicating the same rule logic in a second file. Claude does not push branches or trigger workflow runs in this repo; the user pushes to `main` and runs `workflow_dispatch` from the Actions tab themselves once `security.yml` is on `main` (required for `workflow_dispatch` to see the file).
+- 2026-09-25: Step 1.1.o.a — `uv==0.12.19` and `pip-audit==2.10.1` added to `[project.optional-dependencies].dev` in `backend/pyproject.toml`, pinned with `==`, same style as the existing dev entries. Verified against PyPI's JSON API on 2026-09-25 (not recalled from memory): `pip-audit` is unchanged from the 1.1.o versions-check decision (2.10.1); `uv` had moved on from that check's 0.12.17 to 0.12.19, so the newer version was used. Both `requires-python` constraints (`uv` `>=3.8`, `pip-audit` `>=3.10`) are satisfied by the pinned 3.12. Installed into a clean venv built from the pinned Python 3.12.14 interpreter via `pip install -e "./backend[dev]"`; `uv --version` and `pip-audit --version` printed exactly the pinned versions. `backend/tests/test_pyproject.py`'s `test_runtime_dependencies_are_exactly_approved` and `test_dev_dependencies_are_exactly_approved` (and their now-unused `APPROVED_RUNTIME_DEPENDENCIES`/`APPROVED_DEV_DEPENDENCIES` constants) were removed — they duplicated an exact-set check that 1.1.o.b's lockfile-consistency tests replace; `make test` went from 106 passed/1 skipped to exactly 104 passed/1 skipped, confirming no other test was affected. `make lint` clean. CI's install step (`.github/workflows/ci.yml`) is unchanged (`pip install -e "./backend[dev]"`) and picks up both new dev tools automatically.
 
 ### Estimates to measure
 
@@ -218,9 +219,9 @@ A production-ready, multi-tenant, embeddable AI widget platform: one website is 
 
 ## 7. Current task and next task
 
-Current: Step 1.1 Repo skeleton and Compose, subtask 1.1.o.a pyproject.toml: add uv + pip-audit to the dev extra; trim the exact-dependency-set tests.
-Next: Step 1.1.o.b Generate backend/requirements.lock and backend/requirements-dev.lock; add lockfile-consistency tests.
-Do not modify (completed tasks): 1.1.a, 1.1.b, 1.1.c, 1.1.d, 1.1.e, 1.1.f, 1.1.g, 1.1.h, 1.1.i, 1.1.j, 1.1.k, 1.1.l, 1.1.m, 1.1.n.
+Current: Step 1.1.o.b Generate backend/requirements.lock and backend/requirements-dev.lock; add lockfile-consistency tests.
+Next: Step 1.1.o.c Makefile: install, lock, lock-upgrade, lock-check, audit targets; update the Makefile guard test.
+Do not modify (completed tasks): 1.1.a, 1.1.b, 1.1.c, 1.1.d, 1.1.e, 1.1.f, 1.1.g, 1.1.h, 1.1.i, 1.1.j, 1.1.k, 1.1.l, 1.1.m, 1.1.n, 1.1.o.a.
 
 ### Step 1.1 task list (approved)
 
@@ -241,7 +242,7 @@ Do not modify (completed tasks): 1.1.a, 1.1.b, 1.1.c, 1.1.d, 1.1.e, 1.1.f, 1.1.g
 | 1.1.m | CI workflow: `test` job (lint + `make test-all` against the Compose `test-db`, no separate Postgres service) and `image` job (build + `deploy/smoke-image.sh`); SHA-pinned actions, read-only permissions, safe for fork PRs | Done |
 | 1.1.n | .gitignore and .dockerignore: exclude .env/secrets, virtualenvs, caches and build output; keep .env.example tracked | Done |
 | 1.1.o | Lockfile with hashes for backend dependencies (including transitive ones) and a vulnerability scan wired into CI. Tool choices approved (rule 8); broken down into 1.1.o.a–1.1.o.h below | Not started |
-| 1.1.o.a | pyproject.toml: add uv + pip-audit to the dev extra (pinned); trim the exact-dependency-set tests in test_pyproject.py | Not started |
+| 1.1.o.a | pyproject.toml: add uv + pip-audit to the dev extra (pinned); trim the exact-dependency-set tests in test_pyproject.py | Done |
 | 1.1.o.b | Generate backend/requirements.lock and backend/requirements-dev.lock (hash-pinned via uv); add lockfile-consistency tests | Not started |
 | 1.1.o.c | Makefile: install, lock, lock-upgrade, lock-check, audit targets; update the Makefile guard test | Not started |
 | 1.1.o.d | Dockerfile: install from requirements.lock with --require-hashes; strip pip from the venv and system Python; update smoke-image.sh, the hardening guard test and the dockerignore guard test | Not started |
@@ -252,7 +253,7 @@ Do not modify (completed tasks): 1.1.a, 1.1.b, 1.1.c, 1.1.d, 1.1.e, 1.1.f, 1.1.g
 
 ## 8. Task counter since the last duplication check
 
-n = 2 (run the duplication check at 3; never exceed 4) — 2 tasks since the 1.1.k/j/l check (1.1.m, 1.1.n)
+n = 3 (run the duplication check at 3; never exceed 4) — 3 tasks since the 1.1.k/j/l check (1.1.m, 1.1.n, 1.1.o.a)
 
 ## 9. Open markers
 
@@ -260,7 +261,6 @@ n = 2 (run the duplication check at 3; never exceed 4) — 2 tasks since the 1.1
 - Owner Phase 7: allowed Host header validation (currently any Host is accepted; decide with the proxy configuration). Not addressed by 1.1.i — that is app-level middleware, out of docker-compose.yml's scope.
 - Owner: to be scheduled — CORS and OPTIONS handling: decide with the widget and admin work (Phase 5 and 6); today OPTIONS returns 405.
 - TODO(2.1): `backend/app/worker.py`'s `run()` has no job logic yet; the job queue consumer is added in Step 2.1.
-- Owner 1.1.o.a: remove the exact dependency-set test in test_pyproject.py when the lockfile and CI audit exist.
 - Owner 1.1.o.f: image vulnerability scanning (Grype via anchore/scan-action, weekly + path-filtered on push/PR). Image secret scanning is a separate, still-unscheduled concern, not covered by 1.1.o.
 - Owner CI or Phase 7: verify the image builds and runs on arm64, not just the amd64 host it was built on so far.
 - Owner Phase 7: shutdown behaviour of the API under load (1.1.g verified graceful shutdown at idle; 1.1.i verified api/worker stop in under 10 seconds via `docker compose stop`, still at idle, not under load).
