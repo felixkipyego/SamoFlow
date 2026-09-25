@@ -15,10 +15,10 @@
 # the text without ever touching the real files -- see this module's own
 # review notes for how each rule was proved able to fail.
 import re
-from pathlib import Path
 
-BACKEND_DIR = Path(__file__).resolve().parent.parent
-REPO_ROOT = BACKEND_DIR.parent
+from tests.conftest import REPO_ROOT, is_comment_or_blank, read_lines
+
+BACKEND_DIR = REPO_ROOT / "backend"
 DOCKERFILE_PATH = BACKEND_DIR / "Dockerfile"
 COMPOSE_PATH = REPO_ROOT / "deploy" / "docker-compose.yml"
 
@@ -112,9 +112,9 @@ def _check_compose(text: str) -> list[str]:
         if line.strip() != "ports:":
             continue
         for entry in _block_after(lines, i):
-            stripped = entry.strip()
-            if not stripped or stripped.startswith("#"):
+            if is_comment_or_blank(entry):
                 continue
+            stripped = entry.strip()
             if not (stripped.startswith('- "127.0.0.1:') or stripped.startswith("- '127.0.0.1:")):
                 violations.append(f"published port entry not bound to 127.0.0.1: {stripped!r}")
 
@@ -122,12 +122,14 @@ def _check_compose(text: str) -> list[str]:
 
 
 def test_dockerfile_hardening():
-    violations = _check_dockerfile(DOCKERFILE_PATH.read_text())
+    text = "\n".join(read_lines(DOCKERFILE_PATH))
+    violations = _check_dockerfile(text)
     assert not violations, "backend/Dockerfile hardening violations:\n" + "\n".join(violations)
 
 
 def test_compose_hardening():
-    violations = _check_compose(COMPOSE_PATH.read_text())
+    text = "\n".join(read_lines(COMPOSE_PATH))
+    violations = _check_compose(text)
     assert not violations, "deploy/docker-compose.yml hardening violations:\n" + "\n".join(
         violations
     )

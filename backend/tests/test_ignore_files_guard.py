@@ -4,7 +4,7 @@
 # excluding a file the Dockerfile actually COPYs (which would break the
 # image build). Line-based text checks only (no git shell-out, no docker
 # build), matching test_makefile_guard.py's / test_ci_guard.py's style.
-from tests.conftest import REPO_ROOT
+from tests.conftest import REPO_ROOT, is_comment_or_blank, read_lines
 
 _GITIGNORE = REPO_ROOT / ".gitignore"
 _DOCKERIGNORE = REPO_ROOT / "backend" / ".dockerignore"
@@ -16,13 +16,11 @@ _DOCKERFILE_COPY_PATTERNS = ("app", "alembic", "alembic.ini", "pyproject.toml", 
 
 
 def _gitignore_lines():
-    assert _GITIGNORE.is_file(), f".gitignore not found at {_GITIGNORE}"
-    return _GITIGNORE.read_text().splitlines()
+    return read_lines(_GITIGNORE)
 
 
 def _dockerignore_lines():
-    assert _DOCKERIGNORE.is_file(), f"backend/.dockerignore not found at {_DOCKERIGNORE}"
-    return _DOCKERIGNORE.read_text().splitlines()
+    return read_lines(_DOCKERIGNORE)
 
 
 def test_gitignore_ignores_secrets_and_caches():
@@ -95,7 +93,7 @@ def test_dockerignore_never_excludes_a_file_the_dockerfile_copies():
     lines = _dockerignore_lines()
     for raw_line in lines:
         line = raw_line.strip()
-        if not line or line.startswith("#") or line.startswith("!"):
+        if is_comment_or_blank(raw_line) or line.startswith("!"):
             continue
         # Strip a single trailing slash (directory-only patterns like "app/")
         # before comparing, so "app/" is recognized as matching "app".

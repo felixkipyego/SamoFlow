@@ -12,7 +12,10 @@
 # since Task 1.1.i (rather than a hand-typed "docker run"). Duplication
 # check after 1.1.k/j/l moves REPO_ROOT here (byte-identical
 # Path(__file__).resolve().parents[2] in test_evals_placeholder.py,
-# test_makefile_guard.py and test_layout_placeholders.py).
+# test_makefile_guard.py and test_layout_placeholders.py). Duplication check
+# after 1.1.m/n/o.a adds is_comment_or_blank() and read_lines(), each
+# repeated (with minor variations) across test_ci_guard.py,
+# test_ignore_files_guard.py and test_hardening_guard.py.
 import importlib
 import os
 import sys
@@ -26,6 +29,16 @@ from app.config import POSTGRES_SCHEME, Settings, get_settings
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
 REQUIRED_VARS = [name.upper() for name in Settings.model_fields]
+
+
+def is_comment_or_blank(line: str) -> bool:
+    stripped = line.strip()
+    return stripped == "" or stripped.startswith("#")
+
+
+def read_lines(path: Path) -> list[str]:
+    assert path.is_file(), f"{path} not found"
+    return path.read_text().splitlines()
 
 # Shared by test_config.py and test_worker.py: a minimal environment that
 # passes every Settings validator, with values chosen only to be valid, not

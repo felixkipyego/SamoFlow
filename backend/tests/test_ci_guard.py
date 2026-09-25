@@ -2,19 +2,22 @@
 # Task 1.1.m: static checks on .github/workflows/ci.yml, so a future edit
 # cannot silently widen permissions, switch to the target-repo-context
 # trigger, reference a secret, use a floating/mutable action reference, run
-# on a "latest" runner, drop a job timeout, or stop running lint/tests.
-# Deliberately no YAML parser (no new dependency): line-based text checks
-# only, the same style test_makefile_guard.py and test_hardening_guard.py
-# already use. _check() takes the file text as a plain string, not a path,
-# so each rule can be proved able to fail on an edited copy of the text
-# without ever touching the real file.
+# on a "latest" runner, drop a job timeout, stop running lint/tests, stop
+# building/smoke-testing the image, or let a checkout step persist
+# credentials. Deliberately no YAML parser (no new dependency): line-based
+# text checks only, the same style test_makefile_guard.py and
+# test_hardening_guard.py already use. _check() takes the file text as a
+# plain string, not a path, so each rule can be proved able to fail on an
+# edited copy of the text without ever touching the real file.
 import re
 
-from tests.conftest import REPO_ROOT
+from tests.conftest import REPO_ROOT, is_comment_or_blank, read_lines
 
 CI_YML_PATH = REPO_ROOT / ".github" / "workflows" / "ci.yml"
 
 _USES_LINE = re.compile(r"^\s*uses:\s*(\S+)")
+_CHECKOUT_USES = re.compile(r"^\s*uses:\s*actions/checkout@")
+_STEP_HEADER = re.compile(r"^\s*- name:")
 _RUN_LINE = re.compile(r"^\s*run:\s*(.*)$")
 _WRITE_PERMISSION = re.compile(r"^\s*[\w-]+:\s*write\b")
 _RUNS_ON = re.compile(r"^\s*runs-on:\s*(\S+)")
@@ -22,12 +25,33 @@ _TIMEOUT = re.compile(r"^\s*timeout-minutes:\s*\d+")
 _JOB_HEADER = re.compile(r"^  (\w[\w-]*):\s*$")
 
 
-def _lines():
-    assert CI_YML_PATH.is_file(), (
-        f"ci.yml not found at {CI_YML_PATH}. If it moved, update the path "
-        "derivation in this test."
-    )
-    return CI_YML_PATH.read_text().splitlines()
+def _checkout_step_blocks(lines):
+    # Each block starts at a "uses: actions/checkout@..." line and runs
+    # until the next step header ("- name: ..."), or EOF.
+    blocks = []
+    for i, line in enumerate(lines):
+        if not _CHECKOUT_USES.match(line):
+            continue
+        block = [line]
+        for later in lines[i + 1 :]:
+            if _STEP_HEADER.match(later):
+                break
+            block.append(later)
+        blocks.append(block)
+    return blocks
+
+
+def _run_commands(job_lines):
+    # Restricted to actual "run:" command lines (comments excluded), so a
+    # step's explanatory comment mentioning a command in prose cannot mask
+    # its real command being removed or changed.
+    return [
+        run_match.group(1)
+        for line in job_lines
+        if not is_comment_or_blank(line)
+        for run_match in [_RUN_LINE.match(line)]
+        if run_match
+    ]
 
 
 def _jobs(lines):
@@ -61,7 +85,7 @@ def _check(text: str) -> list[str]:
     elif "contents: read" not in text:
         violations.append("'permissions:' block does not grant 'contents: read'")
     for line in lines:
-        if line.strip().startswith("#"):
+        if is_comment_or_blank(line):
             continue
         if _WRITE_PERMISSION.match(line):
             violations.append(f"a permission grants write access: {line.strip()!r}")
@@ -93,24 +117,56 @@ def _check(text: str) -> list[str]:
         if not any(_TIMEOUT.match(line) for line in job_lines):
             violations.append(f"job {name!r} has no timeout-minutes")
 
-    # Restricted to actual "run:" command lines (comments excluded), so a
-    # step's explanatory comment mentioning "make test-all" in prose cannot
-    # mask its command being removed or changed.
-    run_commands = [
-        run_match.group(1)
-        for line in jobs.get("test", [])
-        if not line.strip().startswith("#")
-        for run_match in [_RUN_LINE.match(line)]
-        if run_match
-    ]
-    if not any("make lint" in cmd for cmd in run_commands):
+    test_commands = _run_commands(jobs.get("test", []))
+    if not any("make lint" in cmd for cmd in test_commands):
         violations.append("job 'test' does not run 'make lint'")
-    if not any("make test-all" in cmd for cmd in run_commands):
+    if not any("make test-all" in cmd for cmd in test_commands):
         violations.append("job 'test' does not run 'make test-all'")
 
     return violations
 
 
+def _checkout_persist_credentials_violations(text: str) -> list[str]:
+    lines = text.splitlines()
+    violations = []
+    for block in _checkout_step_blocks(lines):
+        if not any("persist-credentials: false" in line for line in block):
+            violations.append(
+                "an actions/checkout step does not set persist-credentials: "
+                "false (needed so a job running an untrusted fork PR's code "
+                f"cannot push back with this repo's token): {block[0].strip()!r}"
+            )
+    return violations
+
+
+def _image_job_build_and_smoke_violations(text: str) -> list[str]:
+    jobs = _jobs(text.splitlines())
+    image_commands = _run_commands(jobs.get("image", []))
+    violations = []
+    if not any("docker build" in cmd for cmd in image_commands):
+        violations.append(
+            "job 'image' does not run a 'docker build' command (needed "
+            "before the smoke test can run against the built image)"
+        )
+    if not any("smoke-image.sh" in cmd for cmd in image_commands):
+        violations.append(
+            "job 'image' does not run deploy/smoke-image.sh (this is what "
+            "catches non-root, missing-server-header and password-leak "
+            "regressions in the built image)"
+        )
+    return violations
+
+
 def test_ci_workflow():
-    violations = _check(CI_YML_PATH.read_text())
+    violations = _check("\n".join(read_lines(CI_YML_PATH)))
+    assert not violations, ".github/workflows/ci.yml violations:\n" + "\n".join(violations)
+
+
+def test_checkout_steps_never_persist_credentials():
+    violations = _checkout_persist_credentials_violations("\n".join(read_lines(CI_YML_PATH)))
+    assert not violations, ".github/workflows/ci.yml violations:\n" + "\n".join(violations)
+
+
+def test_image_job_builds_and_smoke_tests_the_image():
+    violations = _image_job_build_and_smoke_violations("\n".join(read_lines(CI_YML_PATH)))
     assert not violations, ".github/workflows/ci.yml violations:\n" + "\n".join(violations)

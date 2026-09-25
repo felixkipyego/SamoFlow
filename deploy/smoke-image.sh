@@ -97,10 +97,12 @@ echo "PASS: worker container stops within 10s (exit 0)"
 # (f) migrate mode against an unreachable host fails without leaking the password.
 # invalid.invalid (RFC 2606) never resolves, so this fails fast on DNS, not a
 # TCP-connect timeout; PGCONNECT_TIMEOUT bounds the worst case regardless.
+# Built from APP_ENV_ARGS (same base env as checks d/e) with DATABASE_URL
+# overridden to the unreachable host and PGCONNECT_TIMEOUT added -- repeated
+# -e flags for the same name are last-wins, so the later DATABASE_URL wins.
 set +e
-out=$(docker run --rm -e APP_ENV=development -e PGCONNECT_TIMEOUT=5 \
+out=$(docker run --rm $APP_ENV_ARGS -e PGCONNECT_TIMEOUT=5 \
     -e DATABASE_URL=postgresql+psycopg://widgetplatform:change-me@invalid.invalid:5432/widgetplatform \
-    -e QDRANT_URL=http://qdrant:6333 -e API_HOST=0.0.0.0 -e API_PORT=8000 \
     "$image" migrate 2>&1)
 rc=$?
 set -e
