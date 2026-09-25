@@ -9,6 +9,13 @@
 
 COMPOSE = docker compose --env-file .env -f deploy/docker-compose.yml
 
+# Shared by lock, lock-upgrade and lock-check (Task 1.1.o.b's uv invocation):
+# each target adds only --extra dev, --upgrade or the -o/output path it needs.
+# --no-header: uv's default header embeds the literal -o path used, which
+# would make lock-check's tmp-directory comparison always show a spurious
+# diff (Task 1.1.o.c).
+UV_COMPILE = uv pip compile backend/pyproject.toml --universal --python-version 3.12 --generate-hashes --no-header
+
 .DEFAULT_GOAL := help
 
 .PHONY: help env up down down-volumes migrate test test-db test-db-down test-all lint evals install lock lock-upgrade lock-check audit
@@ -97,18 +104,16 @@ install:
 	pip install --require-hashes -r backend/requirements-dev.lock
 	pip install --no-deps -e ./backend
 
-# Regenerates both lockfiles with the same uv invocations as Task 1.1.o.b,
+# Regenerates both lockfiles with the same uv invocation as Task 1.1.o.b,
 # overwriting the committed files. No --upgrade: existing pins are kept
-# unless something about the dependency graph itself changed. --no-header:
-# uv's default header embeds the literal -o path used, which would make
-# lock-check's tmp-directory comparison below always show a spurious diff.
+# unless something about the dependency graph itself changed.
 lock:
-	uv pip compile backend/pyproject.toml --universal --python-version 3.12 --generate-hashes --no-header -o backend/requirements.lock
-	uv pip compile backend/pyproject.toml --universal --python-version 3.12 --extra dev --generate-hashes --no-header -o backend/requirements-dev.lock
+	$(UV_COMPILE) -o backend/requirements.lock
+	$(UV_COMPILE) --extra dev -o backend/requirements-dev.lock
 
 lock-upgrade:
-	uv pip compile backend/pyproject.toml --universal --python-version 3.12 --generate-hashes --no-header --upgrade -o backend/requirements.lock
-	uv pip compile backend/pyproject.toml --universal --python-version 3.12 --extra dev --generate-hashes --no-header --upgrade -o backend/requirements-dev.lock
+	$(UV_COMPILE) --upgrade -o backend/requirements.lock
+	$(UV_COMPILE) --extra dev --upgrade -o backend/requirements-dev.lock
 	@echo "Review the lockfile diff, run 'make test-all', then commit."
 
 # Regenerates both lockfiles into a throwaway directory and diffs each
@@ -116,8 +121,8 @@ lock-upgrade:
 # The temp directory is always removed, whether the diff passes or fails.
 lock-check:
 	@tmp=$$(mktemp -d); \
-	uv pip compile backend/pyproject.toml --universal --python-version 3.12 --generate-hashes --no-header -o $$tmp/requirements.lock; \
-	uv pip compile backend/pyproject.toml --universal --python-version 3.12 --extra dev --generate-hashes --no-header -o $$tmp/requirements-dev.lock; \
+	$(UV_COMPILE) -o $$tmp/requirements.lock; \
+	$(UV_COMPILE) --extra dev -o $$tmp/requirements-dev.lock; \
 	diff -u backend/requirements.lock $$tmp/requirements.lock; rc1=$$?; \
 	diff -u backend/requirements-dev.lock $$tmp/requirements-dev.lock; rc2=$$?; \
 	rm -rf $$tmp; \

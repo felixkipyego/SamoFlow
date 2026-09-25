@@ -137,3 +137,18 @@ def test_dev_lock_is_a_superset_of_runtime_lock():
         "requirements-dev.lock is missing packages present in "
         f"requirements.lock: {sorted(missing)}"
     )
+
+
+def test_lockfiles_agree_on_shared_package_versions():
+    # The superset check above only compares package *names*; a package
+    # present in both lockfiles could still be pinned to different versions
+    # (e.g. a hand-edit or a bad merge), which neither that test nor the
+    # pyproject.toml-vs-lockfile tests above would catch.
+    runtime = _lockfile_packages(RUNTIME_LOCK_PATH)
+    dev = _lockfile_packages(DEV_LOCK_PATH)
+    for name in sorted(set(runtime) & set(dev)):
+        assert runtime[name]["version"] == dev[name]["version"], (
+            f"{name!r} is pinned to {runtime[name]['version']!r} in "
+            f"requirements.lock but {dev[name]['version']!r} in "
+            "requirements-dev.lock"
+        )

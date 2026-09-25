@@ -82,6 +82,16 @@ def _check_dockerfile(text: str) -> list[str]:
                 f"install from requirements.lock does not use --require-hashes: {line.strip()!r}"
             )
 
+    # The image must only ever install from the runtime lockfile; the dev
+    # lockfile would pull pytest, ruff, uv, pip-audit etc. into what must
+    # stay a minimal runtime install. Comments excluded, so an explanatory
+    # comment naming requirements-dev.lock in prose (e.g. "not X: ...")
+    # cannot itself trigger this check.
+    if any("requirements-dev.lock" in line for line in lines if not is_comment_or_blank(line)):
+        violations.append(
+            "references requirements-dev.lock (the image must use requirements.lock only)"
+        )
+
     return violations
 
 

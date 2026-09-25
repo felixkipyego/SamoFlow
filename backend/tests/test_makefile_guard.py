@@ -5,7 +5,7 @@
 # why every compose call must pass --env-file/-f explicitly).
 import re
 
-from tests.conftest import REPO_ROOT
+from tests.conftest import REPO_ROOT, read_lines
 
 _MAKEFILE = REPO_ROOT / "Makefile"
 
@@ -35,14 +35,6 @@ _EXPECTED_TARGETS = {
 _TARGET_LINE = re.compile(r"^([A-Za-z][A-Za-z0-9_-]*):(?!=)")
 
 
-def _lines():
-    assert _MAKEFILE.is_file(), (
-        f"Makefile not found at {_MAKEFILE}. If it moved, update the path "
-        "derivation in this test (Makefile relative to REPO_ROOT)."
-    )
-    return _MAKEFILE.read_text().splitlines()
-
-
 def _targets_and_recipes(lines):
     # Maps each target name to the list of its recipe lines (the tab-indented
     # lines that follow it, up to the next target or end of file).
@@ -62,20 +54,22 @@ def _targets_and_recipes(lines):
 
 
 def _compose_line():
-    for line in _lines():
+    for line in read_lines(_MAKEFILE):
         if line.startswith("COMPOSE"):
             return line
     return None
 
 
 def test_all_expected_targets_are_declared():
-    recipes = _targets_and_recipes(_lines())
+    recipes = _targets_and_recipes(read_lines(_MAKEFILE))
     missing = _EXPECTED_TARGETS - recipes.keys()
     assert not missing, f"Makefile is missing target(s): {sorted(missing)}"
 
 
 def test_phony_lists_every_target():
-    phony_line = next((ln for ln in _lines() if ln.strip().startswith(".PHONY:")), None)
+    phony_line = next(
+        (ln for ln in read_lines(_MAKEFILE) if ln.strip().startswith(".PHONY:")), None
+    )
     assert phony_line is not None, "Makefile has no .PHONY declaration"
     declared = set(phony_line.split(":", 1)[1].split())
     missing = _EXPECTED_TARGETS - declared
@@ -95,7 +89,7 @@ def test_compose_variable_has_required_flags():
 
 
 def test_every_docker_compose_invocation_goes_through_the_compose_variable():
-    recipes = _targets_and_recipes(_lines())
+    recipes = _targets_and_recipes(read_lines(_MAKEFILE))
     for target, target_recipes in recipes.items():
         for recipe_line in target_recipes:
             assert "docker compose" not in recipe_line, (
@@ -105,7 +99,7 @@ def test_every_docker_compose_invocation_goes_through_the_compose_variable():
 
 
 def test_no_recipe_line_ignores_errors_with_a_leading_dash():
-    recipes = _targets_and_recipes(_lines())
+    recipes = _targets_and_recipes(read_lines(_MAKEFILE))
     for target, target_recipes in recipes.items():
         for recipe_line in target_recipes:
             assert not recipe_line.startswith("-"), (
@@ -115,7 +109,7 @@ def test_no_recipe_line_ignores_errors_with_a_leading_dash():
 
 
 def test_no_recipe_line_swallows_errors_with_or_true():
-    recipes = _targets_and_recipes(_lines())
+    recipes = _targets_and_recipes(read_lines(_MAKEFILE))
     for target, target_recipes in recipes.items():
         for recipe_line in target_recipes:
             assert "|| true" not in recipe_line, (
@@ -124,7 +118,7 @@ def test_no_recipe_line_swallows_errors_with_or_true():
 
 
 def test_down_never_removes_volumes_but_down_volumes_does():
-    recipes = _targets_and_recipes(_lines())
+    recipes = _targets_and_recipes(read_lines(_MAKEFILE))
     down_text = " ".join(recipes.get("down", []))
     down_volumes_text = " ".join(recipes.get("down-volumes", []))
     assert "-v" not in down_text, (
