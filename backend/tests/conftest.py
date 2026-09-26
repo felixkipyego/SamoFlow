@@ -15,7 +15,10 @@
 # test_makefile_guard.py and test_layout_placeholders.py). Duplication check
 # after 1.1.m/n/o.a adds is_comment_or_blank() and read_lines(), each
 # repeated (with minor variations) across test_ci_guard.py,
-# test_ignore_files_guard.py and test_hardening_guard.py.
+# test_ignore_files_guard.py and test_hardening_guard.py. Duplication check
+# after 1.1.o.h/1.1b/1.1c adds minimal_subprocess_env() (was byte-identical
+# in test_evals_placeholder.py and test_hooks.py, and re-listed inline in
+# test_alembic.py's _alembic_subprocess_env()).
 import importlib
 import os
 import sys
@@ -39,6 +42,18 @@ def is_comment_or_blank(line: str) -> bool:
 def read_lines(path: Path) -> list[str]:
     assert path.is_file(), f"{path} not found"
     return path.read_text().splitlines()
+
+
+def minimal_subprocess_env() -> dict[str, str]:
+    # Shared by test_evals_placeholder.py, test_hooks.py, and built on top of
+    # (with its own additional vars) by test_alembic.py's
+    # _alembic_subprocess_env(): PATH and HOME only, so a subprocess under
+    # test never inherits anything else from the caller's shell.
+    env = {}
+    for name in ("PATH", "HOME"):
+        if name in os.environ:
+            env[name] = os.environ[name]
+    return env
 
 # Shared by test_config.py and test_worker.py: a minimal environment that
 # passes every Settings validator, with values chosen only to be valid, not

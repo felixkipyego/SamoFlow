@@ -3,25 +3,13 @@
 # (task 3.7). These tests run it as a subprocess, isolated from this
 # process's cwd and environment, so a future real runner cannot pass this
 # suite by accident while still depending on ambient state.
-import os
 import subprocess
 import sys
 import tempfile
 
-from tests.conftest import REPO_ROOT
+from tests.conftest import REPO_ROOT, minimal_subprocess_env
 
 _RUN_PY = REPO_ROOT / "evals" / "run.py"
-
-
-# NOTE: test_alembic.py's _alembic_subprocess_env() builds a similar
-# restricted subprocess environment (the five Settings variables plus PATH
-# and HOME); this one is smaller because run.py reads no environment at all.
-def _subprocess_env():
-    env = {}
-    for name in ("PATH", "HOME"):
-        if name in os.environ:
-            env[name] = os.environ[name]
-    return env
 
 
 def test_run_py_exists():
@@ -39,7 +27,7 @@ def test_run_py_prints_placeholder_and_exits_zero():
             text=True,
             timeout=10,
             cwd=tmp_dir,
-            env=_subprocess_env(),
+            env=minimal_subprocess_env(),
         )
 
     assert result.returncode == 0

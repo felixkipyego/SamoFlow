@@ -28,7 +28,7 @@ import pytest
 import sqlalchemy as sa
 from sqlalchemy.exc import SQLAlchemyError
 
-from tests.conftest import require_test_database
+from tests.conftest import minimal_subprocess_env, require_test_database
 
 BACKEND_DIR = Path(__file__).resolve().parent.parent
 
@@ -50,9 +50,7 @@ def _alembic_subprocess_env(database_url):
     # anything else) in the caller's shell can never affect the connection
     # alembic/env.py makes.
     env = {**_HARMLESS_ENV, "DATABASE_URL": database_url}
-    for name in ("PATH", "HOME"):
-        if name in os.environ:
-            env[name] = os.environ[name]
+    env.update(minimal_subprocess_env())
     return env
 
 

@@ -3,24 +3,15 @@
 # PROJECT_SPEC.md §3, "make hooks"). Run as a subprocess with cwd=REPO_ROOT
 # (unlike evals/run.py, hooks.py's own correctness depends on the
 # repo-root-relative backend/ and evals/ paths it scans) and a restricted
-# environment (PATH/HOME only, matching test_evals_placeholder.py's pattern),
-# so a future real implementation cannot pass this suite by accident while
-# still depending on ambient state.
-import os
+# environment (tests.conftest.minimal_subprocess_env(), shared with
+# test_evals_placeholder.py), so a future real implementation cannot pass
+# this suite by accident while still depending on ambient state.
 import subprocess
 import sys
 
-from tests.conftest import REPO_ROOT
+from tests.conftest import REPO_ROOT, minimal_subprocess_env
 
 _HOOKS_PY = REPO_ROOT / "hooks.py"
-
-
-def _subprocess_env():
-    env = {}
-    for name in ("PATH", "HOME"):
-        if name in os.environ:
-            env[name] = os.environ[name]
-    return env
 
 
 def test_hooks_py_exists():
@@ -37,7 +28,7 @@ def test_hooks_py_runs_and_finds_known_markers():
         text=True,
         timeout=10,
         cwd=REPO_ROOT,
-        env=_subprocess_env(),
+        env=minimal_subprocess_env(),
     )
 
     assert result.returncode == 0, (
@@ -54,3 +45,26 @@ def test_hooks_py_runs_and_finds_known_markers():
     # so this test does not become brittle as markers are added/resolved).
     assert "worker.py" in result.stdout and "TODO(2.1)" in result.stdout
     assert "alembic/env.py" in result.stdout and "TODO(1.2)" in result.stdout
+
+
+def test_hooks_py_exits_cleanly_on_an_undecodable_file(tmp_path):
+    # A scratch tree, never the real backend/evals: a root directory named
+    # "backend" and "evals" (so main()'s own root-directory check passes)
+    # containing one non-UTF-8 .py file, proving hooks.py's documented
+    # failure mode (a file it can't read) without an uncaught traceback.
+    (tmp_path / "backend").mkdir()
+    (tmp_path / "evals").mkdir()
+    (tmp_path / "backend" / "bad.py").write_bytes(b"\xff\xfe\x00\x01")
+
+    result = subprocess.run(  # noqa: S603 (fixed args: sys.executable + a path, not user input)
+        [sys.executable, str(_HOOKS_PY)],
+        capture_output=True,
+        text=True,
+        timeout=10,
+        cwd=tmp_path,
+        env=minimal_subprocess_env(),
+    )
+
+    assert result.returncode != 0
+    assert "Traceback" not in result.stderr
+    assert "hooks.py: could not read a file during the scan:" in result.stderr

@@ -90,7 +90,7 @@ def main() -> int:
 
     try:
         markers = find_markers(roots)
-    except OSError as exc:
+    except (OSError, UnicodeDecodeError) as exc:
         print(f"hooks.py: could not read a file during the scan: {exc}", file=sys.stderr)
         return 1
 
