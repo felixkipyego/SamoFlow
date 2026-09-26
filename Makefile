@@ -18,7 +18,7 @@ UV_COMPILE = uv pip compile backend/pyproject.toml --universal --python-version 
 
 .DEFAULT_GOAL := help
 
-.PHONY: help env up down down-volumes migrate test test-db test-db-down test-all lint evals install lock lock-upgrade lock-check audit
+.PHONY: help env up down down-volumes migrate test test-db test-db-down test-all lint evals install lock lock-upgrade lock-check audit hooks
 
 help:
 	@echo "make env          create .env from .env.example if it does not exist yet"
@@ -30,13 +30,14 @@ help:
 	@echo "make test-db      start the disposable test database and wait until ready"
 	@echo "make test-db-down stop and remove the test database"
 	@echo "make test-all     run the full suite against test-db, always cleaning up"
-	@echo "make lint         ruff check backend and evals"
+	@echo "make lint         ruff check backend, evals and hooks.py"
 	@echo "make evals        run the eval placeholder"
 	@echo "make install      install hashed runtime+dev deps, then the backend package"
 	@echo "make lock         regenerate both lockfiles (no upgrade)"
 	@echo "make lock-upgrade regenerate both lockfiles, allowing newer versions"
 	@echo "make lock-check   fail if the committed lockfiles are out of date"
 	@echo "make audit        pip-audit against both lockfiles"
+	@echo "make hooks        list TODO/ASSUMPTION/UNCERTAIN/NOTE markers (never fails)"
 
 # Never overwrites an existing .env. Every target below that touches
 # $(COMPOSE) depends on this.
@@ -92,7 +93,7 @@ test-all: test-db
 	exit $$rc
 
 lint:
-	ruff check backend evals
+	ruff check backend evals hooks.py
 
 evals:
 	python evals/run.py
@@ -133,3 +134,9 @@ lock-check:
 # default) -- never swallowed here.
 audit:
 	pip-audit --require-hashes -r backend/requirements.lock -r backend/requirements-dev.lock
+
+# Task 1.1c: a visibility tool, not a gate -- never fails because markers
+# exist (hooks.py's own exit code is 0 unless the scan itself errors, e.g.
+# an unreadable file).
+hooks:
+	python hooks.py
