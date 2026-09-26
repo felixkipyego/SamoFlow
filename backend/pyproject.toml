@@ -36,6 +36,12 @@ dev = [
     "ruff==0.16.8",
     "uv==0.12.19",
     "pip-audit==2.10.1",
+    # Transitive dependency of pip-audit, pinned directly because upstream's
+    # rapid patch releases otherwise left uv's resolution to whatever was
+    # newest at compile time, making `make lock`/`lock-check` flap between
+    # runs with no functional difference (never shipped in the production
+    # image; --require-hashes verifies whichever version is pinned either way).
+    "platformdirs==4.11.15",
 ]
 
 [tool.hatch.build.targets.wheel]
