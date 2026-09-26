@@ -120,8 +120,17 @@ lock-upgrade:
 # Regenerates both lockfiles into a throwaway directory and diffs each
 # against the committed version -- the committed files are never touched.
 # The temp directory is always removed, whether the diff passes or fails.
+# The temp files are seeded with the committed lockfiles before compiling
+# into them (matching what `lock` does, since it overwrites the committed
+# files in place): uv pip compile prefers a version already pinned in an
+# existing output file over the latest one, so a fresh unseeded file would
+# always re-resolve every transitive dependency to its current latest
+# release and report a spurious diff for any patch published since the
+# lockfiles were last regenerated, even though nothing here is out of date.
 lock-check:
 	@tmp=$$(mktemp -d); \
+	cp backend/requirements.lock $$tmp/requirements.lock; \
+	cp backend/requirements-dev.lock $$tmp/requirements-dev.lock; \
 	$(UV_COMPILE) -o $$tmp/requirements.lock; \
 	$(UV_COMPILE) --extra dev -o $$tmp/requirements-dev.lock; \
 	diff -u backend/requirements.lock $$tmp/requirements.lock; rc1=$$?; \
