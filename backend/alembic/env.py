@@ -6,6 +6,13 @@ from sqlalchemy.pool import NullPool
 
 from alembic import context
 from app.config import SettingsError, get_settings
+from app.db import Base
+
+# Imported for the side effect of registering their tables on Base.metadata
+# (Task 1.2.b) -- target_metadata below must see every domain's models, not
+# just whichever one happened to be imported first.
+from app.plans import models as plans_models  # noqa: F401
+from app.tenancy import models as tenancy_models  # noqa: F401
 
 # This is the Alembic Config object, which provides access to the values
 # within the .ini file in use.
@@ -16,9 +23,7 @@ config = context.config
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
-# TODO(1.2): set target_metadata to the models' Base.metadata once they
-# exist, so "alembic revision --autogenerate" has something to diff against.
-target_metadata = None
+target_metadata = Base.metadata
 
 
 def run_migrations_online() -> None:

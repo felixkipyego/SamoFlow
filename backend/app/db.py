@@ -25,8 +25,19 @@ from sqlalchemy.ext.asyncio import (
     async_sessionmaker,
     create_async_engine,
 )
+from sqlalchemy.orm import DeclarativeBase
 
 from app.config import get_settings
+
+
+class Base(DeclarativeBase):
+    # Task 1.2.b: the one shared declarative base every models.py imports,
+    # so alembic/env.py's target_metadata (Base.metadata) covers all tables
+    # regardless of which domain subpackage defines them. Lives here rather
+    # than a new file: this module is already the shared DB-infra module
+    # from 1.2.a, and a second one for just this class would be
+    # over-engineering for a two-line addition (rule 11).
+    pass
 
 
 @lru_cache
