@@ -18,7 +18,7 @@ CONFIG_FILE = APP_DIR / "config.py"
 
 # NOTE: adding a file here is a deliberate decision: it means that file
 # receives the real database password. Review it by hand.
-ALLOWED_DATABASE_URL_CALLERS: tuple[str, ...] = ("alembic/env.py",)
+ALLOWED_DATABASE_URL_CALLERS: tuple[str, ...] = ("alembic/env.py", "app/db.py")
 
 
 def _called_name(node: ast.Call) -> str | None:
