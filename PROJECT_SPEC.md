@@ -41,7 +41,7 @@ A production-ready, multi-tenant, embeddable AI widget platform: one website is 
 | 1.1 | Repo skeleton and Compose | Done | Completed 2026-09-25; all subtasks 1.1.a–1.1.o.h done; see closure summary below the Step 1.1 task list |
 | 1.1b | Whole-application skeleton | Done | Completed 2026-09-25; distinct from subtask 1.1.b |
 | 1.1c | Marker check | Done | Completed 2026-09-26 |
-| 1.2 | Database, migrations and tenant-scoped access | Not started | Broken down into 1.2.a–1.2.f below |
+| 1.2 | Database, migrations and tenant-scoped access | Done | Completed 2026-09-27; all subtasks 1.2.a–1.2.f done; see closure summary below the Step 1.2 task list |
 | 1.3 | Qdrant collection [SECURITY] | Not started | – |
 | 1.4 | Session endpoint and JWT [SECURITY] | Not started | – |
 | 1.5 | Rate limiter and limits | Not started | – |
@@ -230,6 +230,8 @@ A production-ready, multi-tenant, embeddable AI widget platform: one website is 
 
 - 2026-09-27: Step 1.2.e — CRUD/lookup functions on `TenantScopedRepository`, plus `create_tenant()`. Tenant-creation location: `create_tenant(session, name, status) -> Tenant`, a plain module-level function in `backend/app/tenancy/repository.py`, deliberately never a method on `TenantScopedRepository` — a brand-new tenant has no `tenant_id` yet to scope by, which the class's own constructor invariant (always requires a real `tenant_id`) cannot represent, so a separate function makes "this is the one unscoped operation" structurally visible rather than a special-cased method fighting the class's own guarantee. site_key_id/vid verification: `create_visitor(site_key_id, secret_hash)` and `create_conversation(vid, title=None)` both verify the given foreign id belongs to `self.tenant_id` before creating the row (raising `ValueError` otherwise), rather than trusting the FK constraints already on those columns (`visitors.site_key_id -> site_keys.id`, `conversations.vid -> visitors.vid`) to be enough — a foreign key only proves the referenced row *exists*, not that it belongs to the same tenant, and nothing else in the codebase yet guarantees that (1.4's session endpoint, the only other place that would touch this, doesn't exist yet), so skipping the check would silently accept a tenant-A visitor pointing at tenant B's site_key, or a tenant-A conversation pointing at tenant B's visitor. `get_tenant()` returns the repository's own bound tenant via `scalar_one()` (not `_or_none()`), since a `TenantScopedRepository` is only ever constructed with a real tenant's id — a missing row there is a real error, not a normal "not found." `create_site_key()` always creates in `"draft"` status (docs/SPEC.md §4.1/§6.3: a key moves to `live` only through a separate server-side check, not this method's job). Security proof, against the real test database (same two-tenant fixture as 1.2.d, extended with a visitor per tenant): `get_tenant()` scoped to A returns only A; `create_site_key`/`create_visitor`/`create_conversation` all set `tenant_id` automatically from `self.tenant_id`; `create_visitor` given tenant B's real `site_key_id` and `create_conversation` given tenant B's real `vid` both raise `ValueError`, not silently succeed; `get_visitor_by_id` mirrors `get_conversation_by_id`'s hostile-caller/own-row pair; `create_tenant()` proved to create a real, independently-verifiable row with no tenant scoping involved, and confirmed absent from `TenantScopedRepository` via `hasattr`. Caught by running the extended test file standalone before trusting the full-suite run (same lesson as 1.2.d): none this time — the existing `plans` side-effect import was already in place from 1.2.d's fix, so the new tests passed standalone on the first try. Verified: `make lint` clean; full `backend/tests` without a test database: **134 passed, 17 skipped** (up from 133 passed, 8 skipped — 1 new structural test runs for real, 9 new security-proof tests skip as expected); `make test-all` against the real test-db: **151 passed** (134 + the 17 previously-skipped, all for real); `git status --short` showed exactly the two expected files.
 
+- 2026-09-27: Step 1.2.f — Step 1.2 close-out review (documentation only, no code/test changes). Read every decision line and open marker recorded under 1.2.a–1.2.e and confirmed internal consistency: no contradictions or stale claims found among the decision-log entries themselves (test counts chain correctly across every subtask: 120→122→129→129→130→133→134 passed with no test database, 125→132→141→151 with the real test-db). Both `TODO(1.2)` markers (alembic/env.py's, resolved in 1.2.b; tenancy/repository.py's, resolved in 1.2.d) confirmed already gone from Open markers — nothing left to remove here. Three existing open markers reviewed against everything built since they were written: the engine-disposal-at-shutdown marker (1.2.a) still correctly has no owner — no app/worker lifecycle hook exists yet, 1.2.b–e added only models/repository code, not one; the `tenants.status` vocabulary marker (1.2.b) is still accurate, untouched by anything since. Two markers needed a small wording fix, not a substance change: the `site_keys.key` generator marker (1.2.b) now clarifies that 1.2.d/1.2.e's test fixtures *did* create `site_keys` rows, but with hand-typed literal test strings, not a real generator — the marker's original phrasing ("whichever task first creates a real site_keys row") was no longer accurate once those fixtures existed, though its substance (no generator function exists) was and is still correct; the 1.4-owned readiness-check marker now states explicitly that 1.2.a–e opened many real Postgres connections, but only from tests, never from a wired API endpoint or the worker, so the marker's "no DB-touching endpoint yet" claim remains correct and isn't contradicted by the extensive test-time DB access throughout 1.2. Step 1.2 marked Done in the main components table; a closure summary added below the Step 1.2 task list (14 lines, pointing at Open markers for what's outstanding rather than repeating it). Current task set to 1.3, next to 1.4. Final sanity pass, run fresh rather than copied from a prior entry: `make lint` clean; full `backend/tests` without a test database: **134 passed, 17 skipped** — unchanged from 1.2.e's last-reported count, confirming no drift; `make test-all` against the real test-db: **151 passed** — likewise unchanged, confirming no drift. Counter reaches n=3 (1.2.d, 1.2.e, 1.2.f) — reported per rule 9, duplication check not run (report-only, awaiting explicit request).
+
 ### Estimates to measure
 
 - The default limits in §9 and the budgets in §17 are starting points.
@@ -253,9 +255,9 @@ A production-ready, multi-tenant, embeddable AI widget platform: one website is 
 
 ## 7. Current task and next task
 
-Current: Step 1.2.f Close-out.
-Next: Step 1.3 Qdrant collection [SECURITY].
-Do not modify (completed tasks): 1.1.a, 1.1.b, 1.1.c, 1.1.d, 1.1.e, 1.1.f, 1.1.g, 1.1.h, 1.1.i, 1.1.j, 1.1.k, 1.1.l, 1.1.m, 1.1.n, 1.1.o.a, 1.1.o.b, 1.1.o.c, 1.1.o.d, 1.1.o.e, 1.1.o.f, 1.1.o.g, 1.1.o.h, 1.1b, 1.1c, 1.2.a, 1.2.b, 1.2.c, 1.2.d, 1.2.e.
+Current: Step 1.3 Qdrant collection [SECURITY].
+Next: Step 1.4 Session endpoint and JWT [SECURITY].
+Do not modify (completed tasks): 1.1.a, 1.1.b, 1.1.c, 1.1.d, 1.1.e, 1.1.f, 1.1.g, 1.1.h, 1.1.i, 1.1.j, 1.1.k, 1.1.l, 1.1.m, 1.1.n, 1.1.o.a, 1.1.o.b, 1.1.o.c, 1.1.o.d, 1.1.o.e, 1.1.o.f, 1.1.o.g, 1.1.o.h, 1.1b, 1.1c, 1.2.a, 1.2.b, 1.2.c, 1.2.d, 1.2.e, 1.2.f.
 
 ### Step 1.1 task list (approved)
 
@@ -313,11 +315,29 @@ see there rather than repeating it here.
 | 1.2.c | First Alembic migration creating the 5 tables (UUID primary keys throughout; FKs from `site_keys`/`visitors`/`conversations` to `tenants` with `ON DELETE CASCADE`; `site_keys.key` a separate unique indexed column, not the PK); extends the existing upgrade-head integration test to assert the new schema | Done |
 | 1.2.d | Tenant-scoped repository core (`tenancy/repository.py`): the enforcement mechanism for "all tenant-scoped database access goes through the tenant-scoped repository helpers" (§21); cross-tenant isolation tests (two tenants seeded, repository scoped to one can never read the other's rows, including a hostile-argument case) | Done |
 | 1.2.e | CRUD/lookup functions for tenants, site_keys, visitors, conversations, plans built on 1.2.d's repository; isolation tests extended to each concrete method | Done |
-| 1.2.f | Close-out: resolve the `TODO(1.2)` markers (1.2.b, 1.2.d), update PROJECT_SPEC.md | Not started |
+| 1.2.f | Close-out: resolve the `TODO(1.2)` markers (1.2.b, 1.2.d), update PROJECT_SPEC.md | Done |
+
+### Step 1.2 closure summary (2026-09-27)
+
+Built: async DB engine/session plumbing (`app/db.py`); 5 ORM models matching
+docs/SPEC.md's data model (tenants, site_keys, visitors, conversations,
+plans), with UUID primary keys, tenant-cascading foreign keys, explicit
+tenant_id indexes and a spec-matched status CHECK constraint; the first real
+Alembic migration, hand-verified against the live test database (autogenerate
+output reviewed, not trusted blindly; upgrade/downgrade/upgrade proven
+idempotent; every constraint confirmed by direct inspection); and the
+tenant-scoped repository pattern (`TenantScopedRepository`, frozen-dataclass
+immutable) with a minimal but real CRUD/lookup surface, proven via
+cross-tenant isolation tests including hostile-caller cases (a real, valid
+id belonging to the wrong tenant must never be returned or accepted).
+
+What's still outstanding from this step (deferred deliberately, not
+forgotten) is tracked entirely in section 9's Open markers list below —
+see there rather than repeating it here.
 
 ## 8. Task counter since the last duplication check
 
-n = 2 (run the duplication check at 3; never exceed 4) — 2 tasks since the last check (1.2.d, 1.2.e).
+n = 3 (run the duplication check at 3; never exceed 4) — 3 tasks since the last check (1.2.d, 1.2.e, 1.2.f). Counter has reached 3: report only, do not run the check without an explicit request.
 
 ## 9. Open markers
 
@@ -328,13 +348,13 @@ n = 2 (run the duplication check at 3; never exceed 4) — 2 tasks since the las
 - Owner: whichever of the three happens first (no task scheduled yet) — remove `.github/dependabot.yml`'s temporary `ignore: [{dependency-name: "postgres"}]` rule (docker-compose ecosystem entry) once any of: (1) dependabot-core fixes the YAML-anchor/alias file-updater bug (see the 1.1.o.g second follow-up decision), (2) the `x-postgres-image` anchor is manually removed from `deploy/docker-compose.yml`, or (3) the next scheduled review of Project constraints' manual image-tag routine. This is a silencing of a known Dependabot bug, not a decision to stop tracking Postgres updates.
 - Owner Phase 7: allowed Host header validation (currently any Host is accepted; decide with the proxy configuration). Not addressed by 1.1.i — that is app-level middleware, out of docker-compose.yml's scope.
 - Owner: to be scheduled — CORS and OPTIONS handling: decide with the widget and admin work (Phase 5 and 6); today OPTIONS returns 405.
-- Owner 1.4: add a readiness check that touches Postgres, and use it for the Compose healthcheck (today's api healthcheck only proves the process is alive) — confirmed owned solely by 1.4 during the Step 1.2 breakdown, since 1.2 builds schema and repository access only and has no DB-touching endpoint yet.
+- Owner 1.4: add a readiness check that touches Postgres, and use it for the Compose healthcheck (today's api healthcheck only proves the process is alive). Confirmed still correct at Step 1.2's close: 1.2.a–e opened many real Postgres connections, but only from tests, never from a wired API endpoint or the worker process — no request path has ever touched the database, so there is still nothing for a readiness check to sit behind until 1.4 (or whichever task first opens a connection from inside the running app) exists.
 - TODO(2.1): `backend/app/worker.py`'s `run()` has no job logic yet; the job queue consumer is added in Step 2.1.
 - Owner CI or Phase 7: verify the image builds and runs on arm64, not just the amd64 host it was built on so far.
 - Owner Phase 7: shutdown behaviour of the API under load (1.1.g verified graceful shutdown at idle; 1.1.i verified api/worker stop in under 10 seconds via `docker compose stop`, still at idle, not under load).
 - Owner: whichever task first wires a real app/worker lifecycle hook (no task scheduled yet) — call `backend/app/db.py`'s `get_engine().dispose()` on shutdown; not addressed by 1.2.a since no consumer (endpoint or worker loop) exists yet for a shutdown hook to belong to.
 - Owner: next migration-heavy task or a dedicated small fix (no task scheduled yet) — `backend/alembic/script.py.mako` (from `alembic init`, 1.1.h) generates code that fails this project's own ruff config (`typing.Union`/`Sequence` instead of `X | Y`, unsorted imports, long `sa.Column(...)` lines); 1.2.c's migration was fixed by hand after the fact. Fixing the template itself (so `alembic revision --autogenerate` produces lint-clean output directly) is the standard fix but was out of 1.2.c's file list.
-- Owner: to be scheduled (not tied to a task yet) — `site_keys.key` (the `pk_live_…` secret token) has no generator; 1.2.b only defines the column (unique, indexed, not null). Whichever task first creates a real `site_keys` row (dashboard onboarding, or a 1.4 test fixture) must add it.
+- Owner: to be scheduled (not tied to a task yet) — `site_keys.key` (the `pk_live_…` secret token) still has no real generator function; 1.2.b only defines the column (unique, indexed, not null), and 1.2.d/1.2.e's test fixtures create `site_keys` rows with hand-typed literal test strings (e.g. `"pk_live_tenant_a"`), not a generated value — that's a test convenience, not a substitute for one. Whichever task first needs a production-quality key (dashboard onboarding, or 1.4's session endpoint) must add the real generator.
 - Owner: whichever task first writes real tenant status values (no task scheduled yet, likely 6.5 Platform admin's "suspend a site") — `tenants.status` has no fixed vocabulary in docs/SPEC.md (unlike `site_keys.status`, constrained to draft/live/suspended by a CHECK constraint); confirm the real set then and add a constraint if it turns out to be fixed.
 - Owner Phase 7 (deployment): use a separate migration database role with DDL rights and application roles with data rights only; two different `DATABASE_URL`s for `migrate` and `api`/`worker`.
 - Owner Phase 7: tune `mem_limit`/`pids_limit` for api/worker/migrate from the load tests (7.1); the 512m/200 figures in 1.1.i are unmeasured starting points. Also consider limits and read-only-root settings for postgres and qdrant themselves (left unhardened in 1.1.i as upstream images not audited for it).
