@@ -32,9 +32,15 @@ from pathlib import Path
 
 import pytest
 import sqlalchemy as sa
-from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 
-from tests.conftest import minimal_subprocess_env, require_test_database
+from tests.conftest import (
+    CASCADE_FK_COLUMNS,
+    EXPECTED_PK_COLUMNS,
+    EXPECTED_TABLES,
+    minimal_subprocess_env,
+    require_test_database,
+)
 
 BACKEND_DIR = Path(__file__).resolve().parent.parent
 
@@ -285,25 +291,6 @@ def _test_engine():
     engine.dispose()
 
 
-# Task 1.2.c's migration (541870ecc5d9): the schema app/tenancy/models.py
-# and app/plans/models.py describe.
-_EXPECTED_PK_COLUMNS = {
-    "tenants": "id",
-    "site_keys": "id",
-    "visitors": "vid",
-    "conversations": "cid",
-    "plans": "id",
-}
-
-# (table, column) -> the table its FK cascades from, per the tenants ->
-# {site_keys, visitors, conversations} cascade decision (PROJECT_SPEC.md).
-_EXPECTED_CASCADE_FKS = {
-    ("site_keys", "tenant_id"): "tenants",
-    ("visitors", "tenant_id"): "tenants",
-    ("conversations", "tenant_id"): "tenants",
-}
-
-
 def test_upgrade_head_is_idempotent_and_never_prints_the_password(_test_engine):
     engine = _test_engine
     real_password = engine.url.password
@@ -316,16 +303,16 @@ def test_upgrade_head_is_idempotent_and_never_prints_the_password(_test_engine):
 
     # Table list includes the real migration's 5 tables (Task 1.2.c) --
     # was just ["alembic_version"] before any migration existed (1.1.h).
-    assert set(_table_names(engine)) == {"alembic_version", *_EXPECTED_PK_COLUMNS}
+    assert set(_table_names(engine)) == {"alembic_version", *EXPECTED_TABLES}
 
     inspector = sa.inspect(engine)
 
-    for table_name, pk_column in _EXPECTED_PK_COLUMNS.items():
+    for table_name, pk_column in EXPECTED_PK_COLUMNS.items():
         assert inspector.get_pk_constraint(table_name)["constrained_columns"] == [pk_column], (
             f"{table_name}'s primary key column does not match the model"
         )
 
-    for (table_name, column_name), referred_table in _EXPECTED_CASCADE_FKS.items():
+    for (table_name, column_name), referred_table in CASCADE_FK_COLUMNS.items():
         foreign_keys = inspector.get_foreign_keys(table_name)
         (fk,) = [fk for fk in foreign_keys if fk["constrained_columns"] == [column_name]]
         assert fk["referred_table"] == referred_table
@@ -344,3 +331,55 @@ def test_upgrade_head_is_idempotent_and_never_prints_the_password(_test_engine):
     for result in (first, second):
         assert real_password not in result.stdout
         assert real_password not in result.stderr
+
+
+def test_tenant_id_cannot_be_null(_test_engine):
+    # A null tenant_id would silently escape tenant-scoped filtering later --
+    # this proves Postgres itself rejects it, not just that the model/
+    # migration declare NOT NULL (see test_models.py's static backstop).
+    engine = _test_engine
+    _reset_public_schema(engine)
+    migrated = _run_alembic("upgrade", "head", engine=engine)
+    assert migrated.returncode == 0, migrated.stdout + migrated.stderr
+
+    with engine.connect() as connection, pytest.raises(IntegrityError):
+        connection.execute(
+            sa.text(
+                "INSERT INTO site_keys (key, tenant_id, environment, status) "
+                "VALUES ('pk_live_null_tenant_test', NULL, 'production', 'draft')"
+            )
+        )
+        connection.commit()
+
+
+def test_site_keys_key_uniqueness_is_enforced_by_the_database(_test_engine):
+    # A duplicate site key is a real security problem (two rows sharing one
+    # live secret token) -- this proves the unique index actually rejects a
+    # second insert, not just that it's declared in the model.
+    engine = _test_engine
+    _reset_public_schema(engine)
+    migrated = _run_alembic("upgrade", "head", engine=engine)
+    assert migrated.returncode == 0, migrated.stdout + migrated.stderr
+
+    with engine.connect() as connection:
+        connection.execute(
+            sa.text(
+                "INSERT INTO tenants (name, status) VALUES ('tenant one', 'active')"
+            )
+        )
+        connection.execute(
+            sa.text(
+                "INSERT INTO site_keys (key, tenant_id, environment, status) "
+                "SELECT 'pk_live_duplicate_test', id, 'production', 'draft' FROM tenants"
+            )
+        )
+        connection.commit()
+
+    with engine.connect() as connection, pytest.raises(IntegrityError):
+        connection.execute(
+            sa.text(
+                "INSERT INTO site_keys (key, tenant_id, environment, status) "
+                "SELECT 'pk_live_duplicate_test', id, 'production', 'draft' FROM tenants"
+            )
+        )
+        connection.commit()

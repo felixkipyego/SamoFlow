@@ -9,7 +9,7 @@ from sqlalchemy import String, text
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
-from app.db import Base
+from app.db import UUID_PK, Base
 
 
 class Plan(Base):
@@ -19,9 +19,7 @@ class Plan(Base):
     # set of plan identifiers, and a UUID keeps this table consistent with
     # every other table's PK style rather than introducing a second PK
     # scheme for one table (rule 11).
-    id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()")
-    )
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), **UUID_PK)
     name: Mapped[str] = mapped_column(String, nullable=False)
     limits: Mapped[dict] = mapped_column(
         JSONB, nullable=False, server_default=text("'{}'::jsonb")

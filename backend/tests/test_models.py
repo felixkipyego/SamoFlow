@@ -11,41 +11,20 @@ from sqlalchemy.dialects.postgresql import UUID
 from app.db import Base
 from app.plans import models as plans_models  # noqa: F401
 from app.tenancy import models as tenancy_models  # noqa: F401
-
-_EXPECTED_TABLES = {"tenants", "site_keys", "visitors", "conversations", "plans"}
-
-# tenant_id columns cascade from tenants (PROJECT_SPEC.md decision: DB-level
-# ON DELETE CASCADE from tenants down to site_keys/visitors/conversations).
-# site_key_id (visitors) and vid (conversations) are a separate edge the
-# decision never covered, and no site-key/visitor-deletion feature exists
-# yet to require cascading them too, so they're left at the default (no
-# ondelete -- NO ACTION), not cascade. This test asserts what was actually
-# built, split into the two groups so a future accidental change to either
-# is caught either way.
-_CASCADE_FK_COLUMNS = {
-    ("site_keys", "tenant_id"),
-    ("visitors", "tenant_id"),
-    ("conversations", "tenant_id"),
-}
-_NO_ACTION_FK_COLUMNS = {
-    ("visitors", "site_key_id"),
-    ("conversations", "vid"),
-}
+from tests.conftest import (
+    CASCADE_FK_COLUMNS,
+    EXPECTED_PK_COLUMNS,
+    EXPECTED_TABLES,
+    NO_ACTION_FK_COLUMNS,
+)
 
 
 def test_expected_tables_are_registered():
-    assert set(Base.metadata.tables.keys()) == _EXPECTED_TABLES
+    assert set(Base.metadata.tables.keys()) == EXPECTED_TABLES
 
 
 def test_primary_keys_are_server_default_uuid():
-    pk_columns = {
-        "tenants": "id",
-        "site_keys": "id",
-        "visitors": "vid",
-        "conversations": "cid",
-        "plans": "id",
-    }
-    for table_name, pk_name in pk_columns.items():
+    for table_name, pk_name in EXPECTED_PK_COLUMNS.items():
         table = Base.metadata.tables[table_name]
         column = table.columns[pk_name]
         assert column.primary_key
@@ -66,17 +45,28 @@ def _fk_ondelete(table_name: str, column_name: str) -> str | None:
 
 
 def test_tenant_id_foreign_keys_cascade_on_delete():
-    for table_name, column_name in _CASCADE_FK_COLUMNS:
+    for table_name, column_name in CASCADE_FK_COLUMNS:
         assert _fk_ondelete(table_name, column_name) == "CASCADE", (
             f"{table_name}.{column_name} must cascade from tenants"
         )
 
 
 def test_non_tenant_foreign_keys_have_no_cascade():
-    for table_name, column_name in _NO_ACTION_FK_COLUMNS:
+    for table_name, column_name in NO_ACTION_FK_COLUMNS:
         assert _fk_ondelete(table_name, column_name) is None, (
             f"{table_name}.{column_name} should not cascade "
             "(no delete feature needs it yet)"
+        )
+
+
+def test_tenant_id_columns_are_not_nullable():
+    # Cheap static backstop for the live-database proof in test_alembic.py
+    # (which actually attempts a NULL insert against real Postgres): a null
+    # tenant_id would silently escape tenant-scoped filtering later.
+    for table_name in ("site_keys", "visitors", "conversations"):
+        table = Base.metadata.tables[table_name]
+        assert table.columns["tenant_id"].nullable is False, (
+            f"{table_name}.tenant_id must be NOT NULL"
         )
 
 
@@ -87,9 +77,7 @@ def test_every_tenant_scoped_table_indexes_its_tenant_id():
     for table_name in ("site_keys", "visitors", "conversations"):
         table = Base.metadata.tables[table_name]
         column = table.columns["tenant_id"]
-        assert column.index or any(
-            column.name == "tenant_id" for idx in table.indexes for column in idx.columns
-        ), f"{table_name}.tenant_id has no index"
+        assert column.index, f"{table_name}.tenant_id has no index"
 
 
 def test_site_keys_status_check_constraint_matches_the_spec_vocabulary():

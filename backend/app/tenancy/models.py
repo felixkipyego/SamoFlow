@@ -24,17 +24,14 @@ from datetime import datetime
 from sqlalchemy import CheckConstraint, DateTime, ForeignKey, String, text
 from sqlalchemy.dialects.postgresql import ARRAY, JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
-from sqlalchemy.sql import func
 
-from app.db import Base
-
-_UUID_PK = dict(primary_key=True, server_default=text("gen_random_uuid()"))
+from app.db import TIMESTAMP_NOW, UUID_PK, Base
 
 
 class Tenant(Base):
     __tablename__ = "tenants"
 
-    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), **_UUID_PK)
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), **UUID_PK)
     name: Mapped[str] = mapped_column(String, nullable=False)
     # ASSUMPTION: no fixed status vocabulary for tenants is given anywhere in
     # docs/SPEC.md (unlike site_keys.status, whose three values §4.1 names
@@ -56,7 +53,7 @@ class Tenant(Base):
 class SiteKey(Base):
     __tablename__ = "site_keys"
 
-    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), **_UUID_PK)
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), **UUID_PK)
     # The pk_live_... secret token (docs/SPEC.md §4.1). NOTE: generating that
     # format is not this task's job -- tracked as an open marker in
     # PROJECT_SPEC.md, owner not yet scheduled.
@@ -83,7 +80,7 @@ class SiteKey(Base):
 class Visitor(Base):
     __tablename__ = "visitors"
 
-    vid: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), **_UUID_PK)
+    vid: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), **UUID_PK)
     tenant_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True),
         ForeignKey("tenants.id", ondelete="CASCADE"),
@@ -101,14 +98,10 @@ class Visitor(Base):
     # Server-side default (matches the UUID PK choice's own rationale):
     # first_seen_at is set once, by the database, at row creation -- no
     # application clock/timezone handling needed to get it right.
-    first_seen_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=func.now()
-    )
+    first_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), **TIMESTAMP_NOW)
     # Same server-side default at creation; updating it on later visits is
     # 1.2.d/1.2.e's job (repository/session-endpoint logic), not schema.
-    last_seen_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=func.now()
-    )
+    last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), **TIMESTAMP_NOW)
     # Reserved, unused per docs/SPEC.md §4.1/§19 (logged-in visitors are a
     # later phase).
     external_user_id: Mapped[str | None] = mapped_column(String, nullable=True)
@@ -117,7 +110,7 @@ class Visitor(Base):
 class Conversation(Base):
     __tablename__ = "conversations"
 
-    cid: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), **_UUID_PK)
+    cid: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), **UUID_PK)
     tenant_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True),
         ForeignKey("tenants.id", ondelete="CASCADE"),
@@ -129,9 +122,5 @@ class Conversation(Base):
         UUID(as_uuid=True), ForeignKey("visitors.vid"), nullable=False, index=True
     )
     title: Mapped[str | None] = mapped_column(String, nullable=True)
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=func.now()
-    )
-    last_message_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=func.now()
-    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), **TIMESTAMP_NOW)
+    last_message_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), **TIMESTAMP_NOW)

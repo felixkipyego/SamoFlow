@@ -19,6 +19,7 @@
 from collections.abc import AsyncIterator
 from functools import lru_cache
 
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
@@ -26,6 +27,7 @@ from sqlalchemy.ext.asyncio import (
     create_async_engine,
 )
 from sqlalchemy.orm import DeclarativeBase
+from sqlalchemy.sql import func
 
 from app.config import get_settings
 
@@ -38,6 +40,18 @@ class Base(DeclarativeBase):
     # from 1.2.a, and a second one for just this class would be
     # over-engineering for a two-line addition (rule 11).
     pass
+
+
+# Shared mapped_column() kwargs (Task 1.2.b, moved here in the duplication
+# check after 1.2.a/b/c so both tenancy/models.py and plans/models.py import
+# one definition instead of each declaring their own): every primary key is
+# a server-generated UUID (see tenancy/models.py's own comment for why --
+# gen_random_uuid() verified to need zero extensions on the pinned Postgres
+# image); every "when was this row created" timestamp is a timezone-aware
+# server-side default at creation time, so no application clock/timezone
+# handling is needed to get it right.
+UUID_PK = {"primary_key": True, "server_default": text("gen_random_uuid()")}
+TIMESTAMP_NOW = {"nullable": False, "server_default": func.now()}
 
 
 @lru_cache

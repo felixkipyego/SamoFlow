@@ -159,3 +159,37 @@ def fresh_import(module_name):
     # Must not raise despite an empty environment.
     sys.modules.pop(module_name, None)
     return importlib.import_module(module_name)
+
+
+# Shared "expected schema" facts for Task 1.2.b's/1.2.c's tests (moved here
+# in the duplication check after 1.2.a/b/c): test_models.py checks these
+# against SQLAlchemy's Python metadata (no database), test_alembic.py checks
+# the same facts against a live database via sa.inspect() after a real
+# migration -- two different, real proofs, but the same expected data, so a
+# schema change only needs updating it once.
+EXPECTED_TABLES = {"tenants", "site_keys", "visitors", "conversations", "plans"}
+
+EXPECTED_PK_COLUMNS = {
+    "tenants": "id",
+    "site_keys": "id",
+    "visitors": "vid",
+    "conversations": "cid",
+    "plans": "id",
+}
+
+# tenant_id columns cascade from tenants (PROJECT_SPEC.md decision: DB-level
+# ON DELETE CASCADE from tenants down to site_keys/visitors/conversations).
+CASCADE_FK_COLUMNS = {
+    ("site_keys", "tenant_id"): "tenants",
+    ("visitors", "tenant_id"): "tenants",
+    ("conversations", "tenant_id"): "tenants",
+}
+
+# site_key_id (visitors) and vid (conversations) are a separate edge the
+# cascade decision never covered, and no site-key/visitor-deletion feature
+# exists yet to require cascading them too, so they stay at the default (no
+# ondelete -- NO ACTION), not cascade.
+NO_ACTION_FK_COLUMNS = {
+    ("visitors", "site_key_id"),
+    ("conversations", "vid"),
+}
