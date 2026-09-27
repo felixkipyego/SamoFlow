@@ -28,7 +28,8 @@
 #
 # create_visitor()/create_conversation() verify that the site_key_id/vid they
 # are given actually belongs to this repository's own tenant before creating
-# the row. This is not redundant with the FK constraints already on those
+# the row, via the shared _verify_owned() helper (duplication check after
+# 1.2.d/e/f). This is not redundant with the FK constraints already on those
 # columns (visitors.site_key_id -> site_keys.id, conversations.vid ->
 # visitors.vid, from 1.2.c's migration): a foreign key only proves the
 # referenced row *exists*, not that it belongs to the same tenant -- nothing
@@ -36,11 +37,18 @@
 # other place that would touch this, doesn't exist yet), so skipping the
 # check here would silently accept a tenant-A visitor pointing at tenant B's
 # site_key, or a tenant-A conversation pointing at tenant B's visitor.
+# _verify_owned() deliberately treats "doesn't exist at all" and "exists but
+# belongs to another tenant" identically (both raise the same ValueError,
+# with the same message shape) -- distinguishing them would let a caller
+# learn "that id is real, just not yours", an enumeration oracle across
+# tenants (docs/SPEC.md's own tenant-isolation philosophy, and the same
+# choice get_conversation_by_id()/get_visitor_by_id() already make for reads).
 import uuid
 from dataclasses import dataclass
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import InstrumentedAttribute
 
 from app.tenancy.models import Conversation, SiteKey, Tenant, Visitor
 
@@ -60,6 +68,25 @@ class TenantScopedRepository:
     def __post_init__(self) -> None:
         if self.tenant_id is None:
             raise ValueError("TenantScopedRepository requires a tenant_id, got None")
+
+    async def _verify_owned(
+        self,
+        id_column: InstrumentedAttribute,
+        tenant_id_column: InstrumentedAttribute,
+        value: uuid.UUID,
+    ) -> bool:
+        # Shared by create_visitor/create_conversation (duplication check
+        # after 1.2.d/e/f): "does this id belong to self.tenant_id" is one
+        # query shape regardless of which table it's checked against.
+        # Deliberately does not distinguish "value doesn't exist at all"
+        # from "exists but belongs to another tenant" -- both produce False
+        # here, and both must raise the identical error at the call site,
+        # since telling them apart would let a caller learn "that id is
+        # real, just not yours" (an enumeration oracle).
+        result = await self.session.execute(
+            select(id_column).where(id_column == value, tenant_id_column == self.tenant_id)
+        )
+        return result.scalar_one_or_none() is not None
 
     async def get_tenant(self) -> Tenant:
         # The one case where "tenant_id" is the whole lookup -- but it is
@@ -106,13 +133,7 @@ class TenantScopedRepository:
         return result.scalar_one_or_none()
 
     async def create_visitor(self, site_key_id: uuid.UUID, secret_hash: str) -> Visitor:
-        owned_site_key = await self.session.execute(
-            select(SiteKey.id).where(
-                SiteKey.id == site_key_id,
-                SiteKey.tenant_id == self.tenant_id,
-            )
-        )
-        if owned_site_key.scalar_one_or_none() is None:
+        if not await self._verify_owned(SiteKey.id, SiteKey.tenant_id, site_key_id):
             raise ValueError(f"site_key {site_key_id} does not belong to tenant {self.tenant_id}")
         visitor = Visitor(
             tenant_id=self.tenant_id, site_key_id=site_key_id, secret_hash=secret_hash
@@ -135,7 +156,7 @@ class TenantScopedRepository:
         return result.scalar_one_or_none()
 
     async def create_conversation(self, vid: uuid.UUID, title: str | None = None) -> Conversation:
-        if await self.get_visitor_by_id(vid) is None:
+        if not await self._verify_owned(Visitor.vid, Visitor.tenant_id, vid):
             raise ValueError(f"visitor {vid} does not belong to tenant {self.tenant_id}")
         conversation = Conversation(tenant_id=self.tenant_id, vid=vid, title=title)
         self.session.add(conversation)

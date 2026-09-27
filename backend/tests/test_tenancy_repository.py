@@ -14,13 +14,14 @@
 #   - the security proof, against the real test database: two tenants (A
 #     and B) are seeded with one site_key, one visitor and one conversation
 #     each; a repository scoped to tenant A must return/create only tenant
-#     A's rows, even when handed tenant B's real, valid ids -- the
-#     hostile-caller case, now covering every 1.2.e method that accepts a
-#     foreign-table id (create_visitor's site_key_id, create_conversation's
-#     vid), not just reads.
+#     A's rows, even when handed tenant B's real, valid ids (the
+#     hostile-caller case) or an id that was never inserted at all (Task
+#     1.2.f's duplication check: both must produce the identical outcome,
+#     since distinguishing them would let a caller learn "that id is real,
+#     just not yours" -- an enumeration oracle this repository exists to
+#     prevent).
 import dataclasses
 import uuid
-from contextlib import aclosing
 
 import pytest
 import sqlalchemy as sa
@@ -30,7 +31,7 @@ from app.db import Base
 from app.plans import models as plans_models  # noqa: F401 (registers "plans" on Base.metadata)
 from app.tenancy.models import Conversation, SiteKey, Tenant, Visitor
 from app.tenancy.repository import TenantScopedRepository, create_tenant
-from tests.conftest import VALID_ENV, require_test_database, set_valid_env
+from tests.conftest import VALID_ENV, db_session, require_test_database, set_valid_env
 
 
 def test_repository_requires_a_tenant_id():
@@ -89,8 +90,7 @@ async def _seeded_tenants(monkeypatch):
         "conversation_b": uuid.uuid4(),
     }
 
-    async with aclosing(db.get_db_session()) as session_gen:
-        session = await anext(session_gen)
+    async with db_session() as session:
         session.add_all(
             [
                 Tenant(id=ids["tenant_a"], name="Tenant A", status="active"),
@@ -154,8 +154,7 @@ async def _seeded_tenants(monkeypatch):
 
 async def test_list_site_keys_returns_only_this_tenants_site_key(_seeded_tenants):
     ids = _seeded_tenants
-    async with aclosing(db.get_db_session()) as session_gen:
-        session = await anext(session_gen)
+    async with db_session() as session:
         repo = TenantScopedRepository(tenant_id=ids["tenant_a"], session=session)
         site_keys = await repo.list_site_keys()
 
@@ -166,10 +165,21 @@ async def test_get_conversation_by_id_rejects_another_tenants_real_id(_seeded_te
     # The hostile-caller case: tenant B's conversation id is a real, valid
     # row -- it must still come back None for a repository scoped to A.
     ids = _seeded_tenants
-    async with aclosing(db.get_db_session()) as session_gen:
-        session = await anext(session_gen)
+    async with db_session() as session:
         repo = TenantScopedRepository(tenant_id=ids["tenant_a"], session=session)
         result = await repo.get_conversation_by_id(ids["conversation_b"])
+
+    assert result is None
+
+
+async def test_get_conversation_by_id_returns_none_for_a_nonexistent_id(_seeded_tenants):
+    # Must produce the same outcome as the foreign-tenant case above -- not a
+    # different error, not a crash -- otherwise the two are distinguishable
+    # and a caller could learn "that id is real, just not yours".
+    ids = _seeded_tenants
+    async with db_session() as session:
+        repo = TenantScopedRepository(tenant_id=ids["tenant_a"], session=session)
+        result = await repo.get_conversation_by_id(uuid.uuid4())
 
     assert result is None
 
@@ -177,8 +187,7 @@ async def test_get_conversation_by_id_rejects_another_tenants_real_id(_seeded_te
 async def test_get_conversation_by_id_returns_this_tenants_own_row(_seeded_tenants):
     # Proves the mechanism isn't just blocking everything.
     ids = _seeded_tenants
-    async with aclosing(db.get_db_session()) as session_gen:
-        session = await anext(session_gen)
+    async with db_session() as session:
         repo = TenantScopedRepository(tenant_id=ids["tenant_a"], session=session)
         result = await repo.get_conversation_by_id(ids["conversation_a"])
 
@@ -189,14 +198,12 @@ async def test_get_conversation_by_id_returns_this_tenants_own_row(_seeded_tenan
 async def test_create_tenant_creates_a_real_row(_seeded_tenants):
     # No tenant scoping applies (there's no tenant_id to scope by yet): a
     # plain function taking a session directly, not a repository.
-    async with aclosing(db.get_db_session()) as session_gen:
-        session = await anext(session_gen)
+    async with db_session() as session:
         tenant = await create_tenant(session, name="Brand New Tenant", status="active")
         await session.commit()
         tenant_id = tenant.id
 
-    async with aclosing(db.get_db_session()) as session_gen:
-        session = await anext(session_gen)
+    async with db_session() as session:
         repo = TenantScopedRepository(tenant_id=tenant_id, session=session)
         result = await repo.get_tenant()
 
@@ -208,8 +215,7 @@ async def test_get_tenant_returns_the_repositorys_own_tenant(_seeded_tenants):
     # Confirms this in a two-tenant database: a repository scoped to A
     # returns A, never B, even though B is a real row right next to it.
     ids = _seeded_tenants
-    async with aclosing(db.get_db_session()) as session_gen:
-        session = await anext(session_gen)
+    async with db_session() as session:
         repo = TenantScopedRepository(tenant_id=ids["tenant_a"], session=session)
         result = await repo.get_tenant()
 
@@ -219,8 +225,7 @@ async def test_get_tenant_returns_the_repositorys_own_tenant(_seeded_tenants):
 
 async def test_create_site_key_sets_tenant_id_automatically(_seeded_tenants):
     ids = _seeded_tenants
-    async with aclosing(db.get_db_session()) as session_gen:
-        session = await anext(session_gen)
+    async with db_session() as session:
         repo = TenantScopedRepository(tenant_id=ids["tenant_a"], session=session)
         site_key = await repo.create_site_key(
             key="pk_live_new_key", allowed_origins=["https://a.example"], environment="production"
@@ -232,8 +237,7 @@ async def test_create_site_key_sets_tenant_id_automatically(_seeded_tenants):
 
 async def test_create_visitor_sets_tenant_id_automatically(_seeded_tenants):
     ids = _seeded_tenants
-    async with aclosing(db.get_db_session()) as session_gen:
-        session = await anext(session_gen)
+    async with db_session() as session:
         repo = TenantScopedRepository(tenant_id=ids["tenant_a"], session=session)
         visitor = await repo.create_visitor(
             site_key_id=ids["site_key_a"], secret_hash="new-hash"  # noqa: S106
@@ -247,8 +251,7 @@ async def test_create_visitor_rejects_a_foreign_tenants_site_key_id(_seeded_tena
     # Hostile-caller case: tenant B's site_key_id is a real, valid row, but
     # does not belong to tenant A -- must be rejected, not silently accepted.
     ids = _seeded_tenants
-    async with aclosing(db.get_db_session()) as session_gen:
-        session = await anext(session_gen)
+    async with db_session() as session:
         repo = TenantScopedRepository(tenant_id=ids["tenant_a"], session=session)
         with pytest.raises(ValueError, match="does not belong to tenant"):
             await repo.create_visitor(
@@ -256,20 +259,39 @@ async def test_create_visitor_rejects_a_foreign_tenants_site_key_id(_seeded_tena
             )
 
 
+async def test_create_visitor_rejects_a_nonexistent_site_key_id(_seeded_tenants):
+    # Must raise the identical error as the foreign-tenant case above.
+    ids = _seeded_tenants
+    async with db_session() as session:
+        repo = TenantScopedRepository(tenant_id=ids["tenant_a"], session=session)
+        with pytest.raises(ValueError, match="does not belong to tenant"):
+            await repo.create_visitor(
+                site_key_id=uuid.uuid4(), secret_hash="new-hash"  # noqa: S106
+            )
+
+
 async def test_get_visitor_by_id_rejects_another_tenants_real_id(_seeded_tenants):
     ids = _seeded_tenants
-    async with aclosing(db.get_db_session()) as session_gen:
-        session = await anext(session_gen)
+    async with db_session() as session:
         repo = TenantScopedRepository(tenant_id=ids["tenant_a"], session=session)
         result = await repo.get_visitor_by_id(ids["visitor_b"])
 
     assert result is None
 
 
+async def test_get_visitor_by_id_returns_none_for_a_nonexistent_id(_seeded_tenants):
+    # Must produce the same outcome as the foreign-tenant case above.
+    ids = _seeded_tenants
+    async with db_session() as session:
+        repo = TenantScopedRepository(tenant_id=ids["tenant_a"], session=session)
+        result = await repo.get_visitor_by_id(uuid.uuid4())
+
+    assert result is None
+
+
 async def test_get_visitor_by_id_returns_this_tenants_own_row(_seeded_tenants):
     ids = _seeded_tenants
-    async with aclosing(db.get_db_session()) as session_gen:
-        session = await anext(session_gen)
+    async with db_session() as session:
         repo = TenantScopedRepository(tenant_id=ids["tenant_a"], session=session)
         result = await repo.get_visitor_by_id(ids["visitor_a"])
 
@@ -279,8 +301,7 @@ async def test_get_visitor_by_id_returns_this_tenants_own_row(_seeded_tenants):
 
 async def test_create_conversation_sets_tenant_id_automatically(_seeded_tenants):
     ids = _seeded_tenants
-    async with aclosing(db.get_db_session()) as session_gen:
-        session = await anext(session_gen)
+    async with db_session() as session:
         repo = TenantScopedRepository(tenant_id=ids["tenant_a"], session=session)
         conversation = await repo.create_conversation(vid=ids["visitor_a"], title="hello")
 
@@ -292,8 +313,16 @@ async def test_create_conversation_rejects_a_foreign_tenants_vid(_seeded_tenants
     # Hostile-caller case: tenant B's vid is a real, valid row, but does not
     # belong to tenant A -- must be rejected, not silently accepted.
     ids = _seeded_tenants
-    async with aclosing(db.get_db_session()) as session_gen:
-        session = await anext(session_gen)
+    async with db_session() as session:
         repo = TenantScopedRepository(tenant_id=ids["tenant_a"], session=session)
         with pytest.raises(ValueError, match="does not belong to tenant"):
             await repo.create_conversation(vid=ids["visitor_b"])
+
+
+async def test_create_conversation_rejects_a_nonexistent_vid(_seeded_tenants):
+    # Must raise the identical error as the foreign-tenant case above.
+    ids = _seeded_tenants
+    async with db_session() as session:
+        repo = TenantScopedRepository(tenant_id=ids["tenant_a"], session=session)
+        with pytest.raises(ValueError, match="does not belong to tenant"):
+            await repo.create_conversation(vid=uuid.uuid4())

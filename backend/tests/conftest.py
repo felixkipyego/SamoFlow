@@ -18,15 +18,22 @@
 # test_ignore_files_guard.py and test_hardening_guard.py. Duplication check
 # after 1.1.o.h/1.1b/1.1c adds minimal_subprocess_env() (was byte-identical
 # in test_evals_placeholder.py and test_hooks.py, and re-listed inline in
-# test_alembic.py's _alembic_subprocess_env()).
+# test_alembic.py's _alembic_subprocess_env()). Duplication check after
+# 1.2.d/e/f adds db_session() (the async-generator-driving shape was
+# repeated ~14 times across test_tenancy_repository.py, plus twice in
+# test_db.py).
 import importlib
 import os
 import sys
+from collections.abc import AsyncIterator
+from contextlib import aclosing, asynccontextmanager
 from pathlib import Path
 from urllib.parse import urlsplit
 
 import pytest
+from sqlalchemy.ext.asyncio import AsyncSession
 
+from app import db
 from app.config import POSTGRES_SCHEME, Settings, get_settings
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -193,3 +200,16 @@ NO_ACTION_FK_COLUMNS = {
     ("visitors", "site_key_id"),
     ("conversations", "vid"),
 }
+
+
+@asynccontextmanager
+async def db_session() -> AsyncIterator[AsyncSession]:
+    # Shared across test_db.py and test_tenancy_repository.py (duplication
+    # check after 1.2.d/e/f): db.get_db_session() is itself a "dependency
+    # with yield" generator, meant to be driven by FastAPI's own Depends()
+    # machinery later; outside of that, the standard way to drive one is
+    # contextlib.aclosing() + anext(), which every test here was repeating
+    # inline. Wrapping it once as an @asynccontextmanager gives every call
+    # site the plain "async with db_session() as session:" shape instead.
+    async with aclosing(db.get_db_session()) as session_gen:
+        yield await anext(session_gen)

@@ -2,14 +2,19 @@
 # Tests for Task 1.2.a's async DB engine/session plumbing (backend/app/db.py).
 import subprocess
 import sys
-from contextlib import aclosing
 from pathlib import Path
 
 import pytest
 import sqlalchemy as sa
 
 from app import db
-from tests.conftest import VALID_ENV, minimal_subprocess_env, require_test_database, set_valid_env
+from tests.conftest import (
+    VALID_ENV,
+    db_session,
+    minimal_subprocess_env,
+    require_test_database,
+    set_valid_env,
+)
 
 # NOTE: byte-identical to test_alembic.py's/test_worker.py's own BACKEND_DIR
 # (not consolidated here -- out of scope for this task's file list).
@@ -37,8 +42,7 @@ async def _fresh_engine(monkeypatch):
 
 
 async def test_get_db_session_executes_select_1(_fresh_engine):
-    async with aclosing(db.get_db_session()) as session_gen:
-        session = await anext(session_gen)
+    async with db_session() as session:
         result = await session.execute(sa.text("SELECT 1"))
         assert result.scalar_one() == 1
 
@@ -50,8 +54,7 @@ async def test_many_sequential_sessions_do_not_leak_connections(_fresh_engine):
     # it. This does not cover concurrent/overlapping sessions (out of scope
     # for this plumbing-only task; no code yet holds more than one open).
     for _ in range(20):
-        async with aclosing(db.get_db_session()) as session_gen:
-            session = await anext(session_gen)
+        async with db_session() as session:
             await session.execute(sa.text("SELECT 1"))
 
     assert db.get_engine().pool.checkedout() == 0
