@@ -226,6 +226,8 @@ A production-ready, multi-tenant, embeddable AI widget platform: one website is 
 
 - 2026-09-27: Duplication check after 1.2.a/b/c: shared UUID-PK and timestamp-column helpers in db.py, shared expected-schema fact tables in conftest.py, dropped a dead fallback branch, added live-DB tests proving tenant_id NOT NULL and site_keys.key uniqueness are actually enforced; B2/B3 declined as correctly-scoped.
 
+- 2026-09-27: Step 1.2.d — tenant-scoped repository core (`backend/app/tenancy/repository.py`, `TenantScopedRepository`). Immutability mechanism: `@dataclass(frozen=True)`, the standard-library mechanism (rule 11 — a well-known mechanism over a hand-rolled `__setattr__` override); any post-`__init__` attribute assignment raises `dataclasses.FrozenInstanceError` (confirmed by hand to be a subclass of `AttributeError`), verified directly rather than assumed. Fields are named plainly (`tenant_id`, `session`, no leading underscore): the enforcement comes from `frozen=True` itself, not from hiding the name, and a plain name keeps the constructor call (`TenantScopedRepository(tenant_id=..., session=...)`) idiomatic. `tenant_id` has no default (omitting it raises Python's own `TypeError`); `__post_init__` additionally rejects an explicit `tenant_id=None` (`ValueError`), since a required field only guarantees the argument was passed, not that it's a real value. Two concrete methods prove the pattern: `get_conversation_by_id(cid)` and `list_site_keys()`, both filtering on `self.tenant_id` unconditionally — no method anywhere on the class accepts a `tenant_id` parameter. One necessary deviation from the task's stated file list, flagged before building: `backend/tests/test_app_skeleton.py`'s `STUB_ENTRY_POINTS` had to drop its `("app.tenancy.repository", "get_tenant_scoped_repository")` entry, since that stub function no longer exists / no longer raises `NotImplementedError` once real functionality replaced it — same kind of pre-existing-guard-test fix as 1.2.a's `ALLOWED_DATABASE_URL_CALLERS` edit. Real bug caught by running the new test file standalone rather than trusting the full-suite run: `backend/tests/test_tenancy_repository.py` initially passed only inside `make test-all` by accident, because `test_models.py`/`test_alembic.py` (imported earlier in the same pytest session) had already registered `app.plans.models`'s `plans` table onto the shared `Base.metadata` — the new file never imported `app.plans.models` itself, so `Base.metadata.create_all()` failed with `NoReferencedTableError` on `tenants.plan_id` when run in isolation. Fixed by adding the same side-effect import (`from app.plans import models as plans_models  # noqa: F401`) already used in `alembic/env.py` and `test_models.py`. Security proof, against the real test database (two tenants, one site_key and one conversation each): `list_site_keys()` scoped to tenant A returns only tenant A's site key; `get_conversation_by_id(tenant_B_cid)` — a real, valid row belonging to the wrong tenant — returns `None`, not tenant B's conversation; `get_conversation_by_id(tenant_A_cid)` correctly returns tenant A's own conversation, proving the mechanism isn't just blocking everything. Verified: `make lint` clean; full `backend/tests` without a test database: **133 passed, 8 skipped** (up from 130 passed, 5 skipped — 3 new structural tests run for real, 3 new security-proof tests skip as expected); `make test-all` against the real test-db: **141 passed** (133 + the 8 previously-skipped, all for real, re-run clean after the metadata-import fix); `git status --short` showed exactly the expected files (`backend/app/tenancy/repository.py` modified, `backend/tests/test_tenancy_repository.py` new, plus the flagged `test_app_skeleton.py` fix). `tenancy/repository.py`'s `TODO(1.2)` marker resolved and its open-markers line removed.
+
 ### Estimates to measure
 
 - The default limits in §9 and the budgets in §17 are starting points.
@@ -249,9 +251,9 @@ A production-ready, multi-tenant, embeddable AI widget platform: one website is 
 
 ## 7. Current task and next task
 
-Current: Step 1.2.d Tenant-scoped repository core.
-Next: Step 1.2.e CRUD/lookup functions built on the repository.
-Do not modify (completed tasks): 1.1.a, 1.1.b, 1.1.c, 1.1.d, 1.1.e, 1.1.f, 1.1.g, 1.1.h, 1.1.i, 1.1.j, 1.1.k, 1.1.l, 1.1.m, 1.1.n, 1.1.o.a, 1.1.o.b, 1.1.o.c, 1.1.o.d, 1.1.o.e, 1.1.o.f, 1.1.o.g, 1.1.o.h, 1.1b, 1.1c, 1.2.a, 1.2.b, 1.2.c.
+Current: Step 1.2.e CRUD/lookup functions built on the repository.
+Next: Step 1.2.f Close-out.
+Do not modify (completed tasks): 1.1.a, 1.1.b, 1.1.c, 1.1.d, 1.1.e, 1.1.f, 1.1.g, 1.1.h, 1.1.i, 1.1.j, 1.1.k, 1.1.l, 1.1.m, 1.1.n, 1.1.o.a, 1.1.o.b, 1.1.o.c, 1.1.o.d, 1.1.o.e, 1.1.o.f, 1.1.o.g, 1.1.o.h, 1.1b, 1.1c, 1.2.a, 1.2.b, 1.2.c, 1.2.d.
 
 ### Step 1.1 task list (approved)
 
@@ -307,13 +309,13 @@ see there rather than repeating it here.
 | 1.2.a | Async DB engine/session plumbing (no models yet): shared async engine + session factory sourced only from `get_settings().database_url_str()`; a connectivity test against the real test-db | Done |
 | 1.2.b | ORM models split per domain: `tenancy/models.py` (tenants, site_keys, visitors, conversations), `plans/models.py` (plans); sets `alembic/env.py`'s `target_metadata` to the models' `Base.metadata` | Done |
 | 1.2.c | First Alembic migration creating the 5 tables (UUID primary keys throughout; FKs from `site_keys`/`visitors`/`conversations` to `tenants` with `ON DELETE CASCADE`; `site_keys.key` a separate unique indexed column, not the PK); extends the existing upgrade-head integration test to assert the new schema | Done |
-| 1.2.d | Tenant-scoped repository core (`tenancy/repository.py`): the enforcement mechanism for "all tenant-scoped database access goes through the tenant-scoped repository helpers" (§21); cross-tenant isolation tests (two tenants seeded, repository scoped to one can never read the other's rows, including a hostile-argument case) | Not started |
+| 1.2.d | Tenant-scoped repository core (`tenancy/repository.py`): the enforcement mechanism for "all tenant-scoped database access goes through the tenant-scoped repository helpers" (§21); cross-tenant isolation tests (two tenants seeded, repository scoped to one can never read the other's rows, including a hostile-argument case) | Done |
 | 1.2.e | CRUD/lookup functions for tenants, site_keys, visitors, conversations, plans built on 1.2.d's repository; isolation tests extended to each concrete method | Not started |
 | 1.2.f | Close-out: resolve the `TODO(1.2)` markers (1.2.b, 1.2.d), update PROJECT_SPEC.md | Not started |
 
 ## 8. Task counter since the last duplication check
 
-n = 0 (run the duplication check at 3; never exceed 4) — reset after the 1.2.a/b/c duplication check.
+n = 1 (run the duplication check at 3; never exceed 4) — 1 task since the last check (1.2.d).
 
 ## 9. Open markers
 
@@ -329,7 +331,6 @@ n = 0 (run the duplication check at 3; never exceed 4) — reset after the 1.2.a
 - Owner CI or Phase 7: verify the image builds and runs on arm64, not just the amd64 host it was built on so far.
 - Owner Phase 7: shutdown behaviour of the API under load (1.1.g verified graceful shutdown at idle; 1.1.i verified api/worker stop in under 10 seconds via `docker compose stop`, still at idle, not under load).
 - Owner: whichever task first wires a real app/worker lifecycle hook (no task scheduled yet) — call `backend/app/db.py`'s `get_engine().dispose()` on shutdown; not addressed by 1.2.a since no consumer (endpoint or worker loop) exists yet for a shutdown hook to belong to.
-- Owner 1.2.d: implement the tenant-scoped repository helper (`TODO(1.2)` in `backend/app/tenancy/repository.py`) that all tenant-scoped database access must go through — not previously tracked as its own line here; added now per rule 10.
 - Owner: next migration-heavy task or a dedicated small fix (no task scheduled yet) — `backend/alembic/script.py.mako` (from `alembic init`, 1.1.h) generates code that fails this project's own ruff config (`typing.Union`/`Sequence` instead of `X | Y`, unsorted imports, long `sa.Column(...)` lines); 1.2.c's migration was fixed by hand after the fact. Fixing the template itself (so `alembic revision --autogenerate` produces lint-clean output directly) is the standard fix but was out of 1.2.c's file list.
 - Owner: to be scheduled (not tied to a task yet) — `site_keys.key` (the `pk_live_…` secret token) has no generator; 1.2.b only defines the column (unique, indexed, not null). Whichever task first creates a real `site_keys` row (dashboard onboarding, or a 1.4 test fixture) must add it.
 - Owner: whichever task first writes real tenant status values (no task scheduled yet, likely 6.5 Platform admin's "suspend a site") — `tenants.status` has no fixed vocabulary in docs/SPEC.md (unlike `site_keys.status`, constrained to draft/live/suspended by a CHECK constraint); confirm the real set then and add a constraint if it turns out to be fixed.
