@@ -16,7 +16,13 @@
 #   - one integration test that needs a real Postgres reachable at
 #     TEST_DATABASE_URL: it resets that database's public schema, runs
 #     "python -m alembic upgrade head" as a subprocess twice, and asserts
-#     neither run's output leaks the database password.
+#     neither run's output leaks the database password. Task 1.2.c extends
+#     it with sqlalchemy.inspect() assertions proving the real migration
+#     (backend/alembic/versions/541870ecc5d9_*.py) produces the schema
+#     app/tenancy/models.py and app/plans/models.py describe -- a different,
+#     real gap from test_models.py's own metadata-only checks (1.2.b), which
+#     can prove the ORM definitions are internally consistent but not that
+#     a migration actually applies them to a real database.
 import os
 import py_compile
 import subprocess
@@ -279,6 +285,25 @@ def _test_engine():
     engine.dispose()
 
 
+# Task 1.2.c's migration (541870ecc5d9): the schema app/tenancy/models.py
+# and app/plans/models.py describe.
+_EXPECTED_PK_COLUMNS = {
+    "tenants": "id",
+    "site_keys": "id",
+    "visitors": "vid",
+    "conversations": "cid",
+    "plans": "id",
+}
+
+# (table, column) -> the table its FK cascades from, per the tenants ->
+# {site_keys, visitors, conversations} cascade decision (PROJECT_SPEC.md).
+_EXPECTED_CASCADE_FKS = {
+    ("site_keys", "tenant_id"): "tenants",
+    ("visitors", "tenant_id"): "tenants",
+    ("conversations", "tenant_id"): "tenants",
+}
+
+
 def test_upgrade_head_is_idempotent_and_never_prints_the_password(_test_engine):
     engine = _test_engine
     real_password = engine.url.password
@@ -289,7 +314,29 @@ def test_upgrade_head_is_idempotent_and_never_prints_the_password(_test_engine):
     first = _run_alembic("upgrade", "head", engine=engine)
     assert first.returncode == 0, first.stdout + first.stderr
 
-    assert _table_names(engine) == ["alembic_version"]
+    # Table list includes the real migration's 5 tables (Task 1.2.c) --
+    # was just ["alembic_version"] before any migration existed (1.1.h).
+    assert set(_table_names(engine)) == {"alembic_version", *_EXPECTED_PK_COLUMNS}
+
+    inspector = sa.inspect(engine)
+
+    for table_name, pk_column in _EXPECTED_PK_COLUMNS.items():
+        assert inspector.get_pk_constraint(table_name)["constrained_columns"] == [pk_column], (
+            f"{table_name}'s primary key column does not match the model"
+        )
+
+    for (table_name, column_name), referred_table in _EXPECTED_CASCADE_FKS.items():
+        foreign_keys = inspector.get_foreign_keys(table_name)
+        (fk,) = [fk for fk in foreign_keys if fk["constrained_columns"] == [column_name]]
+        assert fk["referred_table"] == referred_table
+        assert fk["options"].get("ondelete") == "CASCADE", (
+            f"{table_name}.{column_name} must cascade from {referred_table}"
+        )
+
+    check_constraints = inspector.get_check_constraints("site_keys")
+    (status_check,) = [c for c in check_constraints if c["name"] == "ck_site_keys_status"]
+    for status_value in ("draft", "live", "suspended"):
+        assert status_value in status_check["sqltext"]
 
     second = _run_alembic("upgrade", "head", engine=engine)
     assert second.returncode == 0, second.stdout + second.stderr
