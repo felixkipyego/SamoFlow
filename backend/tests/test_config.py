@@ -13,6 +13,7 @@ def test_valid_environment_loads_with_correct_types_and_values(monkeypatch):
     assert settings.app_env == "development"
     assert settings.database_url_str() == VALID_ENV["DATABASE_URL"]
     assert settings.qdrant_url == "http://localhost:6333"
+    assert settings.qdrant_api_key_str() == VALID_ENV["QDRANT_API_KEY"]
     assert settings.api_host == "127.0.0.1"
     assert settings.api_port == 8000
     assert isinstance(settings.api_port, int)
@@ -36,6 +37,10 @@ def test_missing_required_variable_raises_and_names_field(monkeypatch, missing):
         {"DATABASE_URL": "not-a-url"},
         {"QDRANT_URL": "ftp://localhost:6333"},
         {"QDRANT_URL": "not-a-url"},
+        {"QDRANT_API_KEY": ""},
+        {"QDRANT_API_KEY": "has a space"},
+        {"QDRANT_API_KEY": "has\ttab"},
+        {"QDRANT_API_KEY": "has\nnewline"},
         {"API_PORT": "abc"},
         {"API_PORT": "0"},
         {"API_PORT": "70000"},
@@ -133,6 +138,25 @@ def test_settings_error_chain_never_carries_the_password(monkeypatch):
         assert TEST_PASSWORD not in str(link)
         assert TEST_PASSWORD not in repr(link)
         assert TEST_PASSWORD not in str(link.args)
+    assert err.__cause__ is None
+    assert err.__context__ is None
+
+
+def test_get_settings_raises_settings_error_on_malformed_qdrant_api_key(monkeypatch):
+    set_valid_env(monkeypatch, VALID_ENV, QDRANT_API_KEY="distinctive-key 123")
+    with pytest.raises(SettingsError):
+        get_settings()
+
+
+def test_settings_error_chain_never_carries_the_qdrant_api_key(monkeypatch):
+    set_valid_env(monkeypatch, VALID_ENV, QDRANT_API_KEY="distinctive-key 123")
+    with pytest.raises(SettingsError) as exc_info:
+        get_settings()
+    err = exc_info.value
+    for link in _exception_chain(err):
+        assert "distinctive-key" not in str(link)
+        assert "distinctive-key" not in repr(link)
+        assert "distinctive-key" not in str(link.args)
     assert err.__cause__ is None
     assert err.__context__ is None
 

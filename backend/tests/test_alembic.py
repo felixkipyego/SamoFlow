@@ -44,19 +44,20 @@ from tests.conftest import (
 
 BACKEND_DIR = Path(__file__).resolve().parent.parent
 
-# Harmless values for the four Settings fields alembic/env.py does not use
-# (get_settings() still requires all five to be present).
+# Harmless values for the Settings fields alembic/env.py does not use
+# (get_settings() still requires all of them to be present).
 _HARMLESS_ENV = {
     "APP_ENV": "test",
     "QDRANT_URL": "http://203.0.113.1:6333",
+    "QDRANT_API_KEY": "harmless-test-key",  # noqa: S105 (test fixture value, not a real secret)
     "API_HOST": "127.0.0.1",
     "API_PORT": "8000",
 }
 
 
 def _alembic_subprocess_env(database_url):
-    # Explicit and minimal: only the five Settings variables (DATABASE_URL
-    # set to the test URL, harmless values for the rest) plus PATH and HOME
+    # Explicit and minimal: only the Settings variables (DATABASE_URL set to
+    # the test URL, harmless values for the rest) plus PATH and HOME
     # inherited from the parent. Nothing else from the parent's environment
     # reaches the subprocess, so a stray PGPASSWORD/PGHOST/PGUSER (or
     # anything else) in the caller's shell can never affect the connection
@@ -117,7 +118,14 @@ def test_upgrade_head_with_empty_environment_exits_cleanly_without_traceback():
     )
     assert result.returncode != 0
     assert "Traceback" not in result.stderr
-    for field in ("app_env", "database_url", "qdrant_url", "api_host", "api_port"):
+    for field in (
+        "app_env",
+        "database_url",
+        "qdrant_url",
+        "qdrant_api_key",
+        "api_host",
+        "api_port",
+    ):
         assert field in result.stderr
 
 
@@ -208,14 +216,21 @@ def test_alembic_subprocess_env_excludes_stray_libpq_variables(monkeypatch):
     assert "PGUSER" not in env
 
 
-def test_alembic_subprocess_env_has_exactly_the_five_settings_variables_plus_path_and_home(
+def test_alembic_subprocess_env_has_exactly_the_six_settings_variables_plus_path_and_home(
     monkeypatch,
 ):
     monkeypatch.setenv("SOME_OTHER_STRAY_VAR", "should-not-be-inherited")
     env = _alembic_subprocess_env(
         "postgresql+psycopg://user:pw@localhost:5432/widgetplatform_test"
     )
-    expected_keys = {"APP_ENV", "DATABASE_URL", "QDRANT_URL", "API_HOST", "API_PORT"}
+    expected_keys = {
+        "APP_ENV",
+        "DATABASE_URL",
+        "QDRANT_URL",
+        "QDRANT_API_KEY",
+        "API_HOST",
+        "API_PORT",
+    }
     expected_keys |= {name for name in ("PATH", "HOME") if name in os.environ}
     assert set(env) == expected_keys
 

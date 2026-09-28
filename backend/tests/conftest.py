@@ -70,6 +70,7 @@ VALID_ENV = {
     "APP_ENV": "development",
     "DATABASE_URL": "postgresql+psycopg://user:pw@localhost:5432/widgetplatform",
     "QDRANT_URL": "http://localhost:6333",
+    "QDRANT_API_KEY": "test-qdrant-key",  # noqa: S105 (test fixture value, not a real secret)
     "API_HOST": "127.0.0.1",
     "API_PORT": "8000",
 }

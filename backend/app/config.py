@@ -1,8 +1,11 @@
 # backend/app/config.py
-# Settings module (Task 1.1.c): validates the five required environment
+# Settings module (Task 1.1.c): validates the required environment
 # variables at startup and exposes them through one cached Settings
 # instance. Nothing here reads the environment or calls get_settings() at
 # import time (module import must succeed with an empty environment).
+# Task 1.3.a1 adds qdrant_api_key (required, never optional or defaulted --
+# an unauthenticated Qdrant client would silently work today and silently
+# stop working the moment auth is enabled on a real deployment).
 #
 # ASSUMPTION: pydantic and pydantic-settings are not new dependencies here.
 # pydantic-settings==2.15.0 is already an approved runtime dependency
@@ -35,6 +38,7 @@ class Settings(BaseSettings):
     app_env: Literal["development", "test", "production"]
     database_url: SecretStr
     qdrant_url: str
+    qdrant_api_key: SecretStr
     api_host: str = Field(min_length=1)
     api_port: int = Field(ge=1, le=65535)
 
@@ -62,9 +66,29 @@ class Settings(BaseSettings):
             raise ValueError("QDRANT_URL must be an http or https URL.")
         return value
 
+    @field_validator("qdrant_api_key")
+    @classmethod
+    def _require_a_clean_header_value(cls, value: SecretStr) -> SecretStr:
+        raw = value.get_secret_value()
+        # Message names only the requirement, never the value under
+        # validation, so a bad key cannot leak here.
+        if not raw:
+            raise ValueError("QDRANT_API_KEY must not be empty.")
+        if any(ch.isspace() or not ch.isprintable() for ch in raw):
+            raise ValueError(
+                "QDRANT_API_KEY must not contain whitespace or control "
+                "characters (it is sent as an HTTP header value; a newline "
+                "would allow header injection)."
+            )
+        return value
+
     def database_url_str(self) -> str:
         # The one explicit call that unwraps the secret. Never log this.
         return self.database_url.get_secret_value()
+
+    def qdrant_api_key_str(self) -> str:
+        # The one explicit call that unwraps the secret. Never log this.
+        return self.qdrant_api_key.get_secret_value()
 
 
 class SettingsError(Exception):

@@ -1,13 +1,16 @@
 # backend/tests/test_config_guard.py
-# Guard test (Task 1.1.c refinement; Task 1.1.h extends it to backend/alembic):
-# parses every .py file under backend/app and backend/alembic with ast (not
-# text search, so comments/strings never trigger it) and enforces three rules
-# from PROJECT_SPEC.md's decisions log:
+# Guard test (Task 1.1.c refinement; Task 1.1.h extends it to backend/alembic;
+# Task 1.3.a1 extends it to qdrant_api_key_str()): parses every .py file
+# under backend/app and backend/alembic with ast (not text search, so
+# comments/strings never trigger it) and enforces four rules from
+# PROJECT_SPEC.md's decisions log:
 #   - only app/config.py may construct Settings() directly;
 #   - nothing calls a method named errors() (that leaks raw input, see
 #     config.py's model_config comment);
 #   - only files listed in ALLOWED_DATABASE_URL_CALLERS may call
-#     database_url_str() outside app/config.py.
+#     database_url_str() outside app/config.py;
+#   - only files listed in ALLOWED_QDRANT_API_KEY_CALLERS may call
+#     qdrant_api_key_str() outside app/config.py.
 import ast
 from pathlib import Path
 
@@ -19,6 +22,11 @@ CONFIG_FILE = APP_DIR / "config.py"
 # NOTE: adding a file here is a deliberate decision: it means that file
 # receives the real database password. Review it by hand.
 ALLOWED_DATABASE_URL_CALLERS: tuple[str, ...] = ("alembic/env.py", "app/db.py")
+
+# NOTE: adding a file here is a deliberate decision: it means that file
+# receives the real Qdrant API key. Review it by hand. Starts empty --
+# Task 1.3.b adds app/qdrant.py, the only intended caller.
+ALLOWED_QDRANT_API_KEY_CALLERS: tuple[str, ...] = ()
 
 
 def _called_name(node: ast.Call) -> str | None:
@@ -65,5 +73,14 @@ def test_config_guard():
                 violations.append(
                     f"{path}:{node.lineno}: calls database_url_str() but "
                     f"{rel!r} is not in ALLOWED_DATABASE_URL_CALLERS"
+                )
+            elif (
+                name == "qdrant_api_key_str"
+                and path != CONFIG_FILE
+                and rel not in ALLOWED_QDRANT_API_KEY_CALLERS
+            ):
+                violations.append(
+                    f"{path}:{node.lineno}: calls qdrant_api_key_str() but "
+                    f"{rel!r} is not in ALLOWED_QDRANT_API_KEY_CALLERS"
                 )
     assert not violations, "\n".join(violations)
