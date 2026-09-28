@@ -37,7 +37,9 @@ from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from tests.conftest import (
     CASCADE_FK_COLUMNS,
     EXPECTED_PK_COLUMNS,
+    EXPECTED_STATUS_CHECK_CONSTRAINTS,
     EXPECTED_TABLES,
+    VISITOR_SECRET_UNIQUE_INDEX,
     minimal_subprocess_env,
     require_test_database,
 )
@@ -337,10 +339,18 @@ def test_upgrade_head_is_idempotent_and_never_prints_the_password(_test_engine):
             f"{table_name}.{column_name} must cascade from {referred_table}"
         )
 
-    check_constraints = inspector.get_check_constraints("site_keys")
-    (status_check,) = [c for c in check_constraints if c["name"] == "ck_site_keys_status"]
-    for status_value in ("draft", "live", "suspended"):
-        assert status_value in status_check["sqltext"]
+    for table_name, (constraint_name, allowed_values) in EXPECTED_STATUS_CHECK_CONSTRAINTS.items():
+        check_constraints = inspector.get_check_constraints(table_name)
+        (status_check,) = [c for c in check_constraints if c["name"] == constraint_name]
+        for status_value in allowed_values:
+            assert status_value in status_check["sqltext"]
+
+    visitor_indexes = inspector.get_indexes("visitors")
+    (secret_hash_index,) = [
+        i for i in visitor_indexes if i["name"] == VISITOR_SECRET_UNIQUE_INDEX["name"]
+    ]
+    assert secret_hash_index["unique"] is True
+    assert secret_hash_index["column_names"] == VISITOR_SECRET_UNIQUE_INDEX["columns"]
 
     second = _run_alembic("upgrade", "head", engine=engine)
     assert second.returncode == 0, second.stdout + second.stderr
@@ -397,6 +407,84 @@ def test_site_keys_key_uniqueness_is_enforced_by_the_database(_test_engine):
             sa.text(
                 "INSERT INTO site_keys (key, tenant_id, environment, status) "
                 "SELECT 'pk_live_duplicate_test', id, 'production', 'draft' FROM tenants"
+            )
+        )
+        connection.commit()
+
+
+def test_tenant_status_outside_the_allowed_vocabulary_is_rejected(_test_engine):
+    # Task 1.4.d: proves ck_tenants_status actually rejects a bad value at
+    # the database, not just that it's declared in the model/migration.
+    engine = _test_engine
+    _reset_public_schema(engine)
+    migrated = _run_alembic("upgrade", "head", engine=engine)
+    assert migrated.returncode == 0, migrated.stdout + migrated.stderr
+
+    with engine.connect() as connection, pytest.raises(IntegrityError):
+        connection.execute(
+            sa.text("INSERT INTO tenants (name, status) VALUES ('bad tenant', 'pending')")
+        )
+        connection.commit()
+
+
+def test_visitor_secret_hash_uniqueness_is_scoped_to_one_site_key(_test_engine):
+    # Task 1.4.d: proves ix_visitors_site_key_id_secret_hash rejects a
+    # duplicate (site_key_id, secret_hash) pair, while the SAME secret_hash
+    # under a DIFFERENT site_key_id is accepted -- the uniqueness is scoped
+    # to one site key, not a global constraint on secret_hash alone.
+    engine = _test_engine
+    _reset_public_schema(engine)
+    migrated = _run_alembic("upgrade", "head", engine=engine)
+    assert migrated.returncode == 0, migrated.stdout + migrated.stderr
+
+    with engine.connect() as connection:
+        connection.execute(
+            sa.text("INSERT INTO tenants (name, status) VALUES ('tenant one', 'active')")
+        )
+        connection.execute(
+            sa.text(
+                "INSERT INTO site_keys (key, tenant_id, environment, status) "
+                "SELECT 'pk_live_visitor_test_a', id, 'production', 'live' FROM tenants "
+                "WHERE name = 'tenant one'"
+            )
+        )
+        connection.execute(
+            sa.text(
+                "INSERT INTO site_keys (key, tenant_id, environment, status) "
+                "SELECT 'pk_live_visitor_test_b', id, 'production', 'live' FROM tenants "
+                "WHERE name = 'tenant one'"
+            )
+        )
+        connection.execute(
+            sa.text(
+                "INSERT INTO visitors (tenant_id, site_key_id, secret_hash) "
+                "SELECT t.id, sk.id, 'shared-hash-value' FROM tenants t "
+                "JOIN site_keys sk ON sk.key = 'pk_live_visitor_test_a' "
+                "WHERE t.name = 'tenant one'"
+            )
+        )
+        connection.commit()
+
+    # Same secret_hash, same site_key_id: rejected.
+    with engine.connect() as connection, pytest.raises(IntegrityError):
+        connection.execute(
+            sa.text(
+                "INSERT INTO visitors (tenant_id, site_key_id, secret_hash) "
+                "SELECT t.id, sk.id, 'shared-hash-value' FROM tenants t "
+                "JOIN site_keys sk ON sk.key = 'pk_live_visitor_test_a' "
+                "WHERE t.name = 'tenant one'"
+            )
+        )
+        connection.commit()
+
+    # Same secret_hash, DIFFERENT site_key_id: accepted.
+    with engine.connect() as connection:
+        connection.execute(
+            sa.text(
+                "INSERT INTO visitors (tenant_id, site_key_id, secret_hash) "
+                "SELECT t.id, sk.id, 'shared-hash-value' FROM tenants t "
+                "JOIN site_keys sk ON sk.key = 'pk_live_visitor_test_b' "
+                "WHERE t.name = 'tenant one'"
             )
         )
         connection.commit()

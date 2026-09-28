@@ -345,6 +345,24 @@ NO_ACTION_FK_COLUMNS = {
     ("conversations", "vid"),
 }
 
+# Closed-vocabulary CHECK constraints, keyed by table (Task 1.4.d adds
+# tenants; site_keys' own was already checked ad hoc before this -- moved
+# here so both share one dict-driven test instead of two near-identical
+# ones, the same convention as CASCADE_FK_COLUMNS above).
+EXPECTED_STATUS_CHECK_CONSTRAINTS = {
+    "site_keys": ("ck_site_keys_status", frozenset({"draft", "live", "suspended"})),
+    "tenants": ("ck_tenants_status", frozenset({"active", "suspended"})),
+}
+
+# Task 1.4.d: the composite unique index supporting 1.4.e's "find a visitor
+# by their secret within one site key" lookup -- see
+# app/tenancy/models.py's Visitor.__table_args__ for why it is scoped to
+# (site_key_id, secret_hash) together, not secret_hash alone.
+VISITOR_SECRET_UNIQUE_INDEX = {
+    "name": "ix_visitors_site_key_id_secret_hash",
+    "columns": ["site_key_id", "secret_hash"],
+}
+
 
 @asynccontextmanager
 async def db_session() -> AsyncIterator[AsyncSession]:

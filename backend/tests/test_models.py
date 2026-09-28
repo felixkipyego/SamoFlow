@@ -14,8 +14,10 @@ from app.tenancy import models as tenancy_models  # noqa: F401
 from tests.conftest import (
     CASCADE_FK_COLUMNS,
     EXPECTED_PK_COLUMNS,
+    EXPECTED_STATUS_CHECK_CONSTRAINTS,
     EXPECTED_TABLES,
     NO_ACTION_FK_COLUMNS,
+    VISITOR_SECRET_UNIQUE_INDEX,
 )
 
 
@@ -80,13 +82,23 @@ def test_every_tenant_scoped_table_indexes_its_tenant_id():
         assert column.index, f"{table_name}.tenant_id has no index"
 
 
-def test_site_keys_status_check_constraint_matches_the_spec_vocabulary():
-    table = Base.metadata.tables["site_keys"]
-    check_constraints = [c for c in table.constraints if c.__class__.__name__ == "CheckConstraint"]
-    assert len(check_constraints) == 1
-    assert "draft" in str(check_constraints[0].sqltext)
-    assert "live" in str(check_constraints[0].sqltext)
-    assert "suspended" in str(check_constraints[0].sqltext)
+def test_status_check_constraints_match_the_spec_vocabulary():
+    for table_name, (constraint_name, allowed_values) in EXPECTED_STATUS_CHECK_CONSTRAINTS.items():
+        table = Base.metadata.tables[table_name]
+        check_constraints = [
+            c for c in table.constraints if c.__class__.__name__ == "CheckConstraint"
+        ]
+        assert len(check_constraints) == 1, f"{table_name} should have exactly one CHECK constraint"
+        assert check_constraints[0].name == constraint_name
+        for value in allowed_values:
+            assert value in str(check_constraints[0].sqltext)
+
+
+def test_visitor_secret_hash_unique_index_is_scoped_to_site_key():
+    table = Base.metadata.tables["visitors"]
+    (index,) = [i for i in table.indexes if i.name == VISITOR_SECRET_UNIQUE_INDEX["name"]]
+    assert index.unique is True
+    assert [c.name for c in index.columns] == VISITOR_SECRET_UNIQUE_INDEX["columns"]
 
 
 def test_uuid_type_hint_matches_python_uuid():

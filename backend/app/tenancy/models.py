@@ -21,7 +21,7 @@
 import uuid
 from datetime import datetime
 
-from sqlalchemy import CheckConstraint, DateTime, ForeignKey, String, text
+from sqlalchemy import CheckConstraint, DateTime, ForeignKey, Index, String, text
 from sqlalchemy.dialects.postgresql import ARRAY, JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -33,12 +33,10 @@ class Tenant(Base):
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), **UUID_PK)
     name: Mapped[str] = mapped_column(String, nullable=False)
-    # ASSUMPTION: no fixed status vocabulary for tenants is given anywhere in
-    # docs/SPEC.md (unlike site_keys.status, whose three values §4.1 names
-    # explicitly) -- left as a plain string with no CHECK constraint. The
-    # first task that actually writes tenant status values (suspend a site,
-    # §12 platform admin, likely Step 6.5) should confirm the real set and
-    # add a constraint then if it turns out to be fixed.
+    # Task 1.4.d resolves the vocabulary this field's ASSUMPTION previously
+    # left open: the Step 1.4 breakdown decided a fixed, fail-closed
+    # two-value set (active/suspended) -- enforced below the same way
+    # site_keys.status's own closed vocabulary is.
     status: Mapped[str] = mapped_column(String, nullable=False)
     # Nullable: docs/SPEC.md §5.4 "Plans are assigned manually in an admin
     # screen" implies a tenant can exist before a plan is assigned.
@@ -47,6 +45,10 @@ class Tenant(Base):
     )
     config: Mapped[dict] = mapped_column(
         JSONB, nullable=False, server_default=text("'{}'::jsonb")
+    )
+
+    __table_args__ = (
+        CheckConstraint("status IN ('active', 'suspended')", name="ck_tenants_status"),
     )
 
 
@@ -105,6 +107,23 @@ class Visitor(Base):
     # Reserved, unused per docs/SPEC.md §4.1/§19 (logged-in visitors are a
     # later phase).
     external_user_id: Mapped[str | None] = mapped_column(String, nullable=True)
+
+    __table_args__ = (
+        # Task 1.4.d: supports 1.4.e's lookup ("find a visitor by their
+        # secret within one site key"). Uniqueness is scoped to
+        # (site_key_id, secret_hash) together, deliberately NOT a global
+        # unique index on secret_hash alone -- a hash collision across two
+        # DIFFERENT site keys is cryptographically negligible (SHA-256 over
+        # a 256-bit random secret) and isn't what this index is protecting
+        # against; it exists to make one site key's own lookup fast and to
+        # reject an accidental duplicate insert within that one key.
+        Index(
+            "ix_visitors_site_key_id_secret_hash",
+            "site_key_id",
+            "secret_hash",
+            unique=True,
+        ),
+    )
 
 
 class Conversation(Base):
