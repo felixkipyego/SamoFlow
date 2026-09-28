@@ -18,7 +18,12 @@
 # the library's own public qdrant_client.common.version_check functions
 # directly (get_server_version/is_compatible) for a deterministic assertion,
 # reusing the library's own mechanism rather than a parallel custom one
-# (rule 11).
+# (rule 11). Confirmed empirically (Task 1.3.e, H2): this warning's
+# attribution in a full-suite run to unrelated, later live tests is pytest
+# timing noise, not a real compatibility failure -- running
+# test_get_qdrant_client_is_a_cached_singleton (which deliberately builds
+# clients against an unreachable URL) alone reproduces the same warning with
+# no other test running at all.
 #
 # Constructing a client with an api_key over a plain "http://" URL emits a
 # second UserWarning ("Api key is used with an insecure connection."),
