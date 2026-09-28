@@ -27,6 +27,14 @@ ALLOWED_DATABASE_URL_CALLERS: tuple[str, ...] = ("alembic/env.py", "app/db.py")
 # receives the real Qdrant API key. Review it by hand.
 ALLOWED_QDRANT_API_KEY_CALLERS: tuple[str, ...] = ("app/qdrant.py",)
 
+# Duplication check after 1.3.a1/a2/b: both secret accessors are checked by
+# the same single branch below instead of one copy-pasted elif per accessor
+# -- a third one later needs one entry here, not a third branch.
+_SECRET_ACCESSOR_ALLOW_LISTS: dict[str, tuple[str, ...]] = {
+    "database_url_str": ALLOWED_DATABASE_URL_CALLERS,
+    "qdrant_api_key_str": ALLOWED_QDRANT_API_KEY_CALLERS,
+}
+
 
 def _called_name(node: ast.Call) -> str | None:
     func = node.func
@@ -65,21 +73,12 @@ def test_config_guard():
                     "log str(exc) instead, never exc.errors()"
                 )
             elif (
-                name == "database_url_str"
+                name in _SECRET_ACCESSOR_ALLOW_LISTS
                 and path != CONFIG_FILE
-                and rel not in ALLOWED_DATABASE_URL_CALLERS
+                and rel not in _SECRET_ACCESSOR_ALLOW_LISTS[name]
             ):
                 violations.append(
-                    f"{path}:{node.lineno}: calls database_url_str() but "
-                    f"{rel!r} is not in ALLOWED_DATABASE_URL_CALLERS"
-                )
-            elif (
-                name == "qdrant_api_key_str"
-                and path != CONFIG_FILE
-                and rel not in ALLOWED_QDRANT_API_KEY_CALLERS
-            ):
-                violations.append(
-                    f"{path}:{node.lineno}: calls qdrant_api_key_str() but "
-                    f"{rel!r} is not in ALLOWED_QDRANT_API_KEY_CALLERS"
+                    f"{path}:{node.lineno}: calls {name}() but {rel!r} is not "
+                    f"in its allow-list"
                 )
     assert not violations, "\n".join(violations)

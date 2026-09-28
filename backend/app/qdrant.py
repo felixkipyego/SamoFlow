@@ -28,6 +28,7 @@
 # is filtered here, narrowly (exact message, scoped to this one
 # construction via warnings.catch_warnings(), never a global filter) rather
 # than left to print on every client construction.
+import re
 import warnings
 from functools import lru_cache
 
@@ -50,8 +51,14 @@ def build_qdrant_client(url: str, api_key: str) -> AsyncQdrantClient:
     # client's own api_key argument only -- never logged, never interpolated
     # into a message anywhere in this module.
     with warnings.catch_warnings():
+        # message is matched as a regex by warnings.filterwarnings, not a
+        # literal string; re.escape() keeps this an exact match so an
+        # unrelated UserWarning whose text happens to contain regex
+        # metacharacters is never accidentally swallowed too.
         warnings.filterwarnings(
-            "ignore", message=_INSECURE_API_KEY_WARNING, category=UserWarning
+            "ignore",
+            message=re.escape(_INSECURE_API_KEY_WARNING),
+            category=UserWarning,
         )
         return AsyncQdrantClient(
             url=url,

@@ -20,8 +20,11 @@
 #     between each other -- only once, after the whole module, below.
 import asyncio
 import importlib.metadata
+import re
 import subprocess
 import sys
+import traceback
+import warnings
 from pathlib import Path
 
 import pytest
@@ -49,6 +52,26 @@ def test_importing_qdrant_module_has_no_side_effects():
     )
     assert result.returncode == 0, result.stderr
     assert result.stderr == ""
+
+
+def test_the_insecure_api_key_warning_filter_is_an_exact_match_not_a_regex():
+    # B1 (duplication check after 1.3.a1/a2/b): warnings.filterwarnings'
+    # message argument is matched as a regex, not a literal string, so this
+    # proves -- using the exact filter arguments build_qdrant_client() itself
+    # uses -- that an unrelated UserWarning raised in the same
+    # catch_warnings() scope is never accidentally swallowed too.
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        warnings.filterwarnings(
+            "ignore",
+            message=re.escape(qdrant._INSECURE_API_KEY_WARNING),
+            category=UserWarning,
+        )
+        warnings.warn(qdrant._INSECURE_API_KEY_WARNING, UserWarning, stacklevel=1)
+        warnings.warn("some unrelated warning", UserWarning, stacklevel=1)
+
+    messages = [str(w.message) for w in caught]
+    assert messages == ["some unrelated warning"]
 
 
 async def test_build_qdrant_client_is_configured_for_rest_not_grpc():
@@ -120,13 +143,41 @@ async def test_get_qdrant_client_again_reuses_the_same_client_a_different_loop(m
 
 async def test_wrong_key_fails_authentication():
     url, _key = require_test_qdrant()
-    client = qdrant.build_qdrant_client(url, "wrong-key")
+    wrong_key = "wrong-key"  # noqa: S105 (test fixture value, not a real secret)
+    client = qdrant.build_qdrant_client(url, wrong_key)
     try:
         with pytest.raises(UnexpectedResponse) as exc_info:
             await client.get_collections()
         assert exc_info.value.status_code == 401
+        # C1 (duplication check after 1.3.a1/a2/b): the wrong key itself must
+        # never appear in this exception's public surfaces -- repr/str, or
+        # a full traceback -- even though it was rejected, not accepted.
+        exc = exc_info.value
+        assert wrong_key not in repr(exc)
+        assert wrong_key not in str(exc)
+        rendered_traceback = "".join(
+            traceback.format_exception(type(exc), exc, exc.__traceback__)
+        )
+        assert wrong_key not in rendered_traceback
     finally:
         await client.close()
+
+
+def test_client_repr_and_str_never_contain_the_api_key():
+    # C1: repr()/str() of the client object itself, for a client built with
+    # a real-shaped key, must never contain that key -- checked offline
+    # (fake unreachable URL, no live Qdrant needed) since this is a property
+    # of the client object's own __repr__/__str__, not of a live connection.
+    # Deliberately asserts only on these two public surfaces, not on the
+    # client's private headers dict, which holds the key by design as the
+    # auth header.
+    distinctive_key = "distinctive-test-key-should-not-leak"  # noqa: S105
+    client = qdrant.build_qdrant_client("http://127.0.0.1:1", distinctive_key)
+    try:
+        assert distinctive_key not in repr(client)
+        assert distinctive_key not in str(client)
+    finally:
+        asyncio.run(client.close())
 
 
 def test_client_library_version_is_compatible_with_the_pinned_server():

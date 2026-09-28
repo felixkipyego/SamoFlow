@@ -119,6 +119,21 @@ def _allowed_test_hosts() -> frozenset[str]:
     return _DEFAULT_ALLOWED_TEST_HOSTS | extra_hosts
 
 
+def _require_env_var(var_name: str, ci_fail_message: str, skip_hint: str) -> str:
+    # Shared by require_test_database() and require_test_qdrant() (duplication
+    # check after 1.3.a1/a2/b): only this "unset -> skip locally / fail in
+    # CI" first step was byte-identical in shape; everything each function
+    # checks once it has a non-empty value stays in that function, since it
+    # differs (URL scheme/suffix vs. a second required key, different
+    # allowed-hosts checks).
+    value = os.environ.get(var_name)
+    if not value:
+        if os.environ.get("CI") == "true":
+            pytest.fail(ci_fail_message)
+        pytest.skip(skip_hint)
+    return value
+
+
 def require_test_database() -> str:
     # Guards destructive integration-test setup (DROP SCHEMA, etc.) so it can
     # never run against a real database:
@@ -132,15 +147,13 @@ def require_test_database() -> str:
     #   - set, correctly named, but on a host that isn't localhost/127.0.0.1
     #     or explicitly opted in via TEST_DATABASE_ALLOWED_HOSTS: fail — the
     #     "_test" name alone doesn't prove the host is safe to drop schemas on.
-    url = os.environ.get("TEST_DATABASE_URL")
-    if not url:
-        if os.environ.get("CI") == "true":
-            pytest.fail(
-                "TEST_DATABASE_URL is not set and CI=true: this test must "
-                "fail, not skip, when CI is expected to provide a test "
-                "database. Check the CI workflow's Postgres service and env."
-            )
-        pytest.skip(_LOCAL_DOCKER_RUN_HINT)
+    url = _require_env_var(
+        "TEST_DATABASE_URL",
+        "TEST_DATABASE_URL is not set and CI=true: this test must "
+        "fail, not skip, when CI is expected to provide a test "
+        "database. Check the CI workflow's Postgres service and env.",
+        _LOCAL_DOCKER_RUN_HINT,
+    )
 
     parts = urlsplit(url)
     database_name = parts.path.lstrip("/")
@@ -177,15 +190,13 @@ def require_test_qdrant() -> tuple[str, str]:
     #     Qdrant configured";
     #   - set, but on a host that isn't localhost/127.0.0.1: fail, without
     #     printing the key.
-    url = os.environ.get("TEST_QDRANT_URL")
-    if not url:
-        if os.environ.get("CI") == "true":
-            pytest.fail(
-                "TEST_QDRANT_URL is not set and CI=true: this test must "
-                "fail, not skip, when CI is expected to provide a test "
-                "Qdrant. Check the CI workflow's Qdrant service and env."
-            )
-        pytest.skip(_LOCAL_QDRANT_RUN_HINT)
+    url = _require_env_var(
+        "TEST_QDRANT_URL",
+        "TEST_QDRANT_URL is not set and CI=true: this test must "
+        "fail, not skip, when CI is expected to provide a test "
+        "Qdrant. Check the CI workflow's Qdrant service and env.",
+        _LOCAL_QDRANT_RUN_HINT,
+    )
 
     key = os.environ.get("TEST_QDRANT_API_KEY")
     if not key:
