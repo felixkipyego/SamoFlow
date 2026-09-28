@@ -354,13 +354,16 @@ EXPECTED_STATUS_CHECK_CONSTRAINTS = {
     "tenants": ("ck_tenants_status", frozenset({"active", "suspended"})),
 }
 
-# Task 1.4.d: the composite unique index supporting 1.4.e's "find a visitor
-# by their secret within one site key" lookup -- see
-# app/tenancy/models.py's Visitor.__table_args__ for why it is scoped to
-# (site_key_id, secret_hash) together, not secret_hash alone.
-VISITOR_SECRET_UNIQUE_INDEX = {
-    "name": "ix_visitors_site_key_id_secret_hash",
-    "columns": ["site_key_id", "secret_hash"],
+# Composite unique indexes, keyed by table -- same (name, value) shape as
+# EXPECTED_STATUS_CHECK_CONSTRAINTS above (duplication check after
+# 1.4.c/d/e: originally a one-off flat dict, reshaped to match once a
+# sibling constant of the same kind existed to be consistent with). Task
+# 1.4.d's entry supports 1.4.e's "find a visitor by their secret within one
+# site key" lookup -- see app/tenancy/models.py's Visitor.__table_args__
+# for why it is scoped to (site_key_id, secret_hash) together, not
+# secret_hash alone.
+EXPECTED_UNIQUE_INDEXES = {
+    "visitors": ("ix_visitors_site_key_id_secret_hash", ["site_key_id", "secret_hash"]),
 }
 
 

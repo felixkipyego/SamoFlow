@@ -51,7 +51,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import InstrumentedAttribute
 from sqlalchemy.sql import func
 
-from app.auth.secrets import verify_visitor_secret
+from app.auth.secrets import hash_visitor_secret
 from app.tenancy.models import Conversation, SiteKey, Tenant, Visitor
 
 
@@ -189,33 +189,52 @@ class TenantScopedRepository:
         # that issued it (docs/SPEC.md §4.2's localStorage key is
         # "aw:{site_key}"), never across a tenant's other, unrelated sites.
         #
-        # Candidates are read scoped, then each is checked in Python with
-        # verify_visitor_secret() (1.4.c's constant-time comparison) --
-        # never a SQL "secret_hash = <computed hash>" equality filter, which
-        # would bypass 1.4.c's comparison entirely and let the query
-        # itself, not this function, decide what "matches" means. A wrong
-        # secret for a real row and a secret matching no row at all both
-        # fall out of the same empty-match path below and return None --
-        # nothing here distinguishes them, no exception, no log line
-        # containing the attempted secret.
+        # Rewritten in the duplication check after 1.4.c/d/e (B1): a direct
+        # SQL equality filter on the precomputed hash, using 1.4.d's own
+        # composite unique index the way it was built to be used (an O(1)
+        # index seek) -- replacing the original design's O(n) scan of every
+        # candidate in Python with a per-row verify_visitor_secret() call, a
+        # real cost on what is a hot path (every widget session-init call
+        # for a returning visitor).
+        #
+        # This is still secure: comparing a SHA-256 DIGEST for equality in
+        # SQL does not create a timing oracle on the underlying SECRET --
+        # there is no partial-preimage relationship between a hash and the
+        # value that produced it (SHA-256's avalanche property means one
+        # differing input bit changes roughly half the output bits), so a
+        # non-constant-time comparison of two digests leaks nothing about
+        # how close a guessed secret was. That is categorically different
+        # from comparing the SECRET itself, where a non-constant-time
+        # comparison genuinely does leak a byte-by-byte "getting warmer"
+        # signal -- exactly the property verify_visitor_secret() (1.4.c)
+        # exists to protect, and it remains the right tool for that: any
+        # future code path that ends up comparing a raw secret directly,
+        # rather than through this hash-equality query, must still go
+        # through verify_visitor_secret(), never a plain ==/!=.
+        #
+        # A wrong secret and a secret matching no row at all both produce
+        # zero matching rows -- one query, one branch below, nothing here
+        # distinguishes them, no exception, no log line containing the
+        # attempted secret.
         result = await self.session.execute(
             select(Visitor).where(
                 Visitor.tenant_id == self.tenant_id,
                 Visitor.site_key_id == site_key_id,
+                Visitor.secret_hash == hash_visitor_secret(secret),
             )
         )
-        for candidate in result.scalars().all():
-            if verify_visitor_secret(secret, candidate.secret_hash):
-                # "on match" (the same task-list row): bundled here, not a
-                # separate step the caller must remember to invoke -- every
-                # successful verification is a real visit (docs/SPEC.md
-                # §4.2's "Return visit: verify the secret ... " has no case
-                # where verifying but not recording the visit is correct),
-                # and there is exactly one call site planned (1.4.g), so
-                # nothing is lost by not exposing this as two steps.
-                await self.touch_visitor_last_seen(candidate.vid)
-                return candidate
-        return None
+        visitor = result.scalar_one_or_none()
+        if visitor is None:
+            return None
+        # "on match" (the same task-list row): bundled here, not a separate
+        # step the caller must remember to invoke -- every successful
+        # verification is a real visit (docs/SPEC.md §4.2's "Return visit:
+        # verify the secret ... " has no case where verifying but not
+        # recording the visit is correct), and there is exactly one call
+        # site planned (1.4.g), so nothing is lost by not exposing this as
+        # two steps.
+        await self.touch_visitor_last_seen(visitor.vid)
+        return visitor
 
     async def touch_visitor_last_seen(self, vid: uuid.UUID) -> None:
         # Task 1.4.e. Unlike create_visitor/create_conversation's

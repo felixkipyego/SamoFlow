@@ -390,11 +390,12 @@ async def test_get_visitor_by_secret_no_matching_row_is_indistinguishable_from_w
     _seeded_tenants,
 ):
     # Both cases must produce the exact same outcome: get_visitor_by_secret
-    # has one loop over this tenant/site-key's candidates and one `return
-    # None` after it -- there is no separate branch for "no candidates
-    # existed at all" vs. "candidates existed but none verified", so a
-    # wrong-but-plausible secret and a secret that could never match are
-    # structurally unable to produce a different result here.
+    # runs one query (tenant_id, site_key_id and secret_hash equality all
+    # in the same WHERE clause) and one `if visitor is None: return None`
+    # branch -- there is no separate branch for "no row has this hash at
+    # all" vs. "a row exists but a different hash", so a wrong-but-plausible
+    # secret and a secret that could never match are structurally unable to
+    # produce a different result here.
     ids = _seeded_tenants
     async with db_session() as session:
         repo = TenantScopedRepository(tenant_id=ids["tenant_a"], session=session)
@@ -413,8 +414,9 @@ async def test_get_visitor_by_secret_no_matching_row_is_indistinguishable_from_w
 async def test_get_visitor_by_secret_rejects_another_tenants_visitor(_seeded_tenants):
     # Hostile-caller case: tenant B's secret is genuinely correct for tenant
     # B's own visitor/site key -- a repository scoped to A must still never
-    # return it, since the query itself filters on tenant_id == self.tenant_id
-    # before any secret is even checked.
+    # return it, since tenant_id == self.tenant_id is one of the three
+    # conditions in the single query's own WHERE clause, alongside
+    # site_key_id and the secret's hash.
     ids = _seeded_tenants
     async with db_session() as session:
         repo = TenantScopedRepository(tenant_id=ids["tenant_a"], session=session)
@@ -423,6 +425,25 @@ async def test_get_visitor_by_secret_rejects_another_tenants_visitor(_seeded_ten
         )
 
     assert result is None
+
+
+async def test_get_visitor_by_secret_empty_or_malformed_secret_returns_none(_seeded_tenants):
+    # C2 (duplication check after 1.4.c/d/e): proves this at the
+    # repository/integration layer against the real database -- distinct
+    # from verify_visitor_secret's own unit-level coverage of the same
+    # shapes in test_visitor_secrets.py. get_visitor_by_secret() computes
+    # hash_visitor_secret(secret) unconditionally before querying; neither
+    # shape below should ever raise, and neither matches any real row.
+    ids = _seeded_tenants
+    async with db_session() as session:
+        repo = TenantScopedRepository(tenant_id=ids["tenant_a"], session=session)
+        empty_result = await repo.get_visitor_by_secret("", site_key_id=ids["site_key_a"])
+        malformed_result = await repo.get_visitor_by_secret(
+            "not-a-real-secret!!", site_key_id=ids["site_key_a"]
+        )
+
+    assert empty_result is None
+    assert malformed_result is None
 
 
 async def _fetch_visitor_row(session, vid):

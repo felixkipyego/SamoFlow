@@ -16,8 +16,8 @@ from tests.conftest import (
     EXPECTED_PK_COLUMNS,
     EXPECTED_STATUS_CHECK_CONSTRAINTS,
     EXPECTED_TABLES,
+    EXPECTED_UNIQUE_INDEXES,
     NO_ACTION_FK_COLUMNS,
-    VISITOR_SECRET_UNIQUE_INDEX,
 )
 
 
@@ -95,10 +95,11 @@ def test_status_check_constraints_match_the_spec_vocabulary():
 
 
 def test_visitor_secret_hash_unique_index_is_scoped_to_site_key():
-    table = Base.metadata.tables["visitors"]
-    (index,) = [i for i in table.indexes if i.name == VISITOR_SECRET_UNIQUE_INDEX["name"]]
-    assert index.unique is True
-    assert [c.name for c in index.columns] == VISITOR_SECRET_UNIQUE_INDEX["columns"]
+    for table_name, (index_name, columns) in EXPECTED_UNIQUE_INDEXES.items():
+        table = Base.metadata.tables[table_name]
+        (index,) = [i for i in table.indexes if i.name == index_name]
+        assert index.unique is True
+        assert [c.name for c in index.columns] == columns
 
 
 def test_uuid_type_hint_matches_python_uuid():

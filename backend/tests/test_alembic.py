@@ -39,7 +39,7 @@ from tests.conftest import (
     EXPECTED_PK_COLUMNS,
     EXPECTED_STATUS_CHECK_CONSTRAINTS,
     EXPECTED_TABLES,
-    VISITOR_SECRET_UNIQUE_INDEX,
+    EXPECTED_UNIQUE_INDEXES,
     minimal_subprocess_env,
     require_test_database,
 )
@@ -345,12 +345,11 @@ def test_upgrade_head_is_idempotent_and_never_prints_the_password(_test_engine):
         for status_value in allowed_values:
             assert status_value in status_check["sqltext"]
 
-    visitor_indexes = inspector.get_indexes("visitors")
-    (secret_hash_index,) = [
-        i for i in visitor_indexes if i["name"] == VISITOR_SECRET_UNIQUE_INDEX["name"]
-    ]
-    assert secret_hash_index["unique"] is True
-    assert secret_hash_index["column_names"] == VISITOR_SECRET_UNIQUE_INDEX["columns"]
+    for table_name, (index_name, columns) in EXPECTED_UNIQUE_INDEXES.items():
+        indexes = inspector.get_indexes(table_name)
+        (index,) = [i for i in indexes if i["name"] == index_name]
+        assert index["unique"] is True
+        assert index["column_names"] == columns
 
     second = _run_alembic("upgrade", "head", engine=engine)
     assert second.returncode == 0, second.stdout + second.stderr
@@ -488,3 +487,29 @@ def test_visitor_secret_hash_uniqueness_is_scoped_to_one_site_key(_test_engine):
             )
         )
         connection.commit()
+
+
+def test_downgrade_from_head_removes_the_visitor_index_and_tenant_status_check(_test_engine):
+    # C1 (duplication check after 1.4.c/d/e): establishes the pattern -- no
+    # other migration in this project has an equivalent live downgrade test
+    # yet, and retrofitting the others is not in scope here. Proves
+    # dcd1f5b27bb7's downgrade() actually removes both objects from a real
+    # database, not just that upgrade() creates them (already proven by
+    # test_upgrade_head_is_idempotent_and_never_prints_the_password above).
+    engine = _test_engine
+    _reset_public_schema(engine)
+    migrated = _run_alembic("upgrade", "head", engine=engine)
+    assert migrated.returncode == 0, migrated.stdout + migrated.stderr
+
+    downgraded = _run_alembic("downgrade", "-1", engine=engine)
+    assert downgraded.returncode == 0, downgraded.stdout + downgraded.stderr
+
+    inspector = sa.inspect(engine)
+    visitor_index_names = {i["name"] for i in inspector.get_indexes("visitors")}
+    assert "ix_visitors_site_key_id_secret_hash" not in visitor_index_names
+
+    tenant_check_names = {c["name"] for c in inspector.get_check_constraints("tenants")}
+    assert "ck_tenants_status" not in tenant_check_names
+
+    restored = _run_alembic("upgrade", "head", engine=engine)
+    assert restored.returncode == 0, restored.stdout + restored.stderr
