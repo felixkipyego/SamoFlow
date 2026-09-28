@@ -19,6 +19,8 @@ _EXPECTED_TARGETS = {
     "test",
     "test-db",
     "test-db-down",
+    "test-qdrant",
+    "test-qdrant-down",
     "test-all",
     "lint",
     "evals",

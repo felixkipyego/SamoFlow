@@ -159,3 +159,31 @@ def test_compose_hardening():
     assert not violations, "deploy/docker-compose.yml hardening violations:\n" + "\n".join(
         violations
     )
+
+
+# Task 1.3.a2: qdrant's and test-qdrant's image tags are written as literals,
+# not a shared YAML anchor (the anchor pattern postgres/test-db use broke
+# Dependabot's docker-compose updater -- Task 1.1.o.g). This guard is the
+# only thing keeping the two literals in sync; unlike _check_compose above,
+# a mismatch here is a single hard fact, not an accumulated violations list.
+def _image_tag(lines: list[str], service: str) -> str:
+    service_index = _find_line(lines, lambda line, s=service: line == f"  {s}:")
+    assert service_index is not None, f"service {service!r} not found in compose file"
+    for entry in _block_after(lines, service_index):
+        stripped = entry.strip()
+        if stripped.startswith("image:"):
+            return stripped.removeprefix("image:").strip()
+    raise AssertionError(f"service {service!r} has no 'image:' line")
+
+
+def test_qdrant_and_test_qdrant_image_tags_match():
+    lines = read_lines(COMPOSE_PATH)
+    qdrant_tag = _image_tag(lines, "qdrant")
+    test_qdrant_tag = _image_tag(lines, "test-qdrant")
+    assert qdrant_tag == test_qdrant_tag, (
+        f"qdrant's image tag ({qdrant_tag!r}) does not match test-qdrant's "
+        f"({test_qdrant_tag!r}). These are written as literals, not a "
+        "shared YAML anchor (anchors broke Dependabot's docker-compose "
+        "updater, Task 1.1.o.g) -- this test is the only thing keeping "
+        "them in sync, so update both together."
+    )

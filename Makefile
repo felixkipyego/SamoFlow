@@ -18,7 +18,7 @@ UV_COMPILE = uv pip compile backend/pyproject.toml --universal --python-version 
 
 .DEFAULT_GOAL := help
 
-.PHONY: help env up down down-volumes migrate test test-db test-db-down test-all lint evals install lock lock-upgrade lock-check audit hooks
+.PHONY: help env up down down-volumes migrate test test-db test-db-down test-qdrant test-qdrant-down test-all lint evals install lock lock-upgrade lock-check audit hooks
 
 help:
 	@echo "make env          create .env from .env.example if it does not exist yet"
@@ -29,7 +29,9 @@ help:
 	@echo "make test         run the backend test suite (no database required)"
 	@echo "make test-db      start the disposable test database and wait until ready"
 	@echo "make test-db-down stop and remove the test database"
-	@echo "make test-all     run the full suite against test-db, always cleaning up"
+	@echo "make test-qdrant  start the disposable test Qdrant and wait until healthy"
+	@echo "make test-qdrant-down stop and remove the test Qdrant"
+	@echo "make test-all     run the full suite against test-db and test-qdrant, always cleaning up"
 	@echo "make lint         ruff check backend, evals and hooks.py"
 	@echo "make evals        run the eval placeholder"
 	@echo "make install      install hashed runtime+dev deps, then the backend package"
@@ -82,14 +84,36 @@ test-db-down:
 	$(COMPOSE) --profile test stop test-db
 	$(COMPOSE) --profile test rm -f -s -v test-db
 
+# Polls Docker's own healthcheck status (docker inspect), not a re-typed
+# copy of the bash/dev/tcp probe deploy/docker-compose.yml's healthcheck
+# already runs: qdrant has no lightweight in-container readiness command
+# the way postgres has pg_isready, so re-implementing the same HTTP probe
+# a second time here would only duplicate it, not simplify anything.
+test-qdrant: env
+	$(COMPOSE) --profile test up -d test-qdrant
+	@i=0; until [ "$$(docker inspect -f '{{.State.Health.Status}}' $$($(COMPOSE) --profile test ps -q test-qdrant))" = "healthy" ]; do \
+	  i=$$((i + 1)); \
+	  if [ $$i -ge 30 ]; then \
+	    echo "test-qdrant: qdrant did not become healthy within 30s" >&2; \
+	    exit 1; \
+	  fi; \
+	  sleep 1; \
+	done
+
+test-qdrant-down:
+	$(COMPOSE) --profile test stop test-qdrant
+	$(COMPOSE) --profile test rm -f -s -v test-qdrant
+
 # Cleanup always runs, and the tests' own exit code is preserved, even when
 # they fail: the pytest run is captured explicitly (subshell, so the "cd
-# backend" does not leak into the test-db-down call that follows) instead of
-# relying on make's own error handling for the cleanup step.
-test-all: test-db
-	@(cd backend && TEST_DATABASE_URL=postgresql+psycopg://widgetplatform:change-me@127.0.0.1:55432/widgetplatform_test python -m pytest tests -q); \
+# backend" does not leak into the test-db-down/test-qdrant-down calls that
+# follow) instead of relying on make's own error handling for cleanup.
+# TEST_QDRANT_API_KEY matches the literal key test-qdrant sets above.
+test-all: test-db test-qdrant
+	@(cd backend && TEST_DATABASE_URL=postgresql+psycopg://widgetplatform:change-me@127.0.0.1:55432/widgetplatform_test TEST_QDRANT_URL=http://127.0.0.1:56333 TEST_QDRANT_API_KEY=test-qdrant-key python -m pytest tests -q); \
 	rc=$$?; \
 	$(MAKE) test-db-down; \
+	$(MAKE) test-qdrant-down; \
 	exit $$rc
 
 lint:

@@ -88,6 +88,10 @@ _LOCAL_DOCKER_RUN_HINT = (
     "change-me@127.0.0.1:55432/widgetplatform_test"
 )
 
+_LOCAL_QDRANT_RUN_HINT = (
+    "TEST_QDRANT_URL is not set. Start the local test Qdrant with:\n  make test-qdrant"
+)
+
 # Shared wherever a test needs a password value that must never leak into
 # logs, repr/str output or exception messages.
 TEST_PASSWORD = "sup3r-secret-pw"  # noqa: S105 (test fixture value, not a real secret)
@@ -158,6 +162,46 @@ def require_test_database() -> str:
             "(comma-separated)."
         )
     return url
+
+
+def require_test_qdrant() -> tuple[str, str]:
+    # Same shape as require_test_database() above, for the same reason (the
+    # live authentication proof in test_qdrant_auth.py must never run
+    # against anything other than the disposable test-qdrant service):
+    #   - unset locally (CI != "true"): skip, with the make command to start
+    #     a local test Qdrant;
+    #   - unset in CI (CI == "true"): fail, since CI must run this test, not
+    #     silently skip it;
+    #   - URL set but TEST_QDRANT_API_KEY unset: fail, never skip -- a
+    #     half-configured environment is a real misconfiguration, not "no
+    #     Qdrant configured";
+    #   - set, but on a host that isn't localhost/127.0.0.1: fail, without
+    #     printing the key.
+    url = os.environ.get("TEST_QDRANT_URL")
+    if not url:
+        if os.environ.get("CI") == "true":
+            pytest.fail(
+                "TEST_QDRANT_URL is not set and CI=true: this test must "
+                "fail, not skip, when CI is expected to provide a test "
+                "Qdrant. Check the CI workflow's Qdrant service and env."
+            )
+        pytest.skip(_LOCAL_QDRANT_RUN_HINT)
+
+    key = os.environ.get("TEST_QDRANT_API_KEY")
+    if not key:
+        pytest.fail(
+            "TEST_QDRANT_URL is set but TEST_QDRANT_API_KEY is not: a "
+            "half-configured test Qdrant is a real misconfiguration, not "
+            '"no Qdrant configured".'
+        )
+
+    parts = urlsplit(url)
+    if (parts.hostname or "") not in _DEFAULT_ALLOWED_TEST_HOSTS:
+        pytest.fail(
+            f"TEST_QDRANT_URL's host {parts.hostname!r} is not allowed. "
+            "Only 'localhost' and '127.0.0.1' are allowed."
+        )
+    return url, key
 
 
 def fresh_import(module_name):
