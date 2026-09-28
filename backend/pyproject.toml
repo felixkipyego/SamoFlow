@@ -32,6 +32,10 @@ dependencies = [
     # review both together whenever either is bumped (see PROJECT_SPEC.md's
     # manual dependency/image maintenance routine).
     "qdrant-client==1.19.1",
+    # Task 1.4.b. HS256 only (docs/SPEC.md §4.3) needs no extra -- the
+    # `crypto` extra (pulling in `cryptography`) is only required for
+    # asymmetric algorithms (RS/ES*), not used here.
+    "pyjwt==2.15.1",
 ]
 
 [project.optional-dependencies]

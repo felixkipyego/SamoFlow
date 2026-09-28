@@ -1,10 +1,11 @@
 # backend/tests/test_config_guard.py
 # Guard test (Task 1.1.c refinement; Task 1.1.h extends it to backend/alembic;
 # Task 1.3.a1 extends it to qdrant_api_key_str(); Task 1.4.a extends it to
-# jwt_signing_key_str()/jwt_signing_key_previous_str()): parses every .py
-# file under backend/app and backend/alembic with ast (not text search, so
-# comments/strings never trigger it) and enforces four rules from
-# PROJECT_SPEC.md's decisions log:
+# jwt_signing_key_str()/jwt_signing_key_previous_str(), starting
+# ALLOWED_JWT_KEY_CALLERS empty; Task 1.4.b adds its first real entry,
+# app/auth/tokens.py): parses every .py file under backend/app and
+# backend/alembic with ast (not text search, so comments/strings never
+# trigger it) and enforces four rules from PROJECT_SPEC.md's decisions log:
 #   - only app/config.py may construct Settings() directly;
 #   - nothing calls a method named errors() (that leaks raw input, see
 #     config.py's model_config comment);
@@ -32,10 +33,8 @@ ALLOWED_DATABASE_URL_CALLERS: tuple[str, ...] = ("alembic/env.py", "app/db.py")
 ALLOWED_QDRANT_API_KEY_CALLERS: tuple[str, ...] = ("app/qdrant.py",)
 
 # NOTE: adding a file here is a deliberate decision: it means that file
-# receives the real JWT signing key(s). Starts empty (Task 1.4.a) --
-# app/auth/tokens.py (Task 1.4.b) will be the sole entry once it exists.
-# Review it by hand.
-ALLOWED_JWT_KEY_CALLERS: tuple[str, ...] = ()
+# receives the real JWT signing key(s). Review it by hand.
+ALLOWED_JWT_KEY_CALLERS: tuple[str, ...] = ("app/auth/tokens.py",)
 
 # Duplication check after 1.3.a1/a2/b: both secret accessors are checked by
 # the same single branch below instead of one copy-pasted elif per accessor
