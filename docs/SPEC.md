@@ -302,10 +302,25 @@ Every event carries an incrementing `id` and `v: 1`; the server supports the pre
 - Answers are rendered as sanitized markdown with raw HTML disabled; images are stripped; links open with `target="_blank" rel="noopener noreferrer nofollow"` and only to allowed destinations.
 - The token is held in memory only, and the visitor secret is stored per §4.3.
 - Includes the "previous chats" list, retry button, escalation panel with consent notice, and a privacy notice link.
-- **Accessibility (WCAG 2.1 AA):** the message list is `role="log"` with `aria-live="polite"`, announcing completed messages rather than every token; keyboard support, Esc to close, visible focus, `prefers-reduced-motion`, AA contrast.
+- **Accessibility (WCAG 2.2 AA):** the message list is `role="log"` with `aria-live="polite"`, announcing completed messages rather than every token; keyboard support, Esc to close, visible focus, `prefers-reduced-motion`, AA contrast.
 - Works on sites with a strict CSP (no inline scripts, no `eval`); English string table; full-screen sheet below 480px.
 
 **Customization (tenant, dashboard):** colors, logo, title, greeting, and left or right position. Logos are PNG, JPEG or WebP with a size cap, served from our domain; SVG is rejected. No custom CSS in v1.
+
+**Design direction (visitor experience):**
+- The widget is a guest on the tenant's site: calm, compact, fast; it does not compete with the host page until opened.
+- Tenant-editable values (primary color, logo, title, greeting, position) are exposed as CSS custom properties on the shadow host, with tokens named by role (surface, text, border), not by color. Fixed platform tokens: neutrals, semantic colors, radius, spacing, type scale, shadows, motion durations.
+- The platform computes the text color on the primary color (black or white), which always meets WCAG AA. The contrast risks are the primary color used as text or icons on the panel surface (4.5:1 for text, 3:1 for UI components), and the launcher against unknown host backgrounds (a fixed ring or shadow addresses this). The dashboard warns when the primary color is poor on the panel surface.
+- Light theme only in v1.
+- Layout: launcher in the chosen corner above host content, respecting safe-area insets. Desktop: a fixed-width panel with a maximum height relative to the viewport. Small screens: the full-screen sheet, with a clear close control. Motion is short and disabled under `prefers-reduced-motion`.
+- Dialog behavior: the desktop panel is non-modal (no focus trap; Esc closes; focus returns to the launcher). The mobile sheet is modal (focus trap; host page scroll locked while open).
+- Every reachable state is designed: launcher (an optional unread indicator, which implies the widget keeps receiving the stream while closed), greeting, sending/waiting, streaming (no layout jump), answer with citations, fallback (a helpful handoff, not an error look), escalation panel, connection lost (clear message and retry; no partial answer shown as final), rate limited (plain language, no internals), previous chats, test-mode badge, loading/unavailable (never a blank panel).
+- **Stop mid-stream:** the visitor can stop an answer while it is generating — distinct from a dropped connection. The server must actually cancel generation. A stopped message counts once toward quota. The partial answer is kept, marked as stopped, and stored as an interrupted turn.
+- **Quota exhausted:** the visitor sees the same fixed fallback message with the tenant's support details, with no mention of quota or plans, decided server-side before the model is called. The escalation form still works. An internal reason code is recorded for the dashboard usage view.
+- Additional accessibility requirements (WCAG 2.2 AA): streamed answers announced through a polite live region once complete (or in sentence-sized chunks); every control has an accessible name; citations are links with page titles; works at 200% zoom and in forced-colors mode.
+- Styling constraint (Step 5.1): one small stylesheet inside the shadow root, nothing leaks out or in, compatible with the widget's strict CSP (no inline handlers, no runtime-evaluated code). Bundler and styling approach are decided at Step 5.1 under rule 8. The npm supply-chain requirements (a committed lockfile installed with `npm ci`, an audit step in CI, a dependency-update config entry, SHA-pinned actions) are due at Step 5.1, once npm arrives with the bundler.
+- Copy: plain English, short sentences; error and fallback text says what the visitor can do next.
+- Acceptance additions: every state reviewed from screenshots at desktop and mobile widths; a keyboard-only pass; an automated accessibility check with no serious findings.
 
 ---
 
@@ -324,6 +339,23 @@ React SPA served statically.
 - **Platform admin (you):** manage tenants and plans, suspend a site, override the relevance threshold per tenant, revoke or force re-verification of a domain, disable or delete any tenant's source, see email delivery failures (a global list filterable by tenant, plus each tenant's failures on its admin page), view per-tenant cost, and the global AI switch.
 - **Temporary admin key:** during Phases 2 to 5 the admin endpoints (including domain revocation) are protected by a single secret from the environment. Step 6.1 removes it and replaces it with platform-admin accounts (a `platform_admin` role) that use the same login system as tenant users.
 - Admin endpoints live under `/api/v1/admin`, with tenant scope derived from membership, never from request parameters.
+
+**Design direction (dashboard experience):**
+- Audience: website owners and their teams, mostly non-technical. First job: get a tenant from sign-up to a live widget. Second: show what needs attention. Every screen shows status and the next useful action. Destructive actions confirm and say exactly what will be removed.
+- Tenant sidebar: Overview (go-live checklist), Widget (appearance, live preview, install snippet), Sources, Inbox, Usage, Team, Settings (site keys, allowed origins, contact methods, domain verification, retention, trace opt-out). The platform admin area is separate, visible only to platform admins, and visually distinct.
+- The go-live checklist displays real server-side state; the server-side draft-to-live check stays the authority.
+- The live preview renders the real widget bundle with unsaved configuration. Preview config is accepted only from the dashboard's own origin, `postMessage` origins are validated, and the preview never calls the chat endpoint.
+- Sources: a table with type, status, last and next refresh, and item counts against plan limits. Upload and database sources show the "answerable to any visitor" warning before confirmation.
+- Inbox: escalation fields only in v1 (the §7 storage fields), with an open-count shown in the sidebar. Showing the underlying conversation is a possible v2, via an explicit consent snapshot.
+- Usage: a meter of AI-answered messages against the quota, with distinct states at 80% and 100% matching the alert emails.
+- Settings: retention controls within the allowed ranges (§4.6, §7), with the effect explained before saving.
+- Visual system: design tokens as CSS custom properties, no hard-coded colors or spacing, light and dark themes from the first screen, self-hosted fonts, no requests to third-party hosts (runs under a strict CSP), tabular numerals for metrics.
+- Every data view has loading (skeleton), empty, error (no internals) and permission-denied states.
+- Database-sync credentials are write-only after save. Cross-tenant actions exist only in the platform admin area.
+- Recent-authentication (a fresh sign-in within about 10 to 15 minutes; not "re-enter password") is required only for: deleting the tenant, removing a team member or changing roles, replacing database-sync credentials, and changing site keys or allowed origins. Other destructive actions use a confirmation dialog only.
+- Accessibility: WCAG 2.2 AA, keyboard-operable, visible focus, labelled fields with inline validation.
+- Tooling: component approach and CSS approach are chosen at the Step 6.1 breakdown under rule 8, including a live test under the real strict CSP.
+- Acceptance additions: every screen reviewed from screenshots in light and dark themes; loading, empty and error states shown for every data view; a keyboard-only pass; an automated accessibility check with no serious findings.
 
 ---
 
