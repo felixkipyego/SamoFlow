@@ -5,7 +5,10 @@
 # import time (module import must succeed with an empty environment).
 # Task 1.3.a1 adds qdrant_api_key (required, never optional or defaulted --
 # an unauthenticated Qdrant client would silently work today and silently
-# stop working the moment auth is enabled on a real deployment).
+# stop working the moment auth is enabled on a real deployment). Task 1.4.a
+# adds jwt_signing_key (required) and jwt_signing_key_previous (optional,
+# for rotation via a future `kid` header -- PyJWT/the token module itself
+# arrive in 1.4.b, this task only adds the secret plumbing).
 #
 # ASSUMPTION: pydantic and pydantic-settings are not new dependencies here.
 # pydantic-settings==2.15.0 is already an approved runtime dependency
@@ -14,7 +17,7 @@ from functools import lru_cache
 from typing import Literal
 from urllib.parse import urlsplit
 
-from pydantic import Field, SecretStr, ValidationError, field_validator
+from pydantic import Field, SecretStr, ValidationError, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # SQLAlchemy 2.0 maps a plain "postgresql://" DSN to the psycopg2 driver,
@@ -23,6 +26,19 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 # Public (no leading underscore): Task 1.1.h's test database guard imports
 # this instead of duplicating the literal.
 POSTGRES_SCHEME = "postgresql+psycopg"
+
+
+def _require_no_whitespace_or_control_chars(raw: str, field_name: str) -> None:
+    # Shared by jwt_signing_key and jwt_signing_key_previous (Task 1.4.a):
+    # both are used later as UTF-8 bytes to sign/verify tokens, so stray
+    # whitespace or control characters (e.g. from a copy-paste error) must
+    # be caught at startup. Message names only the requirement, never the
+    # value under validation.
+    if any(ch.isspace() or not ch.isprintable() for ch in raw):
+        raise ValueError(
+            f"{field_name} must not contain whitespace or control characters "
+            "(it is used as UTF-8 bytes to sign tokens)."
+        )
 
 
 class Settings(BaseSettings):
@@ -39,6 +55,12 @@ class Settings(BaseSettings):
     database_url: SecretStr
     qdrant_url: str
     qdrant_api_key: SecretStr
+    # min_length uses pydantic's own built-in constraint (rule 11 -- a
+    # well-known mechanism, not a hand-rolled length check); it applies to
+    # jwt_signing_key_previous's SecretStr arm only, never to its None arm
+    # (confirmed by hand against the installed pydantic==2.13.5).
+    jwt_signing_key: SecretStr = Field(min_length=32)
+    jwt_signing_key_previous: SecretStr | None = Field(default=None, min_length=32)
     api_host: str = Field(min_length=1)
     api_port: int = Field(ge=1, le=65535)
 
@@ -82,6 +104,49 @@ class Settings(BaseSettings):
             )
         return value
 
+    @field_validator("jwt_signing_key")
+    @classmethod
+    def _require_a_clean_signing_key(cls, value: SecretStr) -> SecretStr:
+        _require_no_whitespace_or_control_chars(value.get_secret_value(), "JWT_SIGNING_KEY")
+        return value
+
+    @field_validator("jwt_signing_key_previous", mode="before")
+    @classmethod
+    def _empty_previous_signing_key_means_none(cls, value: object) -> object:
+        # An empty string (the common ".env.example placeholder when not
+        # rotating" shape) means "no previous key" -- converted to None
+        # here, before Field(min_length=32)'s own check would otherwise
+        # reject "" as too short. Runs before type coercion, so `value` is
+        # whatever pydantic-settings read from the environment (always a
+        # str) -- anything else is passed through untouched and left to the
+        # field's own type validation to reject.
+        if value == "":
+            return None
+        return value
+
+    @field_validator("jwt_signing_key_previous")
+    @classmethod
+    def _require_a_clean_previous_signing_key(
+        cls, value: SecretStr | None
+    ) -> SecretStr | None:
+        if value is not None:
+            _require_no_whitespace_or_control_chars(
+                value.get_secret_value(), "JWT_SIGNING_KEY_PREVIOUS"
+            )
+        return value
+
+    @model_validator(mode="after")
+    def _require_previous_signing_key_differs_from_current(self) -> "Settings":
+        # Message names only the requirement, never either value, so a
+        # match cannot leak which value the operator typed twice.
+        if (
+            self.jwt_signing_key_previous is not None
+            and self.jwt_signing_key_previous.get_secret_value()
+            == self.jwt_signing_key.get_secret_value()
+        ):
+            raise ValueError("JWT_SIGNING_KEY_PREVIOUS must differ from JWT_SIGNING_KEY.")
+        return self
+
     def database_url_str(self) -> str:
         # The one explicit call that unwraps the secret. Never log this.
         return self.database_url.get_secret_value()
@@ -89,6 +154,16 @@ class Settings(BaseSettings):
     def qdrant_api_key_str(self) -> str:
         # The one explicit call that unwraps the secret. Never log this.
         return self.qdrant_api_key.get_secret_value()
+
+    def jwt_signing_key_str(self) -> str:
+        # The one explicit call that unwraps the secret. Never log this.
+        return self.jwt_signing_key.get_secret_value()
+
+    def jwt_signing_key_previous_str(self) -> str | None:
+        # The one explicit call that unwraps the secret. Never log this.
+        if self.jwt_signing_key_previous is None:
+            return None
+        return self.jwt_signing_key_previous.get_secret_value()
 
 
 class SettingsError(Exception):

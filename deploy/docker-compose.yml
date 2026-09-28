@@ -21,6 +21,11 @@ x-app-env: &app-env
   DATABASE_URL: ${DATABASE_URL:?DATABASE_URL must be set in .env}
   QDRANT_URL: ${QDRANT_URL:?QDRANT_URL must be set in .env}
   QDRANT_API_KEY: ${QDRANT_API_KEY:?QDRANT_API_KEY must be set in .env}
+  # Required (Task 1.4.a): signs and verifies widget session tokens.
+  JWT_SIGNING_KEY: ${JWT_SIGNING_KEY:?JWT_SIGNING_KEY must be set in .env}
+  # Optional: ":-" (not ":?") -- empty is a valid "not rotating" value,
+  # matching Settings' own empty-string-means-None rule.
+  JWT_SIGNING_KEY_PREVIOUS: ${JWT_SIGNING_KEY_PREVIOUS:-}
   API_HOST: ${API_HOST:?API_HOST must be set in .env}
   API_PORT: ${API_PORT:?API_PORT must be set in .env}
 

@@ -11,7 +11,7 @@ import pytest
 
 from app.config import SettingsError
 from app.worker import run
-from tests.conftest import REQUIRED_VARS, TEST_PASSWORD, VALID_ENV, set_valid_env
+from tests.conftest import ALL_SETTINGS_VARS, TEST_PASSWORD, VALID_ENV, set_valid_env
 
 BACKEND_DIR = Path(__file__).resolve().parent.parent
 
@@ -45,7 +45,10 @@ async def test_run_with_no_environment_raises_settings_error():
 
 
 def _worker_subprocess_env(**overrides):
-    env = {k: v for k, v in os.environ.items() if k not in REQUIRED_VARS}
+    # Strips every Settings-related var (required or optional -- Task
+    # 1.4.a) from the caller's own ambient environment, so a truly "empty
+    # w.r.t. Settings" subprocess env can be built from **overrides alone.
+    env = {k: v for k, v in os.environ.items() if k not in ALL_SETTINGS_VARS}
     env.update(overrides)
     return env
 

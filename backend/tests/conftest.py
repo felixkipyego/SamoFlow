@@ -52,7 +52,23 @@ from app.config import POSTGRES_SCHEME, Settings, get_settings
 REPO_ROOT = Path(__file__).resolve().parents[2]
 BACKEND_DIR = Path(__file__).resolve().parent.parent
 
-REQUIRED_VARS = [name.upper() for name in Settings.model_fields]
+# Task 1.4.a: jwt_signing_key_previous is the first Settings field with a
+# default (optional), so REQUIRED_VARS must now actually filter rather than
+# list every field -- field.is_required() is pydantic's own built-in
+# "has no default" check (rule 11), confirmed against the installed
+# pydantic==2.13.5. REQUIRED_VARS feeds "missing this var must raise" tests
+# and the .env.example required-set check, both of which must NOT treat an
+# optional field as required. ALL_SETTINGS_VARS is the superset (required +
+# optional) for anywhere the actual intent is "no Settings-related env var
+# at all" -- the autouse isolation fixture below, and test_worker.py's own
+# subprocess-env builder.
+REQUIRED_VARS = [
+    name.upper() for name, field in Settings.model_fields.items() if field.is_required()
+]
+OPTIONAL_VARS = [
+    name.upper() for name, field in Settings.model_fields.items() if not field.is_required()
+]
+ALL_SETTINGS_VARS = REQUIRED_VARS + OPTIONAL_VARS
 
 
 def is_comment_or_blank(line: str) -> bool:
@@ -112,6 +128,7 @@ VALID_ENV = {
     "DATABASE_URL": "postgresql+psycopg://user:pw@localhost:5432/widgetplatform",
     "QDRANT_URL": "http://localhost:6333",
     "QDRANT_API_KEY": "test-qdrant-key",  # noqa: S105 (test fixture value, not a real secret)
+    "JWT_SIGNING_KEY": "test-jwt-signing-key-at-least-32-chars",  # noqa: S105
     "API_HOST": "127.0.0.1",
     "API_PORT": "8000",
 }
@@ -140,9 +157,11 @@ TEST_PASSWORD = "sup3r-secret-pw"  # noqa: S105 (test fixture value, not a real 
 
 @pytest.fixture(autouse=True)
 def _isolated_env(monkeypatch):
-    # Every test starts with none of the required variables present, and
+    # Every test starts with none of the Settings-related variables present
+    # (required or optional -- Task 1.4.a: a value one test sets for the
+    # optional JWT_SIGNING_KEY_PREVIOUS must never leak into the next), and
     # with no cached Settings instance left over from another test.
-    for name in REQUIRED_VARS:
+    for name in ALL_SETTINGS_VARS:
         monkeypatch.delenv(name, raising=False)
     get_settings.cache_clear()
     yield

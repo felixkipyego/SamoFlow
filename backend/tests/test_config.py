@@ -4,7 +4,14 @@ import pytest
 from pydantic import ValidationError
 
 from app.config import Settings, SettingsError, get_settings
-from tests.conftest import REQUIRED_VARS, TEST_PASSWORD, VALID_ENV, fresh_import, set_valid_env
+from tests.conftest import (
+    ALL_SETTINGS_VARS,
+    REQUIRED_VARS,
+    TEST_PASSWORD,
+    VALID_ENV,
+    fresh_import,
+    set_valid_env,
+)
 
 
 def test_valid_environment_loads_with_correct_types_and_values(monkeypatch):
@@ -14,6 +21,8 @@ def test_valid_environment_loads_with_correct_types_and_values(monkeypatch):
     assert settings.database_url_str() == VALID_ENV["DATABASE_URL"]
     assert settings.qdrant_url == "http://localhost:6333"
     assert settings.qdrant_api_key_str() == VALID_ENV["QDRANT_API_KEY"]
+    assert settings.jwt_signing_key_str() == VALID_ENV["JWT_SIGNING_KEY"]
+    assert settings.jwt_signing_key_previous_str() is None
     assert settings.api_host == "127.0.0.1"
     assert settings.api_port == 8000
     assert isinstance(settings.api_port, int)
@@ -41,6 +50,14 @@ def test_missing_required_variable_raises_and_names_field(monkeypatch, missing):
         {"QDRANT_API_KEY": "has a space"},
         {"QDRANT_API_KEY": "has\ttab"},
         {"QDRANT_API_KEY": "has\nnewline"},
+        {"JWT_SIGNING_KEY": ""},
+        {"JWT_SIGNING_KEY": "short"},
+        {"JWT_SIGNING_KEY": "a" * 31},  # one character short of the minimum
+        {"JWT_SIGNING_KEY": "a" * 20 + " " + "a" * 20},
+        {"JWT_SIGNING_KEY": "a" * 20 + "\t" + "a" * 20},
+        {"JWT_SIGNING_KEY": "a" * 20 + "\n" + "a" * 20},
+        {"JWT_SIGNING_KEY_PREVIOUS": "a" * 31},
+        {"JWT_SIGNING_KEY_PREVIOUS": "b" * 20 + " " + "b" * 20},
         {"API_PORT": "abc"},
         {"API_PORT": "0"},
         {"API_PORT": "70000"},
@@ -96,7 +113,7 @@ def test_settings_instance_is_frozen(monkeypatch):
 
 
 def test_module_imports_cleanly_with_empty_environment(monkeypatch):
-    for name in REQUIRED_VARS:
+    for name in ALL_SETTINGS_VARS:
         monkeypatch.delenv(name, raising=False)
     fresh_import("app.config")  # must not raise despite empty env
 
@@ -159,6 +176,83 @@ def test_settings_error_chain_never_carries_the_qdrant_api_key(monkeypatch):
         assert "distinctive-key" not in str(link.args)
     assert err.__cause__ is None
     assert err.__context__ is None
+
+
+@pytest.mark.parametrize(
+    ("value", "distinctive_substring"),
+    [
+        ("distinctive-jwt 123", "distinctive-jwt"),
+        ("distinctive-short", "distinctive-short"),
+    ],
+)
+def test_get_settings_raises_settings_error_on_malformed_jwt_signing_key(
+    monkeypatch, value, distinctive_substring
+):
+    set_valid_env(monkeypatch, VALID_ENV, JWT_SIGNING_KEY=value)
+    with pytest.raises(SettingsError):
+        get_settings()
+
+
+@pytest.mark.parametrize(
+    ("value", "distinctive_substring"),
+    [
+        ("distinctive-jwt 123", "distinctive-jwt"),
+        ("distinctive-short", "distinctive-short"),
+    ],
+)
+def test_settings_error_chain_never_carries_the_jwt_signing_key(
+    monkeypatch, value, distinctive_substring
+):
+    set_valid_env(monkeypatch, VALID_ENV, JWT_SIGNING_KEY=value)
+    with pytest.raises(SettingsError) as exc_info:
+        get_settings()
+    err = exc_info.value
+    for link in _exception_chain(err):
+        assert distinctive_substring not in str(link)
+        assert distinctive_substring not in repr(link)
+        assert distinctive_substring not in str(link.args)
+    assert err.__cause__ is None
+    assert err.__context__ is None
+
+
+def test_jwt_signing_key_previous_unset_defaults_to_none(monkeypatch):
+    set_valid_env(monkeypatch, VALID_ENV)
+    monkeypatch.delenv("JWT_SIGNING_KEY_PREVIOUS", raising=False)
+    settings = Settings()
+    assert settings.jwt_signing_key_previous is None
+    assert settings.jwt_signing_key_previous_str() is None
+
+
+def test_jwt_signing_key_previous_empty_string_becomes_none(monkeypatch):
+    set_valid_env(monkeypatch, VALID_ENV, JWT_SIGNING_KEY_PREVIOUS="")
+    settings = Settings()
+    assert settings.jwt_signing_key_previous is None
+    assert settings.jwt_signing_key_previous_str() is None
+
+
+def test_jwt_signing_key_previous_valid_value_is_accepted(monkeypatch):
+    previous = "previous-jwt-signing-key-32-chars-ok"
+    set_valid_env(monkeypatch, VALID_ENV, JWT_SIGNING_KEY_PREVIOUS=previous)
+    settings = Settings()
+    assert settings.jwt_signing_key_previous_str() == previous
+
+
+def test_jwt_signing_key_previous_identical_to_current_is_rejected(monkeypatch):
+    current = VALID_ENV["JWT_SIGNING_KEY"]
+    set_valid_env(monkeypatch, VALID_ENV, JWT_SIGNING_KEY_PREVIOUS=current)
+    with pytest.raises(ValidationError) as exc_info:
+        Settings()
+    assert current not in str(exc_info.value)
+
+
+def test_repr_and_str_never_leak_jwt_signing_keys(monkeypatch):
+    previous = "previous-jwt-signing-key-32-chars-ok"
+    set_valid_env(monkeypatch, VALID_ENV, JWT_SIGNING_KEY_PREVIOUS=previous)
+    settings = Settings()
+    assert VALID_ENV["JWT_SIGNING_KEY"] not in repr(settings)
+    assert VALID_ENV["JWT_SIGNING_KEY"] not in str(settings)
+    assert previous not in repr(settings)
+    assert previous not in str(settings)
 
 
 def test_settings_error_message_still_names_the_field(monkeypatch):

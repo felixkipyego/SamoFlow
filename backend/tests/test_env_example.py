@@ -11,7 +11,15 @@ from tests.conftest import REQUIRED_VARS
 # NOTE: adding a key here is a deliberate decision; add it in the task that needs it
 # Task 1.1.i: docker-compose.yml's postgres service takes these three
 # directly (not via Settings), so .env.example must declare them too.
-EXTRA_EXAMPLE_KEYS: tuple[str, ...] = ("POSTGRES_USER", "POSTGRES_PASSWORD", "POSTGRES_DB")
+# Task 1.4.a: JWT_SIGNING_KEY_PREVIOUS is an optional Settings field (has a
+# default, so REQUIRED_VARS excludes it), but .env.example still declares it
+# (empty) so an operator seeing the file knows the variable exists.
+EXTRA_EXAMPLE_KEYS: tuple[str, ...] = (
+    "POSTGRES_USER",
+    "POSTGRES_PASSWORD",
+    "POSTGRES_DB",
+    "JWT_SIGNING_KEY_PREVIOUS",
+)
 
 HEADER_WARNING = "# Copy to .env and edit. Never commit .env."
 
@@ -136,6 +144,18 @@ def test_database_url_password_placeholder_is_exactly_change_me():
     values = _parse_env_example()
     password = urlsplit(values["DATABASE_URL"]).password
     assert password == "change-me"  # noqa: S105 (asserting the placeholder value, not a real secret)
+
+
+def test_jwt_signing_key_placeholder_is_at_least_32_characters_and_starts_with_change_me():
+    values = _parse_env_example()
+    placeholder = values["JWT_SIGNING_KEY"]
+    assert len(placeholder) >= 32
+    assert placeholder.startswith("change-me")
+
+
+def test_jwt_signing_key_previous_placeholder_is_empty():
+    values = _parse_env_example()
+    assert values["JWT_SIGNING_KEY_PREVIOUS"] == ""
 
 
 def test_first_non_blank_line_is_the_header_warning():

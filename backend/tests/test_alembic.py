@@ -50,6 +50,7 @@ _HARMLESS_ENV = {
     "APP_ENV": "test",
     "QDRANT_URL": "http://203.0.113.1:6333",
     "QDRANT_API_KEY": "harmless-test-key",  # noqa: S105 (test fixture value, not a real secret)
+    "JWT_SIGNING_KEY": "harmless-jwt-signing-key-32-chars-ok",  # noqa: S105
     "API_HOST": "127.0.0.1",
     "API_PORT": "8000",
 }
@@ -216,7 +217,7 @@ def test_alembic_subprocess_env_excludes_stray_libpq_variables(monkeypatch):
     assert "PGUSER" not in env
 
 
-def test_alembic_subprocess_env_has_exactly_the_six_settings_variables_plus_path_and_home(
+def test_alembic_subprocess_env_has_exactly_the_seven_settings_variables_plus_path_and_home(
     monkeypatch,
 ):
     monkeypatch.setenv("SOME_OTHER_STRAY_VAR", "should-not-be-inherited")
@@ -228,6 +229,7 @@ def test_alembic_subprocess_env_has_exactly_the_six_settings_variables_plus_path
         "DATABASE_URL",
         "QDRANT_URL",
         "QDRANT_API_KEY",
+        "JWT_SIGNING_KEY",
         "API_HOST",
         "API_PORT",
     }
