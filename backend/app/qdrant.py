@@ -29,6 +29,7 @@
 # construction via warnings.catch_warnings(), never a global filter) rather
 # than left to print on every client construction.
 import re
+import uuid
 import warnings
 from collections.abc import Mapping
 from functools import lru_cache
@@ -38,7 +39,10 @@ from qdrant_client.http.exceptions import UnexpectedResponse
 from qdrant_client.http.models import (
     CollectionInfo,
     Distance,
+    FieldCondition,
+    Filter,
     KeywordIndexParams,
+    MatchValue,
     Modifier,
     PayloadSchemaType,
     SparseVectorParams,
@@ -271,3 +275,29 @@ async def ensure_collection(client: AsyncQdrantClient, name: str = COLLECTION_NA
         await _create_client_id_index(client, name)
     if source_id_missing:
         await _create_source_id_index(client, name)
+
+
+# --- Task 1.3.d: isolation proof at the filter/index level ------------------
+def tenant_filter(client_id: uuid.UUID) -> Filter:
+    """The single-condition Filter every Qdrant sub-query must be scoped
+    with -- one and only one `must` condition, matching CLIENT_ID_FIELD
+    against `client_id` exactly. Never adds a `should` or `must_not`, since
+    either could widen what matches; an empty Filter() would match every
+    point (a cross-tenant leak), so this function structurally cannot
+    produce one.
+
+    Accepts only a real uuid.UUID -- never a bare str, even one that looks
+    like a UUID -- so the matched value is always uuid.UUID's own canonical
+    lowercase str() form. This is deliberately less permissive than
+    "anything coercible to a UUID": tenant identity must already be a
+    uuid.UUID by the time it reaches Qdrant (it comes from the verified
+    token/database, per the engineering rules), so accepting loosely-typed
+    input here would only hide a bug upstream. See the open marker owned by
+    Step 2.5: the payload's own client_id value must be written in this same
+    canonical str(uuid.UUID) form for the match to ever succeed.
+    """
+    if not isinstance(client_id, uuid.UUID):
+        raise TypeError(f"client_id must be a uuid.UUID instance, got {type(client_id).__name__}")
+    return Filter(
+        must=[FieldCondition(key=CLIENT_ID_FIELD, match=MatchValue(value=str(client_id)))]
+    )
