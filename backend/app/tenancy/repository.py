@@ -46,10 +46,12 @@
 import uuid
 from dataclasses import dataclass
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import InstrumentedAttribute
+from sqlalchemy.sql import func
 
+from app.auth.secrets import verify_visitor_secret
 from app.tenancy.models import Conversation, SiteKey, Tenant, Visitor
 
 
@@ -58,6 +60,20 @@ async def create_tenant(session: AsyncSession, name: str, status: str) -> Tenant
     session.add(tenant)
     await session.flush()
     return tenant
+
+
+async def get_site_key_by_key(session: AsyncSession, key: str) -> SiteKey | None:
+    # Task 1.4.e: module-level, deliberately never a TenantScopedRepository
+    # method -- same structural reasoning as create_tenant() above. A site
+    # key is looked up by its own secret token *before* any tenant is known
+    # (docs/SPEC.md §4.2: the widget sends {site_key, visitor_secret} at the
+    # very start of the session flow); a repository requires a real
+    # tenant_id to construct, which doesn't exist yet at this point. One
+    # SELECT, no side effects: the caller (1.4.g) decides what a missing or
+    # suspended key means, this function only reports which row (if any)
+    # the key names.
+    result = await session.execute(select(SiteKey).where(SiteKey.key == key))
+    return result.scalar_one_or_none()
 
 
 @dataclass(frozen=True)
@@ -162,3 +178,65 @@ class TenantScopedRepository:
         self.session.add(conversation)
         await self.session.flush()
         return conversation
+
+    async def get_visitor_by_secret(self, secret: str, site_key_id: uuid.UUID) -> Visitor | None:
+        # Task 1.4.e. Scoped to BOTH self.tenant_id AND the given
+        # site_key_id (decided at the Step 1.4 breakdown, PROJECT_SPEC.md's
+        # own 1.4.e task-list row: "scoped both to the repository's own
+        # tenant_id and to the given site_key_id") -- matching 1.4.d's
+        # index, which is scoped per site key for the same reason: a
+        # visitor secret is only ever meaningful within the one site key
+        # that issued it (docs/SPEC.md §4.2's localStorage key is
+        # "aw:{site_key}"), never across a tenant's other, unrelated sites.
+        #
+        # Candidates are read scoped, then each is checked in Python with
+        # verify_visitor_secret() (1.4.c's constant-time comparison) --
+        # never a SQL "secret_hash = <computed hash>" equality filter, which
+        # would bypass 1.4.c's comparison entirely and let the query
+        # itself, not this function, decide what "matches" means. A wrong
+        # secret for a real row and a secret matching no row at all both
+        # fall out of the same empty-match path below and return None --
+        # nothing here distinguishes them, no exception, no log line
+        # containing the attempted secret.
+        result = await self.session.execute(
+            select(Visitor).where(
+                Visitor.tenant_id == self.tenant_id,
+                Visitor.site_key_id == site_key_id,
+            )
+        )
+        for candidate in result.scalars().all():
+            if verify_visitor_secret(secret, candidate.secret_hash):
+                # "on match" (the same task-list row): bundled here, not a
+                # separate step the caller must remember to invoke -- every
+                # successful verification is a real visit (docs/SPEC.md
+                # §4.2's "Return visit: verify the secret ... " has no case
+                # where verifying but not recording the visit is correct),
+                # and there is exactly one call site planned (1.4.g), so
+                # nothing is lost by not exposing this as two steps.
+                await self.touch_visitor_last_seen(candidate.vid)
+                return candidate
+        return None
+
+    async def touch_visitor_last_seen(self, vid: uuid.UUID) -> None:
+        # Task 1.4.e. Unlike create_visitor/create_conversation's
+        # _verify_owned()-then-raise pattern (guarding a new row's FK
+        # reference to a caller-supplied foreign id), this is a bounded
+        # UPDATE that scopes itself by tenant_id in its own WHERE clause --
+        # the same "automatic filter" shape get_visitor_by_id/
+        # get_conversation_by_id already use for reads, applied to a write.
+        # A vid that doesn't belong to self.tenant_id (or doesn't exist)
+        # matches zero rows and this is a silent no-op, not an error: the
+        # one call site (get_visitor_by_secret above) only ever passes a
+        # vid it just read from a row already scoped to this same
+        # tenant_id, so there is no real "caller made a mistake" case here
+        # to raise about -- and a housekeeping/heartbeat-style update
+        # quietly doing nothing on an out-of-scope id matches every other
+        # read method's own behavior on this class, rather than
+        # introducing a third response shape (reads return None, creates
+        # raise ValueError) for what is not a new-row FK integrity check.
+        await self.session.execute(
+            update(Visitor)
+            .where(Visitor.vid == vid, Visitor.tenant_id == self.tenant_id)
+            .values(last_seen_at=func.now())
+        )
+        await self.session.flush()

@@ -27,10 +27,11 @@ import pytest
 import sqlalchemy as sa
 
 from app import db
+from app.auth.secrets import generate_visitor_secret, hash_visitor_secret
 from app.db import Base
 from app.plans import models as plans_models  # noqa: F401 (registers "plans" on Base.metadata)
 from app.tenancy.models import Conversation, SiteKey, Tenant, Visitor
-from app.tenancy.repository import TenantScopedRepository, create_tenant
+from app.tenancy.repository import TenantScopedRepository, create_tenant, get_site_key_by_key
 from tests.conftest import VALID_ENV, db_session, require_test_database, set_valid_env
 
 
@@ -79,6 +80,14 @@ async def _seeded_tenants(monkeypatch):
     Base.metadata.create_all(sync_engine)
     sync_engine.dispose()
 
+    # Real secrets/hashes (Task 1.4.e), not the earlier "hash-a"/"hash-b"
+    # placeholders: get_visitor_by_secret's own tests need a real secret
+    # that actually verifies against its stored hash via
+    # verify_visitor_secret() (1.4.c), which an arbitrary literal string
+    # cannot provide.
+    visitor_a_secret = generate_visitor_secret()
+    visitor_b_secret = generate_visitor_secret()
+
     ids = {
         "tenant_a": uuid.uuid4(),
         "tenant_b": uuid.uuid4(),
@@ -88,6 +97,8 @@ async def _seeded_tenants(monkeypatch):
         "visitor_b": uuid.uuid4(),
         "conversation_a": uuid.uuid4(),
         "conversation_b": uuid.uuid4(),
+        "visitor_a_secret": visitor_a_secret,
+        "visitor_b_secret": visitor_b_secret,
     }
 
     async with db_session() as session:
@@ -122,13 +133,13 @@ async def _seeded_tenants(monkeypatch):
                     vid=ids["visitor_a"],
                     tenant_id=ids["tenant_a"],
                     site_key_id=ids["site_key_a"],
-                    secret_hash="hash-a",  # noqa: S106 (test fixture value, not a real secret)
+                    secret_hash=hash_visitor_secret(visitor_a_secret),
                 ),
                 Visitor(
                     vid=ids["visitor_b"],
                     tenant_id=ids["tenant_b"],
                     site_key_id=ids["site_key_b"],
-                    secret_hash="hash-b",  # noqa: S106 (test fixture value, not a real secret)
+                    secret_hash=hash_visitor_secret(visitor_b_secret),
                 ),
             ]
         )
@@ -326,3 +337,143 @@ async def test_create_conversation_rejects_a_nonexistent_vid(_seeded_tenants):
         repo = TenantScopedRepository(tenant_id=ids["tenant_a"], session=session)
         with pytest.raises(ValueError, match="does not belong to tenant"):
             await repo.create_conversation(vid=uuid.uuid4())
+
+
+async def test_get_site_key_by_key_returns_the_right_row_for_either_tenant(_seeded_tenants):
+    # Unscoped by design (no tenant_id is known yet at this point in the
+    # session flow) -- proven with two site keys belonging to two DIFFERENT
+    # tenants, so this isn't accidentally tenant-filtered.
+    ids = _seeded_tenants
+    async with db_session() as session:
+        result_a = await get_site_key_by_key(session, "pk_live_tenant_a")
+        result_b = await get_site_key_by_key(session, "pk_live_tenant_b")
+
+    assert result_a is not None
+    assert result_a.id == ids["site_key_a"]
+    assert result_a.tenant_id == ids["tenant_a"]
+    assert result_b is not None
+    assert result_b.id == ids["site_key_b"]
+    assert result_b.tenant_id == ids["tenant_b"]
+
+
+async def test_get_site_key_by_key_returns_none_for_an_unknown_key(_seeded_tenants):
+    async with db_session() as session:
+        result = await get_site_key_by_key(session, "pk_live_does_not_exist")
+
+    assert result is None
+
+
+async def test_get_visitor_by_secret_returns_the_correct_visitor(_seeded_tenants):
+    ids = _seeded_tenants
+    async with db_session() as session:
+        repo = TenantScopedRepository(tenant_id=ids["tenant_a"], session=session)
+        result = await repo.get_visitor_by_secret(
+            ids["visitor_a_secret"], site_key_id=ids["site_key_a"]
+        )
+
+    assert result is not None
+    assert result.vid == ids["visitor_a"]
+
+
+async def test_get_visitor_by_secret_wrong_secret_for_a_real_visitor_returns_none(_seeded_tenants):
+    ids = _seeded_tenants
+    wrong_secret = generate_visitor_secret()
+    assert wrong_secret != ids["visitor_a_secret"]
+    async with db_session() as session:
+        repo = TenantScopedRepository(tenant_id=ids["tenant_a"], session=session)
+        result = await repo.get_visitor_by_secret(wrong_secret, site_key_id=ids["site_key_a"])
+
+    assert result is None
+
+
+async def test_get_visitor_by_secret_no_matching_row_is_indistinguishable_from_wrong_secret(
+    _seeded_tenants,
+):
+    # Both cases must produce the exact same outcome: get_visitor_by_secret
+    # has one loop over this tenant/site-key's candidates and one `return
+    # None` after it -- there is no separate branch for "no candidates
+    # existed at all" vs. "candidates existed but none verified", so a
+    # wrong-but-plausible secret and a secret that could never match are
+    # structurally unable to produce a different result here.
+    ids = _seeded_tenants
+    async with db_session() as session:
+        repo = TenantScopedRepository(tenant_id=ids["tenant_a"], session=session)
+        wrong_secret_result = await repo.get_visitor_by_secret(
+            generate_visitor_secret(), site_key_id=ids["site_key_a"]
+        )
+        no_match_result = await repo.get_visitor_by_secret(
+            generate_visitor_secret(), site_key_id=ids["site_key_a"]
+        )
+
+    assert wrong_secret_result is None
+    assert no_match_result is None
+    assert type(wrong_secret_result) is type(no_match_result)
+
+
+async def test_get_visitor_by_secret_rejects_another_tenants_visitor(_seeded_tenants):
+    # Hostile-caller case: tenant B's secret is genuinely correct for tenant
+    # B's own visitor/site key -- a repository scoped to A must still never
+    # return it, since the query itself filters on tenant_id == self.tenant_id
+    # before any secret is even checked.
+    ids = _seeded_tenants
+    async with db_session() as session:
+        repo = TenantScopedRepository(tenant_id=ids["tenant_a"], session=session)
+        result = await repo.get_visitor_by_secret(
+            ids["visitor_b_secret"], site_key_id=ids["site_key_b"]
+        )
+
+    assert result is None
+
+
+async def _fetch_visitor_row(session, vid):
+    # Raw SQL, not an ORM select(Visitor): reads straight from the database
+    # rather than through the session's identity map, so a value read here
+    # can never be a stale in-memory ORM attribute mistaken for a live
+    # database value (the touch_visitor_last_seen tests below need a
+    # genuine before/after comparison against Postgres itself).
+    result = await session.execute(
+        sa.text(
+            "SELECT tenant_id, site_key_id, secret_hash, first_seen_at, last_seen_at, "
+            "external_user_id FROM visitors WHERE vid = :vid"
+        ),
+        {"vid": vid},
+    )
+    return result.mappings().one()
+
+
+async def test_touch_visitor_last_seen_advances_last_seen_at_and_nothing_else(_seeded_tenants):
+    ids = _seeded_tenants
+    async with db_session() as session:
+        before = await _fetch_visitor_row(session, ids["visitor_a"])
+
+    async with db_session() as session:
+        repo = TenantScopedRepository(tenant_id=ids["tenant_a"], session=session)
+        await repo.touch_visitor_last_seen(ids["visitor_a"])
+        await session.commit()
+
+    async with db_session() as session:
+        after = await _fetch_visitor_row(session, ids["visitor_a"])
+
+    assert after["last_seen_at"] > before["last_seen_at"]
+    for column in ("tenant_id", "site_key_id", "secret_hash", "first_seen_at", "external_user_id"):
+        assert after[column] == before[column], f"{column} should not have changed"
+
+
+async def test_touch_visitor_last_seen_does_nothing_for_another_tenants_vid(_seeded_tenants):
+    # Hostile-caller case: tenant B's vid is real, but a repository scoped
+    # to A must not be able to touch B's row -- proved against the real
+    # database (every column, not just last_seen_at, byte-for-byte
+    # unchanged), mirroring 1.2.e's own cross-tenant proof pattern.
+    ids = _seeded_tenants
+    async with db_session() as session:
+        before = await _fetch_visitor_row(session, ids["visitor_b"])
+
+    async with db_session() as session:
+        repo = TenantScopedRepository(tenant_id=ids["tenant_a"], session=session)
+        await repo.touch_visitor_last_seen(ids["visitor_b"])
+        await session.commit()
+
+    async with db_session() as session:
+        after = await _fetch_visitor_row(session, ids["visitor_b"])
+
+    assert after == before
