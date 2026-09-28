@@ -4,6 +4,8 @@
 # test drives encode_session_token()/decode_session_token() purely through
 # the environment (via set_valid_env()) and hand-built tokens.
 import base64
+import hashlib
+import hmac
 import json
 import uuid
 from datetime import UTC, datetime, timedelta
@@ -11,6 +13,7 @@ from datetime import UTC, datetime, timedelta
 import jwt
 import pytest
 
+from app.auth import tokens
 from app.auth.tokens import (
     TOKEN_AUDIENCE,
     TOKEN_ISSUER,
@@ -19,7 +22,7 @@ from app.auth.tokens import (
     encode_session_token,
 )
 from app.config import get_settings
-from tests.conftest import VALID_ENV, set_valid_env
+from tests.conftest import VALID_ENV, assert_secret_not_in_exception_chain, set_valid_env
 
 ORIGIN = "https://example.com"
 
@@ -193,8 +196,58 @@ def test_decode_error_never_contains_a_distinctive_fake_key_value(monkeypatch):
     with pytest.raises(InvalidSessionToken) as exc_info:
         decode_session_token(token)
     err = exc_info.value
-    assert distinctive_key not in str(err)
-    assert distinctive_key not in repr(err)
-    assert VALID_ENV["JWT_SIGNING_KEY"] not in str(err)
+    assert_secret_not_in_exception_chain(err, distinctive_key, VALID_ENV["JWT_SIGNING_KEY"])
     assert err.__cause__ is None
     assert err.__context__ is None
+
+
+def test_encode_session_token_never_uses_the_previous_key(monkeypatch):
+    # C1 (duplication check after 1.4.a/b): encode_session_token() never
+    # reads jwt_signing_key_previous_str() at all, so this is structurally
+    # guaranteed rather than merely observed -- proved here by checking the
+    # emitted kid header names only the CURRENT key, never the previous one,
+    # even though a previous key is configured and differs from it.
+    current_key = VALID_ENV["JWT_SIGNING_KEY"]
+    previous_key = "a-previous-signing-key-32-characters-long"
+    set_valid_env(monkeypatch, VALID_ENV, JWT_SIGNING_KEY_PREVIOUS=previous_key)
+    token = encode_session_token(uuid.uuid4(), uuid.uuid4(), ORIGIN)
+    kid = jwt.get_unverified_header(token)["kid"]
+    assert kid == tokens._key_id(current_key)
+    assert kid != tokens._key_id(previous_key)
+
+
+def test_algorithm_confusion_signature_is_rejected(monkeypatch):
+    # C2 (duplication check after 1.4.a/b): distinct from the alg=none case
+    # above -- header claims HS256 (so a naive implementation that trusts
+    # the header would accept it), but the signature bytes are produced with
+    # a different MAC (HMAC-SHA384) over the same key and signing input.
+    # Proves decode_session_token() actually recomputes and compares a real
+    # HMAC-SHA256, rather than trusting the header's algorithm name.
+    set_valid_env(monkeypatch, VALID_ENV)
+    key = VALID_ENV["JWT_SIGNING_KEY"]
+    payload = _valid_payload()
+    header_segment = _b64url(json.dumps({"alg": "HS256", "typ": "JWT"}).encode())
+    payload_segment = _b64url(json.dumps(payload, default=str).encode())
+    signing_input = header_segment + b"." + payload_segment
+    wrong_mac = hmac.new(key.encode("utf-8"), signing_input, hashlib.sha384).digest()
+    wrong_mac_signature = _b64url(wrong_mac)
+    token = (signing_input + b"." + wrong_mac_signature).decode()
+    with pytest.raises(InvalidSessionToken):
+        decode_session_token(token)
+
+
+def test_decode_error_never_contains_either_configured_key_during_rotation(monkeypatch):
+    # C3 (duplication check after 1.4.a/b): both JWT_SIGNING_KEY and
+    # JWT_SIGNING_KEY_PREVIOUS are set to distinctive fake values, the token
+    # is signed with a THIRD, unrelated key (so decode fails against both
+    # configured keys), and neither configured value may appear anywhere in
+    # the raised exception.
+    current_key = "distinctive-current-key-32-characters-ok"
+    previous_key = "distinctive-previous-key-32-characters-ok"
+    set_valid_env(
+        monkeypatch, VALID_ENV, JWT_SIGNING_KEY=current_key, JWT_SIGNING_KEY_PREVIOUS=previous_key
+    )
+    token = _raw_encode(_valid_payload(), key="a-completely-unrelated-signing-key-32ch")
+    with pytest.raises(InvalidSessionToken) as exc_info:
+        decode_session_token(token)
+    assert_secret_not_in_exception_chain(exc_info.value, current_key, previous_key)

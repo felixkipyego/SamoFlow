@@ -28,16 +28,16 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 POSTGRES_SCHEME = "postgresql+psycopg"
 
 
-def _require_no_whitespace_or_control_chars(raw: str, field_name: str) -> None:
-    # Shared by jwt_signing_key and jwt_signing_key_previous (Task 1.4.a):
-    # both are used later as UTF-8 bytes to sign/verify tokens, so stray
-    # whitespace or control characters (e.g. from a copy-paste error) must
-    # be caught at startup. Message names only the requirement, never the
-    # value under validation.
+def _require_no_whitespace_or_control_chars(raw: str, field_name: str, reason: str) -> None:
+    # Shared by qdrant_api_key, jwt_signing_key and jwt_signing_key_previous
+    # (duplication check after 1.4.a/b): all three reject stray whitespace or
+    # control characters (e.g. from a copy-paste error), each for its own
+    # reason -- `reason` keeps the message truthful per field instead of one
+    # field borrowing another's rationale. Message names only the
+    # requirement, never the value under validation.
     if any(ch.isspace() or not ch.isprintable() for ch in raw):
         raise ValueError(
-            f"{field_name} must not contain whitespace or control characters "
-            "(it is used as UTF-8 bytes to sign tokens)."
+            f"{field_name} must not contain whitespace or control characters ({reason})."
         )
 
 
@@ -96,18 +96,23 @@ class Settings(BaseSettings):
         # validation, so a bad key cannot leak here.
         if not raw:
             raise ValueError("QDRANT_API_KEY must not be empty.")
-        if any(ch.isspace() or not ch.isprintable() for ch in raw):
-            raise ValueError(
-                "QDRANT_API_KEY must not contain whitespace or control "
-                "characters (it is sent as an HTTP header value; a newline "
-                "would allow header injection)."
-            )
+        # Duplication check after 1.4.a/b: delegates to the same helper
+        # jwt_signing_key/jwt_signing_key_previous use below -- one
+        # whitespace/control-char check shared by every secret field that
+        # needs it, instead of a second copy of the same `any(...)` line.
+        _require_no_whitespace_or_control_chars(
+            raw,
+            "QDRANT_API_KEY",
+            "it is sent as an HTTP header value; a newline would allow header injection",
+        )
         return value
 
     @field_validator("jwt_signing_key")
     @classmethod
     def _require_a_clean_signing_key(cls, value: SecretStr) -> SecretStr:
-        _require_no_whitespace_or_control_chars(value.get_secret_value(), "JWT_SIGNING_KEY")
+        _require_no_whitespace_or_control_chars(
+            value.get_secret_value(), "JWT_SIGNING_KEY", "it is used as UTF-8 bytes to sign tokens"
+        )
         return value
 
     @field_validator("jwt_signing_key_previous", mode="before")
@@ -131,7 +136,9 @@ class Settings(BaseSettings):
     ) -> SecretStr | None:
         if value is not None:
             _require_no_whitespace_or_control_chars(
-                value.get_secret_value(), "JWT_SIGNING_KEY_PREVIOUS"
+                value.get_secret_value(),
+                "JWT_SIGNING_KEY_PREVIOUS",
+                "it is used as UTF-8 bytes to verify tokens",
             )
         return value
 

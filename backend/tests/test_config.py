@@ -9,6 +9,7 @@ from tests.conftest import (
     REQUIRED_VARS,
     TEST_PASSWORD,
     VALID_ENV,
+    assert_secret_not_in_exception_chain,
     fresh_import,
     set_valid_env,
 )
@@ -125,17 +126,6 @@ def test_settings_env_file_is_never_configured():
     assert Settings.model_config.get("env_file") is None
 
 
-def _exception_chain(exc):
-    # Walks exc and every exception reachable via __cause__/__context__, so
-    # a leak hidden anywhere in the chain (not just on exc itself) is found.
-    seen = []
-    current = exc
-    while current is not None and current not in seen:
-        seen.append(current)
-        current = current.__cause__ or current.__context__
-    return seen
-
-
 def test_get_settings_raises_settings_error_on_malformed_database_url(monkeypatch):
     set_valid_env(
         monkeypatch, VALID_ENV, DATABASE_URL=f"mysql://user:{TEST_PASSWORD}@localhost/db"
@@ -151,10 +141,7 @@ def test_settings_error_chain_never_carries_the_password(monkeypatch):
     with pytest.raises(SettingsError) as exc_info:
         get_settings()
     err = exc_info.value
-    for link in _exception_chain(err):
-        assert TEST_PASSWORD not in str(link)
-        assert TEST_PASSWORD not in repr(link)
-        assert TEST_PASSWORD not in str(link.args)
+    assert_secret_not_in_exception_chain(err, TEST_PASSWORD)
     assert err.__cause__ is None
     assert err.__context__ is None
 
@@ -170,10 +157,7 @@ def test_settings_error_chain_never_carries_the_qdrant_api_key(monkeypatch):
     with pytest.raises(SettingsError) as exc_info:
         get_settings()
     err = exc_info.value
-    for link in _exception_chain(err):
-        assert "distinctive-key" not in str(link)
-        assert "distinctive-key" not in repr(link)
-        assert "distinctive-key" not in str(link.args)
+    assert_secret_not_in_exception_chain(err, "distinctive-key")
     assert err.__cause__ is None
     assert err.__context__ is None
 
@@ -207,10 +191,7 @@ def test_settings_error_chain_never_carries_the_jwt_signing_key(
     with pytest.raises(SettingsError) as exc_info:
         get_settings()
     err = exc_info.value
-    for link in _exception_chain(err):
-        assert distinctive_substring not in str(link)
-        assert distinctive_substring not in repr(link)
-        assert distinctive_substring not in str(link.args)
+    assert_secret_not_in_exception_chain(err, distinctive_substring)
     assert err.__cause__ is None
     assert err.__context__ is None
 

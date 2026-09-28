@@ -275,6 +275,34 @@ def require_test_qdrant() -> tuple[str, str]:
     return url, key
 
 
+def _exception_chain(exc):
+    # Walks exc and every exception reachable via __cause__/__context__, so
+    # a leak hidden anywhere in the chain (not just on exc itself) is found.
+    # Shared by test_config.py (database_url/qdrant_api_key/jwt_signing_key
+    # leak tests) and test_tokens.py's leak test (duplication check after
+    # 1.4.a/b) via assert_secret_not_in_exception_chain() below.
+    seen = []
+    current = exc
+    while current is not None and current not in seen:
+        seen.append(current)
+        current = current.__cause__ or current.__context__
+    return seen
+
+
+def assert_secret_not_in_exception_chain(exc, *secrets):
+    # Shared by test_config.py's three leak tests and test_tokens.py's leak
+    # test (duplication check after 1.4.a/b): every one of them walked
+    # _exception_chain() and asserted each secret absent from str/repr/args
+    # of every link, spelled out identically at each call site. Does not
+    # cover test_qdrant.py's two leak tests, which separately check a
+    # rendered traceback -- a surface this helper doesn't touch.
+    for link in _exception_chain(exc):
+        for secret in secrets:
+            assert secret not in str(link)
+            assert secret not in repr(link)
+            assert secret not in str(link.args)
+
+
 def fresh_import(module_name):
     # A fresh import into a new module object (not importlib.reload, which
     # mutates the module dict a test file's own `from x import y` binding
