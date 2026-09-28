@@ -287,6 +287,8 @@ A production-ready, multi-tenant, embeddable AI widget platform: one website is 
 
   Verified: `make lint` clean; full `backend/tests` without a test database: **186 passed, 44 skipped** (up from 172 passed, 44 skipped — the 14 new tests in `test_qdrant_read_path_guard.py`, all running for real, none needing Qdrant); `make test-all`: **230 passed** (up from 216), both `test-db` and `test-qdrant` cleaned up afterward; `git status --short` showed exactly `backend/app/qdrant.py` (the H2 comment sentence) and `backend/tests/test_qdrant_read_path_guard.py` (new), no `.env`. Counter reached n=3 at this task; per the task's own instruction, the duplication check is **not** run now and is reported here as due, to be requested separately.
 
+- 2026-09-28: Duplication check after 1.3.c/1.3.d/1.3.e: shared live-collection fixture and guard helpers, offline 409-race test, module-import gap in the read-path guard closed, snapshot and destructive-collection methods forbidden in application code; classification reviewed with no misclassification found.
+
 ### Estimates to measure
 
 - The default limits in §9 and the budgets in §17 are starting points.
@@ -404,7 +406,7 @@ see there rather than repeating it here.
 
 ## 8. Task counter since the last duplication check
 
-n = 3 (run the duplication check at 3; never exceed 4) — 1.3.c, 1.3.d and 1.3.e counted since the last check (after 1.3.a1/1.3.a2/1.3.b). Counter reached 3; the duplication check is due, but not run in this task -- to be requested separately.
+n = 0 (run the duplication check at 3; never exceed 4) — reset after the duplication check following 1.3.c/1.3.d/1.3.e.
 
 ## 9. Open markers
 

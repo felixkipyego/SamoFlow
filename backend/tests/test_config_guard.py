@@ -12,9 +12,9 @@
 #   - only files listed in ALLOWED_QDRANT_API_KEY_CALLERS may call
 #     qdrant_api_key_str() outside app/config.py.
 import ast
-from pathlib import Path
 
-BACKEND_DIR = Path(__file__).resolve().parent.parent
+from tests.conftest import BACKEND_DIR, called_name, iter_python_files
+
 APP_DIR = BACKEND_DIR / "app"
 ALEMBIC_DIR = BACKEND_DIR / "alembic"
 CONFIG_FILE = APP_DIR / "config.py"
@@ -36,31 +36,15 @@ _SECRET_ACCESSOR_ALLOW_LISTS: dict[str, tuple[str, ...]] = {
 }
 
 
-def _called_name(node: ast.Call) -> str | None:
-    func = node.func
-    if isinstance(func, ast.Name):
-        return func.id
-    if isinstance(func, ast.Attribute):
-        return func.attr
-    return None
-
-
-def _scanned_python_files():
-    for directory in (APP_DIR, ALEMBIC_DIR):
-        for path in sorted(directory.rglob("*.py")):
-            if "__pycache__" not in path.parts:
-                yield path
-
-
 def test_config_guard():
     violations = []
-    for path in _scanned_python_files():
+    for path in iter_python_files(APP_DIR, ALEMBIC_DIR):
         rel = path.relative_to(BACKEND_DIR).as_posix()
         tree = ast.parse(path.read_text(), filename=str(path))
         for node in ast.walk(tree):
             if not isinstance(node, ast.Call):
                 continue
-            name = _called_name(node)
+            name = called_name(node)
             if name == "Settings" and path != CONFIG_FILE:
                 violations.append(
                     f"{path}:{node.lineno}: constructs Settings() directly; "
@@ -78,7 +62,6 @@ def test_config_guard():
                 and rel not in _SECRET_ACCESSOR_ALLOW_LISTS[name]
             ):
                 violations.append(
-                    f"{path}:{node.lineno}: calls {name}() but {rel!r} is not "
-                    f"in its allow-list"
+                    f"{path}:{node.lineno}: calls {name}() but {rel!r} is not in its allow-list"
                 )
     assert not violations, "\n".join(violations)

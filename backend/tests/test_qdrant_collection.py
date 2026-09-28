@@ -3,17 +3,18 @@
 #
 # Two groups:
 #   - offline tests for the pure comparison functions (_schema_differences()
-#     and friends, _mismatch_message()): hand-built qdrant_client model
-#     objects, no Qdrant needed.
+#     and friends, _mismatch_message()), plus ensure_collection()'s 409
+#     "already exists" race path via a minimal fake client: hand-built
+#     qdrant_client model objects and a fake client, no Qdrant needed.
 #   - live tests against the real test-qdrant service, each on its own
 #     uuid-named collection, always deleted in a finally block: create on a
 #     fresh name, a second ensure_collection() call is a no-op, a pre-created
 #     mismatched collection raises CollectionSchemaMismatch naming the real
 #     difference (never the API key), and a collection missing only its
 #     payload indexes gets them repaired.
-import uuid
-
+import httpx
 import pytest
+from qdrant_client.http.exceptions import UnexpectedResponse
 from qdrant_client.http.models import (
     CollectionConfig,
     CollectionInfo,
@@ -32,7 +33,7 @@ from qdrant_client.http.models import (
 )
 
 from app import qdrant
-from tests.conftest import require_test_qdrant
+from tests.conftest import live_qdrant_collection, require_test_qdrant
 
 COLLECTION_NAME = "knowledge_chunks"
 
@@ -217,21 +218,95 @@ def test_mismatch_message_lists_every_difference_and_contains_no_key():
     assert distinctive_key not in message
 
 
+# --- Offline: ensure_collection()'s 409 "already exists" race path ---------
+# A minimal fake client -- only the methods ensure_collection() actually
+# calls -- so the race between collection_exists() reporting missing and
+# create_collection() finding another caller already won can be exercised
+# deterministically, with no live Qdrant and no real concurrency needed.
+
+
+def _conflict_response(status_code: int) -> UnexpectedResponse:
+    return UnexpectedResponse(
+        status_code=status_code,
+        reason_phrase="Conflict" if status_code == 409 else "Internal Server Error",
+        content=b'{"status":{"error":"simulated"}}',
+        headers=httpx.Headers(),
+    )
+
+
+class _FakeRacingClient:
+    def __init__(self, *, create_status_code: int, get_collection_info: CollectionInfo | None):
+        self._create_status_code = create_status_code
+        self._get_collection_info = get_collection_info
+        self.get_collection_calls = 0
+
+    async def collection_exists(self, name: str) -> bool:
+        # ensure_collection() only ever calls this once, before attempting
+        # create_collection() -- always reports "missing" here, so the
+        # fake exercises the same path a real race would: the check said
+        # no, then create_collection() found otherwise.
+        return False
+
+    async def create_collection(self, **kwargs) -> None:
+        raise _conflict_response(self._create_status_code)
+
+    async def get_collection(self, name: str) -> CollectionInfo:
+        self.get_collection_calls += 1
+        assert self._get_collection_info is not None, (
+            "get_collection() must not be called when create_collection() raised a non-409 status"
+        )
+        return self._get_collection_info
+
+
+async def test_ensure_collection_recovers_from_a_409_race_when_the_result_matches():
+    client = _FakeRacingClient(create_status_code=409, get_collection_info=_matching_info())
+    await qdrant.ensure_collection(client, COLLECTION_NAME)
+    assert client.get_collection_calls == 1
+
+
+async def test_ensure_collection_raises_from_a_409_race_when_the_result_mismatches():
+    mismatched = _make_collection_info(
+        vectors={"dense": VectorParams(size=768, distance=Distance.COSINE)},
+        sparse_vectors=_MATCHING_SPARSE_VECTORS,
+        payload_schema=_MATCHING_PAYLOAD_SCHEMA,
+    )
+    client = _FakeRacingClient(create_status_code=409, get_collection_info=mismatched)
+    with pytest.raises(qdrant.CollectionSchemaMismatch) as exc_info:
+        await qdrant.ensure_collection(client, COLLECTION_NAME)
+    assert "768" in str(exc_info.value)
+
+
+async def test_ensure_collection_propagates_a_non_409_error_from_create_collection():
+    client = _FakeRacingClient(create_status_code=500, get_collection_info=None)
+    with pytest.raises(UnexpectedResponse) as exc_info:
+        await qdrant.ensure_collection(client, COLLECTION_NAME)
+    assert exc_info.value.status_code == 500
+    assert client.get_collection_calls == 0
+
+
 # --- Live tests against the real test-qdrant service -----------------------
-# Each test builds its own client and a fresh uuid-named collection, always
-# removed in a finally block, matching test_qdrant_auth.py's discipline.
+# Each test uses conftest.py's live_qdrant_collection() for the
+# require_test_qdrant() -> build_qdrant_client() -> unique name ->
+# try/finally(delete-if-exists, close) scaffold (duplication check after
+# 1.3.c/d/e; previously repeated inline / via a local _cleanup() helper).
 
 
-async def _cleanup(client, name):
-    if await client.collection_exists(name):
-        await client.delete_collection(name)
+async def _create_bare_collection(
+    client, name: str, *, dense_size: int = 1536, distance: Distance = Distance.COSINE
+) -> None:
+    # Local helper (duplication check after 1.3.c/d/e): the four tests below
+    # each pre-create a collection with dense+sparse vectors but no payload
+    # indexes, varying only dense_size/distance -- this collapses four
+    # near-identical client.create_collection(...) calls into one.
+    await client.create_collection(
+        collection_name=name,
+        vectors_config={"dense": VectorParams(size=dense_size, distance=distance)},
+        sparse_vectors_config={"sparse": SparseVectorParams(modifier=Modifier.IDF)},
+    )
 
 
 async def test_ensure_collection_creates_and_reads_back_the_full_schema():
-    url, key = require_test_qdrant()
-    client = qdrant.build_qdrant_client(url, key)
-    name = f"schema_probe_{uuid.uuid4()}"
-    try:
+    async with live_qdrant_collection("schema_probe") as (client, name):
         await qdrant.ensure_collection(client, name)
 
         info = await client.get_collection(name)
@@ -245,16 +320,10 @@ async def test_ensure_collection_creates_and_reads_back_the_full_schema():
 
         source_id_index = info.payload_schema["source_id"]
         assert source_id_index.data_type == PayloadSchemaType.KEYWORD
-    finally:
-        await _cleanup(client, name)
-        await client.close()
 
 
 async def test_ensure_collection_called_twice_is_a_no_op():
-    url, key = require_test_qdrant()
-    client = qdrant.build_qdrant_client(url, key)
-    name = f"schema_probe_{uuid.uuid4()}"
-    try:
+    async with live_qdrant_collection("schema_probe") as (client, name):
         await qdrant.ensure_collection(client, name)
         before = (await client.get_collection(name)).model_dump()
 
@@ -262,62 +331,34 @@ async def test_ensure_collection_called_twice_is_a_no_op():
         after = (await client.get_collection(name)).model_dump()
 
         assert before == after
-    finally:
-        await _cleanup(client, name)
-        await client.close()
 
 
 async def test_ensure_collection_raises_on_wrong_dense_size():
-    url, key = require_test_qdrant()
-    client = qdrant.build_qdrant_client(url, key)
-    name = f"schema_probe_{uuid.uuid4()}"
-    try:
-        await client.create_collection(
-            collection_name=name,
-            vectors_config={"dense": VectorParams(size=768, distance=Distance.COSINE)},
-            sparse_vectors_config={"sparse": SparseVectorParams(modifier=Modifier.IDF)},
-        )
+    _, key = require_test_qdrant()
+    async with live_qdrant_collection("schema_probe") as (client, name):
+        await _create_bare_collection(client, name, dense_size=768)
         with pytest.raises(qdrant.CollectionSchemaMismatch) as exc_info:
             await qdrant.ensure_collection(client, name)
         message = str(exc_info.value)
         assert "768" in message
         assert "1536" in message
         assert key not in message
-    finally:
-        await _cleanup(client, name)
-        await client.close()
 
 
 async def test_ensure_collection_raises_on_wrong_distance():
-    url, key = require_test_qdrant()
-    client = qdrant.build_qdrant_client(url, key)
-    name = f"schema_probe_{uuid.uuid4()}"
-    try:
-        await client.create_collection(
-            collection_name=name,
-            vectors_config={"dense": VectorParams(size=1536, distance=Distance.EUCLID)},
-            sparse_vectors_config={"sparse": SparseVectorParams(modifier=Modifier.IDF)},
-        )
+    _, key = require_test_qdrant()
+    async with live_qdrant_collection("schema_probe") as (client, name):
+        await _create_bare_collection(client, name, distance=Distance.EUCLID)
         with pytest.raises(qdrant.CollectionSchemaMismatch) as exc_info:
             await qdrant.ensure_collection(client, name)
         message = str(exc_info.value)
         assert "Euclid" in message
         assert key not in message
-    finally:
-        await _cleanup(client, name)
-        await client.close()
 
 
 async def test_ensure_collection_repairs_both_missing_indexes():
-    url, key = require_test_qdrant()
-    client = qdrant.build_qdrant_client(url, key)
-    name = f"schema_probe_{uuid.uuid4()}"
-    try:
-        await client.create_collection(
-            collection_name=name,
-            vectors_config={"dense": VectorParams(size=1536, distance=Distance.COSINE)},
-            sparse_vectors_config={"sparse": SparseVectorParams(modifier=Modifier.IDF)},
-        )
+    async with live_qdrant_collection("schema_probe") as (client, name):
+        await _create_bare_collection(client, name)
         info_before = await client.get_collection(name)
         assert info_before.payload_schema == {}
 
@@ -328,21 +369,12 @@ async def test_ensure_collection_repairs_both_missing_indexes():
         assert client_id_index.data_type == PayloadSchemaType.KEYWORD
         assert client_id_index.params.is_tenant is True
         assert info_after.payload_schema["source_id"].data_type == PayloadSchemaType.KEYWORD
-    finally:
-        await _cleanup(client, name)
-        await client.close()
 
 
 async def test_ensure_collection_raises_rather_than_replacing_a_non_tenant_index():
-    url, key = require_test_qdrant()
-    client = qdrant.build_qdrant_client(url, key)
-    name = f"schema_probe_{uuid.uuid4()}"
-    try:
-        await client.create_collection(
-            collection_name=name,
-            vectors_config={"dense": VectorParams(size=1536, distance=Distance.COSINE)},
-            sparse_vectors_config={"sparse": SparseVectorParams(modifier=Modifier.IDF)},
-        )
+    _, key = require_test_qdrant()
+    async with live_qdrant_collection("schema_probe") as (client, name):
+        await _create_bare_collection(client, name)
         await client.create_payload_index(
             collection_name=name,
             field_name="client_id",
@@ -354,12 +386,11 @@ async def test_ensure_collection_raises_rather_than_replacing_a_non_tenant_index
 
         with pytest.raises(qdrant.CollectionSchemaMismatch) as exc_info:
             await qdrant.ensure_collection(client, name)
-        assert "is_tenant" in str(exc_info.value)
+        message = str(exc_info.value)
+        assert "is_tenant" in message
+        assert key not in message
 
         # Never silently replaced: the index is still there, still not
         # tenant-optimized.
         info = await client.get_collection(name)
         assert info.payload_schema["client_id"].params.is_tenant is False
-    finally:
-        await _cleanup(client, name)
-        await client.close()

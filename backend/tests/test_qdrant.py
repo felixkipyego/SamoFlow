@@ -25,7 +25,6 @@ import subprocess
 import sys
 import traceback
 import warnings
-from pathlib import Path
 
 import pytest
 from qdrant_client import AsyncQdrantClient
@@ -33,9 +32,13 @@ from qdrant_client.common.version_check import get_server_version, is_compatible
 from qdrant_client.http.exceptions import UnexpectedResponse
 
 from app import qdrant
-from tests.conftest import VALID_ENV, minimal_subprocess_env, require_test_qdrant, set_valid_env
-
-BACKEND_DIR = Path(__file__).resolve().parent.parent
+from tests.conftest import (
+    BACKEND_DIR,
+    VALID_ENV,
+    minimal_subprocess_env,
+    require_test_qdrant,
+    set_valid_env,
+)
 
 
 def test_importing_qdrant_module_has_no_side_effects():
@@ -155,9 +158,7 @@ async def test_wrong_key_fails_authentication():
         exc = exc_info.value
         assert wrong_key not in repr(exc)
         assert wrong_key not in str(exc)
-        rendered_traceback = "".join(
-            traceback.format_exception(type(exc), exc, exc.__traceback__)
-        )
+        rendered_traceback = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
         assert wrong_key not in rendered_traceback
     finally:
         await client.close()

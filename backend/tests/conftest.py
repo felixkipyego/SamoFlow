@@ -21,22 +21,36 @@
 # test_alembic.py's _alembic_subprocess_env()). Duplication check after
 # 1.2.d/e/f adds db_session() (the async-generator-driving shape was
 # repeated ~14 times across test_tenancy_repository.py, plus twice in
-# test_db.py).
+# test_db.py). Duplication check after 1.3.c/d/e adds: BACKEND_DIR (was
+# independently re-derived in test_config_guard.py, test_qdrant.py and
+# test_qdrant_read_path_guard.py); iter_python_files() and called_name()
+# (the same file-walk and ast.Call-name-extraction logic, each spelled
+# slightly differently in test_config_guard.py and
+# test_qdrant_read_path_guard.py -- the two files' actual rule-checking
+# logic stays separate, since it differs enough not to share); and
+# live_qdrant_collection() (the require_test_qdrant() -> build_qdrant_client()
+# -> unique name -> try/finally(delete-if-exists, close) scaffold repeated
+# at ~15 call sites across test_qdrant_collection.py and
+# test_qdrant_isolation.py, mirroring db_session()'s own shape below).
+import ast
 import importlib
 import os
 import sys
+import uuid
 from collections.abc import AsyncIterator
 from contextlib import aclosing, asynccontextmanager
 from pathlib import Path
 from urllib.parse import urlsplit
 
 import pytest
+from qdrant_client import AsyncQdrantClient
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app import db
+from app import db, qdrant
 from app.config import POSTGRES_SCHEME, Settings, get_settings
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
+BACKEND_DIR = Path(__file__).resolve().parent.parent
 
 REQUIRED_VARS = [name.upper() for name in Settings.model_fields]
 
@@ -51,6 +65,32 @@ def read_lines(path: Path) -> list[str]:
     return path.read_text().splitlines()
 
 
+def iter_python_files(*roots: Path):
+    # Shared by test_config_guard.py and test_qdrant_read_path_guard.py
+    # (duplication check after 1.3.c/d/e): both walked their own scan
+    # root(s) the same way (sorted rglob("*.py"), skipping __pycache__),
+    # just parameterized differently -- this is the one part of their AST
+    # scans that was genuinely identical; the rule-checking logic each file
+    # applies afterward stays separate.
+    for root in roots:
+        for path in sorted(root.rglob("*.py")):
+            if "__pycache__" not in path.parts:
+                yield path
+
+
+def called_name(node: ast.Call) -> str | None:
+    # Shared by test_config_guard.py and test_qdrant_read_path_guard.py: the
+    # name a Call node invokes, whether written as a bare name (`f(...)`) or
+    # an attribute access (`x.f(...)`) -- None for anything else (e.g. a
+    # call through a subscript or a lambda result).
+    func = node.func
+    if isinstance(func, ast.Name):
+        return func.id
+    if isinstance(func, ast.Attribute):
+        return func.attr
+    return None
+
+
 def minimal_subprocess_env() -> dict[str, str]:
     # Shared by test_evals_placeholder.py, test_hooks.py, and built on top of
     # (with its own additional vars) by test_alembic.py's
@@ -61,6 +101,7 @@ def minimal_subprocess_env() -> dict[str, str]:
         if name in os.environ:
             env[name] = os.environ[name]
     return env
+
 
 # Shared by test_config.py and test_worker.py: a minimal environment that
 # passes every Settings validator, with values chosen only to be valid, not
@@ -269,3 +310,25 @@ async def db_session() -> AsyncIterator[AsyncSession]:
     # site the plain "async with db_session() as session:" shape instead.
     async with aclosing(db.get_db_session()) as session_gen:
         yield await anext(session_gen)
+
+
+@asynccontextmanager
+async def live_qdrant_collection(
+    prefix: str = "probe",
+) -> AsyncIterator[tuple[AsyncQdrantClient, str]]:
+    # Shared across test_qdrant_collection.py and test_qdrant_isolation.py
+    # (duplication check after 1.3.c/d/e): both files repeated this exact
+    # require_test_qdrant() -> build_qdrant_client() -> unique
+    # f"{prefix}_{uuid.uuid4()}" name -> try/finally(delete-if-exists,
+    # close()) scaffold at ~15 call sites -- mirrors db_session()'s shape
+    # above. Teardown always runs, including when the caller's own block
+    # raises (contextlib guarantees this, same as a plain try/finally).
+    url, key = require_test_qdrant()
+    client = qdrant.build_qdrant_client(url, key)
+    name = f"{prefix}_{uuid.uuid4()}"
+    try:
+        yield client, name
+    finally:
+        if await client.collection_exists(name):
+            await client.delete_collection(name)
+        await client.close()

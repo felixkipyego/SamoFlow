@@ -33,7 +33,7 @@ from qdrant_client.http.models import (
 )
 
 from app import qdrant
-from tests.conftest import require_test_qdrant
+from tests.conftest import live_qdrant_collection
 
 DIM = qdrant.DENSE_VECTOR_SIZE
 
@@ -263,10 +263,7 @@ def _assert_exact_tenant_result(points, expected_ids: set[str], expected_client_
 
 
 async def test_control_unfiltered_queries_prove_the_seed_data_is_leak_prone():
-    url, key = require_test_qdrant()
-    client = qdrant.build_qdrant_client(url, key)
-    name = f"isolation_{uuid.uuid4()}"
-    try:
+    async with live_qdrant_collection("isolation") as (client, name):
         ids = await _seed_two_tenants(client, name)
 
         dense_points = await _dense_query(client, name, query_filter=None)
@@ -284,59 +281,31 @@ async def test_control_unfiltered_queries_prove_the_seed_data_is_leak_prone():
         sparse_points = await _sparse_query(client, name, query_filter=None)
         sparse_ids = {str(p.id) for p in sparse_points}
         assert str(ids.b_sparse_only) in sparse_ids
-    finally:
-        if await client.collection_exists(name):
-            await client.delete_collection(name)
-        await client.close()
 
 
 async def test_dense_query_filtered_to_tenant_a_returns_exactly_tenant_a():
-    url, key = require_test_qdrant()
-    client = qdrant.build_qdrant_client(url, key)
-    name = f"isolation_{uuid.uuid4()}"
-    try:
+    async with live_qdrant_collection("isolation") as (client, name):
         ids = await _seed_two_tenants(client, name)
         points = await _dense_query(client, name, qdrant.tenant_filter(ids.tenant_a))
         _assert_exact_tenant_result(points, ids.a_ids, str(ids.tenant_a))
-    finally:
-        if await client.collection_exists(name):
-            await client.delete_collection(name)
-        await client.close()
 
 
 async def test_sparse_query_filtered_to_tenant_a_returns_only_the_a_point_that_matches():
-    url, key = require_test_qdrant()
-    client = qdrant.build_qdrant_client(url, key)
-    name = f"isolation_{uuid.uuid4()}"
-    try:
+    async with live_qdrant_collection("isolation") as (client, name):
         ids = await _seed_two_tenants(client, name)
         points = await _sparse_query(client, name, qdrant.tenant_filter(ids.tenant_a))
         _assert_exact_tenant_result(points, {str(ids.a_sparse)}, str(ids.tenant_a))
-    finally:
-        if await client.collection_exists(name):
-            await client.delete_collection(name)
-        await client.close()
 
 
 async def test_hybrid_query_filtered_to_tenant_a_returns_exactly_tenant_a():
-    url, key = require_test_qdrant()
-    client = qdrant.build_qdrant_client(url, key)
-    name = f"isolation_{uuid.uuid4()}"
-    try:
+    async with live_qdrant_collection("isolation") as (client, name):
         ids = await _seed_two_tenants(client, name)
         points = await _hybrid_query(client, name, qdrant.tenant_filter(ids.tenant_a))
         _assert_exact_tenant_result(points, ids.a_ids, str(ids.tenant_a))
-    finally:
-        if await client.collection_exists(name):
-            await client.delete_collection(name)
-        await client.close()
 
 
 async def test_all_three_query_types_filtered_to_tenant_b_return_exactly_tenant_b():
-    url, key = require_test_qdrant()
-    client = qdrant.build_qdrant_client(url, key)
-    name = f"isolation_{uuid.uuid4()}"
-    try:
+    async with live_qdrant_collection("isolation") as (client, name):
         ids = await _seed_two_tenants(client, name)
         tenant_b_filter = qdrant.tenant_filter(ids.tenant_b)
 
@@ -348,44 +317,26 @@ async def test_all_three_query_types_filtered_to_tenant_b_return_exactly_tenant_
 
         hybrid_points = await _hybrid_query(client, name, tenant_b_filter)
         _assert_exact_tenant_result(hybrid_points, ids.b_ids, str(ids.tenant_b))
-    finally:
-        if await client.collection_exists(name):
-            await client.delete_collection(name)
-        await client.close()
 
 
 async def test_a_tenant_with_no_points_gets_an_empty_result_from_every_query_type():
-    url, key = require_test_qdrant()
-    client = qdrant.build_qdrant_client(url, key)
-    name = f"isolation_{uuid.uuid4()}"
-    try:
+    async with live_qdrant_collection("isolation") as (client, name):
         ids = await _seed_two_tenants(client, name)
         tenant_c_filter = qdrant.tenant_filter(ids.tenant_c)
 
         assert await _dense_query(client, name, tenant_c_filter) == []
         assert await _sparse_query(client, name, tenant_c_filter) == []
         assert await _hybrid_query(client, name, tenant_c_filter) == []
-    finally:
-        if await client.collection_exists(name):
-            await client.delete_collection(name)
-        await client.close()
 
 
 async def test_a_near_miss_client_id_matches_nothing():
-    url, key = require_test_qdrant()
-    client = qdrant.build_qdrant_client(url, key)
-    name = f"isolation_{uuid.uuid4()}"
-    try:
+    async with live_qdrant_collection("isolation") as (client, name):
         ids = await _seed_two_tenants(client, name)
         near_miss_filter = qdrant.tenant_filter(_near_miss(ids.tenant_a))
 
         assert await _dense_query(client, name, near_miss_filter) == []
         assert await _sparse_query(client, name, near_miss_filter) == []
         assert await _hybrid_query(client, name, near_miss_filter) == []
-    finally:
-        if await client.collection_exists(name):
-            await client.delete_collection(name)
-        await client.close()
 
 
 # --- Prefetch independence: proves the dense and sparse sub-queries of a
@@ -403,10 +354,7 @@ async def test_a_near_miss_client_id_matches_nothing():
 # vector is invisible to every sparse (sub-)query, exactly like the
 # CLIENT_ID_FIELD-less orphan point is invisible to every tenant filter.
 async def test_hybrid_dense_leak_is_caught_independently_of_the_sparse_prefetch():
-    url, key = require_test_qdrant()
-    client = qdrant.build_qdrant_client(url, key)
-    name = f"isolation_dense_only_{uuid.uuid4()}"
-    try:
+    async with live_qdrant_collection("isolation_dense_only") as (client, name):
         await qdrant.ensure_collection(client, name)
         tenant_a, tenant_b = uuid.uuid4(), uuid.uuid4()
         a_point, b_point = uuid.uuid4(), uuid.uuid4()
@@ -422,17 +370,10 @@ async def test_hybrid_dense_leak_is_caught_independently_of_the_sparse_prefetch(
 
         result = await _hybrid_query(client, name, qdrant.tenant_filter(tenant_a))
         _assert_exact_tenant_result(result, {str(a_point)}, str(tenant_a))
-    finally:
-        if await client.collection_exists(name):
-            await client.delete_collection(name)
-        await client.close()
 
 
 async def test_hybrid_sparse_leak_is_caught_independently_of_the_dense_prefetch():
-    url, key = require_test_qdrant()
-    client = qdrant.build_qdrant_client(url, key)
-    name = f"isolation_sparse_only_{uuid.uuid4()}"
-    try:
+    async with live_qdrant_collection("isolation_sparse_only") as (client, name):
         await qdrant.ensure_collection(client, name)
         tenant_a, tenant_b = uuid.uuid4(), uuid.uuid4()
         a_point, b_point = uuid.uuid4(), uuid.uuid4()
@@ -452,7 +393,3 @@ async def test_hybrid_sparse_leak_is_caught_independently_of_the_dense_prefetch(
 
         result = await _hybrid_query(client, name, qdrant.tenant_filter(tenant_a))
         _assert_exact_tenant_result(result, {str(a_point)}, str(tenant_a))
-    finally:
-        if await client.collection_exists(name):
-            await client.delete_collection(name)
-        await client.close()
