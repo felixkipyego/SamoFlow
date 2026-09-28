@@ -24,9 +24,8 @@ CONFIG_FILE = APP_DIR / "config.py"
 ALLOWED_DATABASE_URL_CALLERS: tuple[str, ...] = ("alembic/env.py", "app/db.py")
 
 # NOTE: adding a file here is a deliberate decision: it means that file
-# receives the real Qdrant API key. Review it by hand. Starts empty --
-# Task 1.3.b adds app/qdrant.py, the only intended caller.
-ALLOWED_QDRANT_API_KEY_CALLERS: tuple[str, ...] = ()
+# receives the real Qdrant API key. Review it by hand.
+ALLOWED_QDRANT_API_KEY_CALLERS: tuple[str, ...] = ("app/qdrant.py",)
 
 
 def _called_name(node: ast.Call) -> str | None:
