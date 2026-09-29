@@ -144,14 +144,16 @@ services:
     healthcheck:
       # The image has no curl (Task 1.1.g); Python's stdlib urllib is
       # already on PATH via the app's own venv, so no extra tool is needed.
-      # This only proves the process is alive, not that Postgres is
-      # reachable -- /health is liveness-only (Task 1.1.e).
+      # Task 1.4.j: checks /ready, not /health -- /ready actually touches
+      # Postgres (a bounded "SELECT 1", app/health.py), so this healthcheck
+      # now reflects whether the api service can actually serve a request
+      # that needs the database, not just that the process is alive.
       test:
         [
           "CMD",
           "python3",
           "-c",
-          "import sys,urllib.request; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3).status == 200 else 1)",
+          "import sys,urllib.request; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/ready', timeout=3).status == 200 else 1)",
         ]
       <<: *healthcheck-timing
     restart: unless-stopped

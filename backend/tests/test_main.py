@@ -1,10 +1,16 @@
 # backend/tests/test_main.py
 # Tests for Task 1.1.e's app factory (backend/app/main.py) and health
-# route (backend/app/health.py).
+# route (backend/app/health.py). Task 1.4.j adds /ready's own tests here
+# too, right next to /health's -- one small module, not two test files.
+import time
+
 import pytest
 
+from app import db
 from app.config import Settings, SettingsError, get_settings
 from app.main import create_app
+from app.plans import models as plans_models  # noqa: F401 (registers "plans" on Base.metadata)
+from app.tenancy import models as tenancy_models  # noqa: F401 (registers tenancy tables)
 from tests.conftest import fresh_import, http_client, set_valid_env
 
 # 203.0.113.0/24 is TEST-NET-3 (RFC 5737): reserved for documentation, never
@@ -107,3 +113,81 @@ async def test_unknown_path_returns_404_with_no_stack_trace(monkeypatch):
     assert response.status_code == 404
     assert "Traceback" not in response.text
     assert "traceback" not in response.text.lower()
+
+
+# -- /ready (Task 1.4.j) ------------------------------------------------------
+
+
+async def test_health_still_does_not_touch_the_database(monkeypatch):
+    # Existing coverage above (test_health_returns_200_with_exact_body)
+    # already proves this implicitly, since VALID_ENV's own DATABASE_URL is
+    # unroutable -- stated explicitly here, right next to /ready's own
+    # sibling test below, so the two routes are clearly contrasted.
+    set_valid_env(monkeypatch, VALID_ENV)
+    app = create_app()
+    async with await http_client(app) as client:
+        response = await client.get("/health")
+    assert response.status_code == 200
+
+
+async def test_ready_is_a_different_route_that_does_touch_the_database(monkeypatch):
+    # The exact same unroutable DATABASE_URL /health's own test above uses
+    # -- /health returns 200 regardless, but /ready must NOT, proving the
+    # two are genuinely different routes, not aliases of each other.
+    set_valid_env(monkeypatch, VALID_ENV)
+    db.get_engine.cache_clear()
+    db._session_factory.cache_clear()
+    app = create_app()
+    async with await http_client(app) as client:
+        response = await client.get("/ready")
+    assert response.status_code == 503
+    assert response.json() == {"status": "not ready"}
+    db.get_engine.cache_clear()
+    db._session_factory.cache_clear()
+
+
+async def test_ready_returns_200_when_postgres_is_reachable(reset_test_database):
+    app = create_app()
+    async with await http_client(app) as client:
+        response = await client.get("/ready")
+    assert response.status_code == 200
+    assert response.json() == {"status": "ready"}
+
+
+async def test_ready_returns_503_without_leaking_the_password_and_respects_its_timeout(
+    monkeypatch,
+):
+    # Covers both (c) and (d) in one scenario, since they share the exact
+    # same setup: a distinctive password in an otherwise-unroutable
+    # DATABASE_URL (RFC 5737 TEST-NET-3, the same convention used
+    # throughout this project) that, left untimed, would hang far longer
+    # than /ready's own 2-second internal timeout -- confirmed live: a raw
+    # socket connect() to 203.0.113.1 in this environment does not fail
+    # fast, it hangs until ITS OWN timeout, so this is a genuine
+    # black-holing address, not a fast-refusing one.
+    distinctive_password = "distinctive-pw-1-4-j"  # noqa: S105 (test fixture value)
+    set_valid_env(
+        monkeypatch,
+        VALID_ENV,
+        DATABASE_URL=f"postgresql+psycopg://user:{distinctive_password}@203.0.113.1:5432/widgetplatform",
+    )
+    db.get_engine.cache_clear()
+    db._session_factory.cache_clear()
+    app = create_app()
+
+    start = time.monotonic()
+    async with await http_client(app) as client:
+        response = await client.get("/ready")
+    elapsed = time.monotonic() - start
+
+    assert response.status_code == 503
+    assert response.json() == {"status": "not ready"}
+    assert elapsed < 5, f"/ready took {elapsed:.1f}s, expected well under 5s"
+
+    body_text = response.text
+    assert distinctive_password not in body_text
+    assert "psycopg" not in body_text
+    assert "203.0.113.1" not in body_text
+
+    db.get_engine.cache_clear()
+    db._session_factory.cache_clear()
