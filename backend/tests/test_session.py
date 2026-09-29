@@ -16,17 +16,13 @@
 import uuid
 
 import pytest
-import sqlalchemy as sa
-from httpx import ASGITransport, AsyncClient
 
-from app import db
 from app.auth.secrets import generate_visitor_secret, hash_visitor_secret
 from app.auth.tokens import decode_session_token
-from app.db import Base
 from app.main import create_app
 from app.plans import models as plans_models  # noqa: F401 (registers "plans" on Base.metadata)
 from app.tenancy.models import SiteKey, Tenant, Visitor
-from tests.conftest import VALID_ENV, db_session, require_test_database, set_valid_env
+from tests.conftest import VALID_ENV, db_session, http_client, set_valid_env
 
 ALLOWED_ORIGIN = "https://widget.example"
 DRAFT_ALLOWED_ORIGIN = "https://draft-widget.example"
@@ -38,10 +34,6 @@ DISALLOWED_ORIGIN = "https://not-allowed.example"
 _UNROUTABLE_DATABASE_URL = "postgresql+psycopg://user:pw@203.0.113.1:5432/widgetplatform"
 
 
-async def _client(app):
-    return AsyncClient(transport=ASGITransport(app=app), base_url="http://test")
-
-
 def _normalized(response):
     # Full header set minus Date (the only genuinely non-deterministic one)
     # plus status and raw body bytes -- used to prove two responses are
@@ -51,19 +43,7 @@ def _normalized(response):
 
 
 @pytest.fixture
-async def _seeded(monkeypatch):
-    # Same per-test cache-clear/schema/db_session plumbing as
-    # test_tenancy_repository.py's own _seeded_tenants fixture.
-    database_url = require_test_database()
-    set_valid_env(monkeypatch, VALID_ENV, DATABASE_URL=database_url)
-    db.get_engine.cache_clear()
-    db._session_factory.cache_clear()
-
-    sync_engine = sa.create_engine(database_url, poolclass=sa.pool.NullPool)
-    Base.metadata.drop_all(sync_engine)
-    Base.metadata.create_all(sync_engine)
-    sync_engine.dispose()
-
+async def _seeded(reset_test_database):
     ids = {
         "tenant_active": uuid.uuid4(),
         "tenant_suspended": uuid.uuid4(),
@@ -151,10 +131,6 @@ async def _seeded(monkeypatch):
 
     yield {"ids": ids, "existing_secret": existing_secret}
 
-    await db.get_engine().dispose()
-    db.get_engine.cache_clear()
-    db._session_factory.cache_clear()
-
 
 # -- No-database tests -------------------------------------------------------
 
@@ -162,7 +138,7 @@ async def _seeded(monkeypatch):
 async def test_unknown_field_in_request_returns_422_before_any_database_access(monkeypatch):
     set_valid_env(monkeypatch, VALID_ENV, DATABASE_URL=_UNROUTABLE_DATABASE_URL)
     app = create_app()
-    async with await _client(app) as client:
+    async with await http_client(app) as client:
         response = await client.post(
             "/api/v1/session",
             json={"site_key": "pk_live_whatever", "admin": True},
@@ -176,7 +152,7 @@ async def test_unknown_field_in_request_returns_422_before_any_database_access(m
 async def test_options_preflight_answers_without_touching_the_database(monkeypatch):
     set_valid_env(monkeypatch, VALID_ENV, DATABASE_URL=_UNROUTABLE_DATABASE_URL)
     app = create_app()
-    async with await _client(app) as client:
+    async with await http_client(app) as client:
         response = await client.options("/api/v1/session", headers={"Origin": ALLOWED_ORIGIN})
     assert response.status_code == 200
     assert response.headers["access-control-allow-origin"] == ALLOWED_ORIGIN
@@ -192,7 +168,7 @@ async def test_all_failure_categories_produce_byte_identical_responses(_seeded):
     # ONE test proving all five failure categories are indistinguishable
     # from each other -- not five separate "it's a 403" tests.
     app = create_app()
-    async with await _client(app) as client:
+    async with await http_client(app) as client:
         missing_origin = await client.post(
             "/api/v1/session", json={"site_key": "pk_live_live_key"}
         )
@@ -231,7 +207,7 @@ async def test_all_failure_categories_produce_byte_identical_responses(_seeded):
 
 async def test_failure_response_carries_vary_origin_but_never_acao(_seeded):
     app = create_app()
-    async with await _client(app) as client:
+    async with await http_client(app) as client:
         response = await client.post(
             "/api/v1/session",
             json={"site_key": "pk_live_does_not_exist"},
@@ -243,7 +219,7 @@ async def test_failure_response_carries_vary_origin_but_never_acao(_seeded):
 
 async def test_fabricated_and_real_but_wrong_site_keys_fail_identically(_seeded):
     app = create_app()
-    async with await _client(app) as client:
+    async with await http_client(app) as client:
         fabricated = await client.post(
             "/api/v1/session",
             json={"site_key": "pk_live_totally_fabricated_abc123"},
@@ -259,7 +235,7 @@ async def test_fabricated_and_real_but_wrong_site_keys_fail_identically(_seeded)
 
 async def test_repeated_origin_header_fails_identically_to_missing_origin(_seeded):
     app = create_app()
-    async with await _client(app) as client:
+    async with await http_client(app) as client:
         repeated = await client.post(
             "/api/v1/session",
             json={"site_key": "pk_live_live_key"},
@@ -271,7 +247,7 @@ async def test_repeated_origin_header_fails_identically_to_missing_origin(_seede
 
 async def test_literal_null_origin_fails_identically_to_a_disallowed_origin(_seeded):
     app = create_app()
-    async with await _client(app) as client:
+    async with await http_client(app) as client:
         null_origin = await client.post(
             "/api/v1/session",
             json={"site_key": "pk_live_live_key"},
@@ -287,7 +263,7 @@ async def test_literal_null_origin_fails_identically_to_a_disallowed_origin(_see
 
 async def test_first_visit_without_secret_creates_visitor_and_returns_new_secret(_seeded):
     app = create_app()
-    async with await _client(app) as client:
+    async with await http_client(app) as client:
         response = await client.post(
             "/api/v1/session",
             json={"site_key": "pk_live_live_key"},
@@ -306,7 +282,7 @@ async def test_first_visit_without_secret_creates_visitor_and_returns_new_secret
 async def test_return_visit_with_correct_secret_returns_no_new_secret(_seeded):
     ids = _seeded["ids"]
     app = create_app()
-    async with await _client(app) as client:
+    async with await http_client(app) as client:
         response = await client.post(
             "/api/v1/session",
             json={"site_key": "pk_live_live_key", "visitor_secret": _seeded["existing_secret"]},
@@ -321,7 +297,7 @@ async def test_return_visit_with_correct_secret_returns_no_new_secret(_seeded):
 
 async def test_wrong_secret_is_treated_as_first_visit_not_a_failure(_seeded):
     app = create_app()
-    async with await _client(app) as client:
+    async with await http_client(app) as client:
         response = await client.post(
             "/api/v1/session",
             json={"site_key": "pk_live_live_key", "visitor_secret": generate_visitor_secret()},
@@ -336,7 +312,7 @@ async def test_malformed_or_wrong_length_secret_is_treated_as_first_visit_not_a_
     _seeded, bad_secret
 ):
     app = create_app()
-    async with await _client(app) as client:
+    async with await http_client(app) as client:
         response = await client.post(
             "/api/v1/session",
             json={"site_key": "pk_live_live_key", "visitor_secret": bad_secret},
@@ -348,7 +324,7 @@ async def test_malformed_or_wrong_length_secret_is_treated_as_first_visit_not_a_
 
 async def test_draft_key_succeeds_from_its_own_allowed_origin_with_test_mode(_seeded):
     app = create_app()
-    async with await _client(app) as client:
+    async with await http_client(app) as client:
         response = await client.post(
             "/api/v1/session",
             json={"site_key": "pk_live_draft_key"},
@@ -360,7 +336,7 @@ async def test_draft_key_succeeds_from_its_own_allowed_origin_with_test_mode(_se
 
 async def test_draft_key_fails_identically_from_a_non_allowed_origin(_seeded):
     app = create_app()
-    async with await _client(app) as client:
+    async with await http_client(app) as client:
         from_disallowed_origin = await client.post(
             "/api/v1/session",
             json={"site_key": "pk_live_draft_key"},
@@ -376,7 +352,7 @@ async def test_draft_key_fails_identically_from_a_non_allowed_origin(_seeded):
 
 async def test_success_response_never_leaks_private_tenant_config_fields(_seeded):
     app = create_app()
-    async with await _client(app) as client:
+    async with await http_client(app) as client:
         response = await client.post(
             "/api/v1/session",
             json={"site_key": "pk_live_live_key"},
@@ -399,7 +375,7 @@ async def test_success_response_never_leaks_private_tenant_config_fields(_seeded
 
 async def test_success_response_echoes_exact_origin_and_carries_vary(_seeded):
     app = create_app()
-    async with await _client(app) as client:
+    async with await http_client(app) as client:
         response = await client.post(
             "/api/v1/session",
             json={"site_key": "pk_live_live_key"},

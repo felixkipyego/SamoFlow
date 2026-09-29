@@ -43,6 +43,8 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 import pytest
+import sqlalchemy as sa
+from httpx import ASGITransport, AsyncClient
 from qdrant_client import AsyncQdrantClient
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -365,6 +367,42 @@ EXPECTED_STATUS_CHECK_CONSTRAINTS = {
 EXPECTED_UNIQUE_INDEXES = {
     "visitors": ("ix_visitors_site_key_id_secret_hash", ["site_key_id", "secret_hash"]),
 }
+
+
+@pytest.fixture
+async def reset_test_database(monkeypatch) -> AsyncIterator[str]:
+    # Shared across test_tenancy_repository.py (1.2.d), test_session.py
+    # (1.4.g) and test_dependencies.py (1.4.h) (duplication check after
+    # 1.4.f/g/h): all three repeated this exact require_test_database() ->
+    # set_valid_env() -> engine cache_clear() -> drop_all/create_all ->
+    # ... -> dispose()/cache_clear() scaffold, each layering its own seed
+    # data on top. This fixture does only the shared part -- a fresh, empty
+    # real-database schema, with DATABASE_URL pointed at it -- and yields
+    # the database_url a caller might still need; each test file's own
+    # fixture depends on this one and adds its own seed rows.
+    database_url = require_test_database()
+    set_valid_env(monkeypatch, VALID_ENV, DATABASE_URL=database_url)
+    db.get_engine.cache_clear()
+    db._session_factory.cache_clear()
+
+    sync_engine = sa.create_engine(database_url, poolclass=sa.pool.NullPool)
+    db.Base.metadata.drop_all(sync_engine)
+    db.Base.metadata.create_all(sync_engine)
+    sync_engine.dispose()
+
+    yield database_url
+
+    await db.get_engine().dispose()
+    db.get_engine.cache_clear()
+    db._session_factory.cache_clear()
+
+
+async def http_client(app) -> AsyncClient:
+    # Shared across test_main.py, test_session.py (1.4.g) and
+    # test_dependencies.py (1.4.h) (duplication check after 1.4.f/g/h): the
+    # same two-line httpx.AsyncClient/ASGITransport construction, repeated
+    # byte-identically in all three.
+    return AsyncClient(transport=ASGITransport(app=app), base_url="http://test")
 
 
 @asynccontextmanager

@@ -2,11 +2,10 @@
 # Tests for Task 1.1.e's app factory (backend/app/main.py) and health
 # route (backend/app/health.py).
 import pytest
-from httpx import ASGITransport, AsyncClient
 
 from app.config import Settings, SettingsError, get_settings
 from app.main import create_app
-from tests.conftest import fresh_import, set_valid_env
+from tests.conftest import fresh_import, http_client, set_valid_env
 
 # 203.0.113.0/24 is TEST-NET-3 (RFC 5737): reserved for documentation, never
 # routable. Used here to prove /health answers without contacting anything.
@@ -21,14 +20,10 @@ VALID_ENV = {
 }
 
 
-async def _client(app):
-    return AsyncClient(transport=ASGITransport(app=app), base_url="http://test")
-
-
 async def test_health_returns_200_with_exact_body(monkeypatch):
     set_valid_env(monkeypatch, VALID_ENV)
     app = create_app()
-    async with await _client(app) as client:
+    async with await http_client(app) as client:
         response = await client.get("/health")
     assert response.status_code == 200
     assert response.headers["content-type"].startswith("application/json")
@@ -38,7 +33,7 @@ async def test_health_returns_200_with_exact_body(monkeypatch):
 async def test_head_health_returns_200_with_empty_body(monkeypatch):
     set_valid_env(monkeypatch, VALID_ENV)
     app = create_app()
-    async with await _client(app) as client:
+    async with await http_client(app) as client:
         response = await client.head("/health")
     assert response.status_code == 200
     assert response.content == b""
@@ -47,7 +42,7 @@ async def test_head_health_returns_200_with_empty_body(monkeypatch):
 async def test_openapi_schema_lists_get_health_but_not_head(monkeypatch):
     set_valid_env(monkeypatch, VALID_ENV)
     app = create_app()
-    async with await _client(app) as client:
+    async with await http_client(app) as client:
         response = await client.get("/openapi.json")
     operations = response.json()["paths"]["/health"]
     assert "get" in operations
@@ -58,7 +53,7 @@ async def test_openapi_schema_lists_get_health_but_not_head(monkeypatch):
 async def test_other_methods_on_health_return_405(monkeypatch, method):
     set_valid_env(monkeypatch, VALID_ENV)
     app = create_app()
-    async with await _client(app) as client:
+    async with await http_client(app) as client:
         response = await getattr(client, method)("/health")
     assert response.status_code == 405
 
@@ -90,7 +85,7 @@ def test_get_settings_is_used_when_none_passed(monkeypatch):
 async def test_docs_disabled_in_production(monkeypatch, path):
     set_valid_env(monkeypatch, VALID_ENV, APP_ENV="production")
     app = create_app()
-    async with await _client(app) as client:
+    async with await http_client(app) as client:
         response = await client.get(path)
     assert response.status_code == 404
 
@@ -99,7 +94,7 @@ async def test_docs_disabled_in_production(monkeypatch, path):
 async def test_docs_enabled_in_development(monkeypatch, path):
     set_valid_env(monkeypatch, VALID_ENV, APP_ENV="development")
     app = create_app()
-    async with await _client(app) as client:
+    async with await http_client(app) as client:
         response = await client.get(path)
     assert response.status_code == 200
 
@@ -107,7 +102,7 @@ async def test_docs_enabled_in_development(monkeypatch, path):
 async def test_unknown_path_returns_404_with_no_stack_trace(monkeypatch):
     set_valid_env(monkeypatch, VALID_ENV)
     app = create_app()
-    async with await _client(app) as client:
+    async with await http_client(app) as client:
         response = await client.get("/this-path-does-not-exist")
     assert response.status_code == 404
     assert "Traceback" not in response.text

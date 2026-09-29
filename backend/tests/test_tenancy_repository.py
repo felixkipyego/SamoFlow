@@ -26,13 +26,11 @@ import uuid
 import pytest
 import sqlalchemy as sa
 
-from app import db
 from app.auth.secrets import generate_visitor_secret, hash_visitor_secret
-from app.db import Base
 from app.plans import models as plans_models  # noqa: F401 (registers "plans" on Base.metadata)
 from app.tenancy.models import Conversation, SiteKey, Tenant, Visitor
 from app.tenancy.repository import TenantScopedRepository, create_tenant, get_site_key_by_key
-from tests.conftest import VALID_ENV, db_session, require_test_database, set_valid_env
+from tests.conftest import db_session
 
 
 def test_repository_requires_a_tenant_id():
@@ -61,24 +59,14 @@ def test_create_tenant_is_not_a_repository_method():
 
 
 @pytest.fixture
-async def _seeded_tenants(monkeypatch):
-    # Same per-test cache-clear/dispose plumbing as test_db.py's
-    # _fresh_engine (pytest-asyncio's function-scoped event loop means a
-    # process-lifetime-singleton engine cannot be reused across tests).
-    database_url = require_test_database()
-    set_valid_env(monkeypatch, VALID_ENV, DATABASE_URL=database_url)
-    db.get_engine.cache_clear()
-    db._session_factory.cache_clear()
-
-    # Schema via Base.metadata directly (not the real Alembic migration):
-    # 1.2.c already proves the migration produces this schema; this
-    # fixture's job is only to get a real Postgres schema in place to prove
-    # the repository's tenant-isolation behavior, so create_all is the
-    # simpler, standard choice here (rule 11).
-    sync_engine = sa.create_engine(database_url, poolclass=sa.pool.NullPool)
-    Base.metadata.drop_all(sync_engine)
-    Base.metadata.create_all(sync_engine)
-    sync_engine.dispose()
+async def _seeded_tenants(reset_test_database):
+    # Schema reset (duplication check after 1.4.f/g/h: moved into the
+    # shared reset_test_database fixture) via Base.metadata directly (not
+    # the real Alembic migration): 1.2.c already proves the migration
+    # produces this schema; this fixture's job is only to get a real
+    # Postgres schema in place to prove the repository's tenant-isolation
+    # behavior, so create_all is the simpler, standard choice here
+    # (rule 11).
 
     # Real secrets/hashes (Task 1.4.e), not the earlier "hash-a"/"hash-b"
     # placeholders: get_visitor_by_secret's own tests need a real secret
@@ -157,10 +145,6 @@ async def _seeded_tenants(monkeypatch):
         await session.commit()
 
     yield ids
-
-    await db.get_engine().dispose()
-    db.get_engine.cache_clear()
-    db._session_factory.cache_clear()
 
 
 async def test_list_site_keys_returns_only_this_tenants_site_key(_seeded_tenants):

@@ -7,10 +7,11 @@
 # giving full HTTP-level control over headers and status codes rather than
 # hand-building a Starlette Request object.
 #
-# All tests need the real database (require_test_database()): even a
-# structurally-invalid request (bad Authorization header) still goes
-# through Depends(get_db_session), and the status-cache tests need real
-# tenant/site-key rows to read on a cache miss.
+# All tests need the real database (via the shared reset_test_database
+# fixture, conftest.py): even a structurally-invalid request (bad
+# Authorization header) still goes through Depends(get_db_session), and
+# the status-cache tests need real tenant/site-key rows to read on a cache
+# miss.
 import uuid
 from datetime import UTC, datetime, timedelta
 
@@ -18,15 +19,13 @@ import jwt
 import pytest
 import sqlalchemy as sa
 from fastapi import Depends, FastAPI
-from httpx import ASGITransport, AsyncClient
 
-from app import db
 from app.auth.dependencies import StatusCache, VerifiedIdentity, get_current_visitor
-from app.auth.tokens import encode_session_token
-from app.db import Base
+from app.auth.tokens import decode_session_token, encode_session_token
+from app.main import create_app
 from app.plans import models as plans_models  # noqa: F401 (registers "plans" on Base.metadata)
 from app.tenancy.models import SiteKey, Tenant, Visitor
-from tests.conftest import VALID_ENV, db_session, require_test_database, set_valid_env
+from tests.conftest import VALID_ENV, db_session, http_client
 
 ORIGIN = "https://widget.example"
 OTHER_ORIGIN = "https://not-the-origin-it-was-issued-for.example"
@@ -58,22 +57,8 @@ def _build_test_app() -> FastAPI:
     return app
 
 
-async def _client(app):
-    return AsyncClient(transport=ASGITransport(app=app), base_url="http://test")
-
-
 @pytest.fixture
-async def _seeded(monkeypatch):
-    database_url = require_test_database()
-    set_valid_env(monkeypatch, VALID_ENV, DATABASE_URL=database_url)
-    db.get_engine.cache_clear()
-    db._session_factory.cache_clear()
-
-    sync_engine = sa.create_engine(database_url, poolclass=sa.pool.NullPool)
-    Base.metadata.drop_all(sync_engine)
-    Base.metadata.create_all(sync_engine)
-    sync_engine.dispose()
-
+async def _seeded(reset_test_database):
     ids = {
         "tenant_active": uuid.uuid4(),
         "site_key_live": uuid.uuid4(),
@@ -142,10 +127,6 @@ async def _seeded(monkeypatch):
 
     yield ids
 
-    await db.get_engine().dispose()
-    db.get_engine.cache_clear()
-    db._session_factory.cache_clear()
-
 
 def _token_for(tenant_id: uuid.UUID, vid: uuid.UUID, origin: str = ORIGIN) -> str:
     return encode_session_token(tenant_id, vid, origin)
@@ -157,7 +138,7 @@ async def _get(app, *, token: str | None = None, origins: list[str] | None = Non
         headers.append(("authorization", f"Bearer {token}"))
     if origins is not None:
         headers.extend(("origin", o) for o in origins)
-    async with await _client(app) as client:
+    async with await http_client(app) as client:
         return await client.get("/whoami", headers=headers)
 
 
@@ -183,7 +164,7 @@ async def test_missing_authorization_header_is_401(_seeded):
 )
 async def test_malformed_authorization_header_is_401(_seeded, bad_header):
     app = _build_test_app()
-    async with await _client(app) as client:
+    async with await http_client(app) as client:
         response = await client.get(
             "/whoami", headers=[("authorization", bad_header), ("origin", ORIGIN)]
         )
@@ -345,9 +326,8 @@ async def test_suspended_tenant_status_is_served_from_cache_until_ttl_elapses(_s
 # -- Cross-tenant cache isolation (4h) ----------------------------------------
 
 
-async def test_cross_tenant_cache_entries_never_collide(_seeded, monkeypatch):
+async def test_cross_tenant_cache_entries_never_collide(_seeded):
     ids = _seeded
-    database_url = require_test_database()
 
     # A second tenant, suspended from the start, with its own site key and
     # visitor -- entirely separate ids from the first tenant's.
@@ -400,7 +380,6 @@ async def test_cross_tenant_cache_entries_never_collide(_seeded, monkeypatch):
     entry_b = cache.get(tenant_b, site_key_b)
     assert entry_a.tenant_status == "active"
     assert entry_b.tenant_status == "suspended"
-    assert database_url  # keeps require_test_database()'s guard exercised
 
 
 # -- Deleted tenant/visitor (4i) ----------------------------------------------
@@ -427,3 +406,39 @@ async def test_token_for_a_tenant_deleted_after_issuance_is_401_not_a_500(_seede
     app = _build_test_app()
     response = await _get(app, token=token, origins=[ORIGIN])
     assert response.status_code == 401
+
+
+# -- End-to-end integration with the real session endpoint (C1) -------------
+
+
+async def test_a_real_session_issued_token_is_accepted_by_get_current_visitor(_seeded):
+    # C1 (duplication check after 1.4.f/g/h): a genuine end-to-end proof,
+    # not each side tested only against hand-built or directly
+    # encode_session_token()-built tokens -- a real call to
+    # POST /api/v1/session (1.4.g, through the actual create_app()-built
+    # app), taking the session_token it actually returns, and using that
+    # exact token against get_current_visitor (1.4.h) through a real
+    # protected route.
+    ids = _seeded
+    session_app = create_app()
+    async with await http_client(session_app) as client:
+        session_response = await client.post(
+            "/api/v1/session",
+            json={"site_key": "pk_live_live_key"},
+            headers={"Origin": ORIGIN},
+        )
+    assert session_response.status_code == 200
+    token = session_response.json()["session_token"]
+
+    # Independently verified expectation (via decode_session_token
+    # directly, not via get_current_visitor) -- the assertions below
+    # confirm get_current_visitor agrees with this, not just with itself.
+    expected_claims = decode_session_token(token)
+
+    whoami_app = _build_test_app()
+    response = await _get(whoami_app, token=token, origins=[ORIGIN])
+    assert response.status_code == 200
+    body = response.json()
+    assert body["tenant_id"] == str(ids["tenant_active"]) == str(expected_claims.tenant_id)
+    assert body["vid"] == str(expected_claims.vid)
+    assert body["org"] == ORIGIN == expected_claims.origin
