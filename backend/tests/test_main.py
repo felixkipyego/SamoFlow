@@ -265,6 +265,49 @@ async def test_lifespan_disposes_engine_and_closes_qdrant_client_that_were_actua
     _clear_engine_and_qdrant_caches()
 
 
+async def test_lifespan_second_cycle_gets_fresh_engine_and_qdrant_client(monkeypatch):
+    # C1 (duplication check after 1.4.f/g/h/k): two full startup/shutdown
+    # cycles in the same process. Without clearing both caches on successful
+    # disposal, the second cycle would hand back the first cycle's disposed
+    # engine (harmless, SQLAlchemy allows reuse) and its permanently-closed
+    # Qdrant client (broken -- confirmed live, any call after close() raises
+    # "Cannot send a request, as the client has been closed"). Both
+    # resources are touched in each cycle -- Postgres via a real /ready
+    # request, Qdrant via a direct get_qdrant_client() call, the same
+    # substitute test (b) above already uses -- and the two cycles' objects
+    # are asserted to be genuinely different, not merely both non-raising.
+    database_url = require_test_database()
+    set_valid_env(
+        monkeypatch, VALID_ENV, DATABASE_URL=database_url, QDRANT_URL="http://127.0.0.1:1"
+    )
+    _clear_engine_and_qdrant_caches()
+
+    app = create_app()
+
+    async with app.router.lifespan_context(app):
+        async with await http_client(app) as client:
+            response = await client.get("/ready")
+        assert response.status_code == 200
+        first_engine = db.get_engine()
+        first_qdrant_client = qdrant.get_qdrant_client()
+
+    assert first_qdrant_client._client.closed is True
+
+    async with app.router.lifespan_context(app):
+        async with await http_client(app) as client:
+            response = await client.get("/ready")
+        assert response.status_code == 200
+        second_engine = db.get_engine()
+        second_qdrant_client = qdrant.get_qdrant_client()
+        assert second_qdrant_client._client.closed is False
+
+    assert second_engine is not first_engine
+    assert second_qdrant_client is not first_qdrant_client
+    assert second_qdrant_client._client.closed is True
+
+    _clear_engine_and_qdrant_caches()
+
+
 async def test_lifespan_engine_disposal_failure_does_not_prevent_qdrant_closure(monkeypatch):
     # (c) The engine's own dispose() is made to raise -- the Qdrant client
     # must still be closed, and shutdown itself must still complete without
