@@ -32,6 +32,9 @@
 # -> unique name -> try/finally(delete-if-exists, close) scaffold repeated
 # at ~15 call sites across test_qdrant_collection.py and
 # test_qdrant_isolation.py, mirroring db_session()'s own shape below).
+# Duplication check after 1.5.a-e adds _FakeClock (byte-identical in
+# test_ratelimit.py, test_dependencies.py and test_session.py -- the same
+# ~10-line injectable-clock test double, three times).
 import ast
 import importlib
 import os
@@ -71,6 +74,24 @@ OPTIONAL_VARS = [
     name.upper() for name, field in Settings.model_fields.items() if not field.is_required()
 ]
 ALL_SETTINGS_VARS = REQUIRED_VARS + OPTIONAL_VARS
+
+
+class _FakeClock:
+    # Injectable time source (Task 1.4.h design point 3): starts at an
+    # arbitrary fixed point and only ever moves when a test tells it to --
+    # never real time, so TTL/window expiry is deterministic, not
+    # timing-flaky. Shared by test_ratelimit.py (1.5.a), test_dependencies.py
+    # (1.4.h) and test_session.py (1.5.c) -- duplication check after 1.5.a-e
+    # confirmed all three were byte-identical (same default start=1000.0,
+    # same __call__/advance semantics) before moving this here.
+    def __init__(self, start: float = 1_000.0) -> None:
+        self._now = start
+
+    def __call__(self) -> float:
+        return self._now
+
+    def advance(self, seconds: float) -> None:
+        self._now += seconds
 
 
 def is_comment_or_blank(line: str) -> bool:

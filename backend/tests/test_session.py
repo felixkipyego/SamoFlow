@@ -18,6 +18,7 @@ import uuid
 import pytest
 from httpx import ASGITransport, AsyncClient
 
+from app.auth.routes import _site_key_rate_limit_key
 from app.auth.secrets import generate_visitor_secret, hash_visitor_secret
 from app.auth.tokens import decode_session_token
 from app.config import get_settings
@@ -25,7 +26,7 @@ from app.main import create_app
 from app.plans import models as plans_models  # noqa: F401 (registers "plans" on Base.metadata)
 from app.ratelimit import RateLimiter
 from app.tenancy.models import SiteKey, Tenant, Visitor
-from tests.conftest import VALID_ENV, db_session, http_client, set_valid_env
+from tests.conftest import VALID_ENV, _FakeClock, db_session, http_client, set_valid_env
 
 ALLOWED_ORIGIN = "https://widget.example"
 DRAFT_ALLOWED_ORIGIN = "https://draft-widget.example"
@@ -389,23 +390,22 @@ async def test_success_response_echoes_exact_origin_and_carries_vary(_seeded):
 
 
 # -- Task 1.5.c: rate limiting -------------------------------------------
-#
-# _FakeClock below is a third near-identical copy of the same tiny
-# injectable-clock helper already in test_ratelimit.py (1.5.a) and
-# test_dependencies.py (1.4.h) -- worth centralizing (e.g. into
-# conftest.py) at the now-overdue duplication check (PROJECT_SPEC.md §8),
-# not fixed here since that is a separate, already-flagged task.
 
 
-class _FakeClock:
-    def __init__(self, start: float = 1_000.0) -> None:
-        self._now = start
-
-    def __call__(self) -> float:
-        return self._now
-
-    def advance(self, seconds: float) -> None:
-        self._now += seconds
+def _create_app_with_env_override(monkeypatch, **overrides):
+    # Duplication check after 1.5.a-e: the repeated
+    # monkeypatch.setenv(...) -> get_settings.cache_clear() -> create_app()
+    # sequence, byte-identical (modulo which env vars) at 5 call sites
+    # below. get_settings.cache_clear() is needed because _seeded's own
+    # db_session() call (seeding rows before the test body runs) already
+    # triggered a get_settings() read via get_engine(), caching a Settings
+    # instance BEFORE this override could take effect -- the same
+    # mechanism test_config.py's own
+    # test_get_settings_is_cached_and_resets_after_cache_clear established.
+    for key, value in overrides.items():
+        monkeypatch.setenv(key, value)
+    get_settings.cache_clear()
+    return create_app()
 
 
 def _client_from_ip(app, ip: str) -> AsyncClient:
@@ -423,14 +423,7 @@ def _client_from_ip(app, ip: str) -> AsyncClient:
 async def test_eleventh_request_from_one_site_key_within_the_window_is_429(_seeded, monkeypatch):
     # A low configured limit, not 11 real requests against the production
     # default of 10 -- simpler and clearer, same proof either way.
-    monkeypatch.setenv("SESSION_RATE_LIMIT_PER_SITE_KEY", "3")
-    # _seeded already forced a get_settings() read (via db_session()'s own
-    # get_engine() call, during fixture setup, before this env override) --
-    # clear the cache so create_app() below reads the override, not the
-    # stale cached Settings instance from before it (established pattern:
-    # test_config.py's test_get_settings_is_cached_and_resets_after_cache_clear).
-    get_settings.cache_clear()
-    app = create_app()
+    app = _create_app_with_env_override(monkeypatch, SESSION_RATE_LIMIT_PER_SITE_KEY="3")
     async with await http_client(app) as client:
         for _ in range(3):
             response = await client.post(
@@ -459,9 +452,7 @@ async def test_eleventh_request_from_one_site_key_within_the_window_is_429(_seed
 async def test_different_ip_or_site_key_pair_is_unaffected_by_another_pairs_limit(
     _seeded, monkeypatch
 ):
-    monkeypatch.setenv("SESSION_RATE_LIMIT_PER_SITE_KEY", "1")
-    get_settings.cache_clear()  # see the sibling test above for why
-    app = create_app()
+    app = _create_app_with_env_override(monkeypatch, SESSION_RATE_LIMIT_PER_SITE_KEY="1")
     async with await http_client(app) as client:
         first = await client.post(
             "/api/v1/session",
@@ -500,9 +491,7 @@ async def test_per_ip_limiter_trips_across_many_different_site_keys(_seeded, mon
     # docs/SPEC.md §16: "many new visitors from one IP hit the IP cap" --
     # four DIFFERENT site keys, each hit exactly once (so no individual
     # site_key's own limit is anywhere near tripped), from the same IP.
-    monkeypatch.setenv("SESSION_RATE_LIMIT_PER_IP", "3")
-    get_settings.cache_clear()  # see test_eleventh_request_... above for why
-    app = create_app()
+    app = _create_app_with_env_override(monkeypatch, SESSION_RATE_LIMIT_PER_IP="3")
     site_keys = [
         "pk_live_live_key",
         "pk_live_draft_key",
@@ -523,9 +512,7 @@ async def test_per_ip_limiter_trips_across_many_different_site_keys(_seeded, mon
 async def test_per_ip_limiter_checked_first_and_can_trip_before_any_site_key_state_exists(
     _seeded, monkeypatch
 ):
-    monkeypatch.setenv("SESSION_RATE_LIMIT_PER_IP", "1")
-    get_settings.cache_clear()  # see test_eleventh_request_... above for why
-    app = create_app()
+    app = _create_app_with_env_override(monkeypatch, SESSION_RATE_LIMIT_PER_IP="1")
     async with await http_client(app) as client:
         first = await client.post(
             "/api/v1/session",
@@ -583,9 +570,7 @@ async def test_options_preflight_is_never_rate_limited(_seeded, monkeypatch):
     # is untouched by 1.5.c -- it has no rate-limit-checking code at all
     # (see app/auth/routes.py's session_preflight), so it cannot be blocked
     # regardless of how exhausted either limiter is.
-    monkeypatch.setenv("SESSION_RATE_LIMIT_PER_IP", "1")
-    get_settings.cache_clear()  # see test_eleventh_request_... above for why
-    app = create_app()
+    app = _create_app_with_env_override(monkeypatch, SESSION_RATE_LIMIT_PER_IP="1")
     async with await http_client(app) as client:
         await client.post(
             "/api/v1/session",
@@ -622,3 +607,25 @@ async def test_a_successful_non_rate_limited_response_is_unaffected_by_1_5_c(_se
     assert response.headers["access-control-allow-origin"] == ALLOWED_ORIGIN
     assert response.headers["vary"] == "Origin"
     assert "retry-after" not in response.headers
+
+
+def test_site_key_rate_limit_key_encoding_prevents_the_collision_it_was_designed_for():
+    # Duplication check after 1.5.a-e (finding C1): the exact colliding
+    # pair named in _site_key_rate_limit_key's own design comment -- two
+    # DIFFERENT (ip, site_key) pairs that a naive f"{ip}:{site_key}"
+    # concatenation would fold onto the same combined string, since
+    # site_key is fully client-controlled and can itself contain a colon.
+    pair_a = ("1.2.3.4", "5:x")
+    pair_b = ("1.2.3.4:5", "x")
+
+    # First, prove this is a REAL collision under naive concatenation, not
+    # a hypothetical one -- if this assertion ever failed, the rest of this
+    # test would no longer be proving anything.
+    naive_a = f"{pair_a[0]}:{pair_a[1]}"
+    naive_b = f"{pair_b[0]}:{pair_b[1]}"
+    assert naive_a == naive_b
+
+    # The real, length-prefixed encoding must NOT collide on this same pair.
+    real_a = _site_key_rate_limit_key(*pair_a)
+    real_b = _site_key_rate_limit_key(*pair_b)
+    assert real_a != real_b

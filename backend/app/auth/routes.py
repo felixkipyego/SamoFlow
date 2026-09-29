@@ -144,28 +144,38 @@ def _site_key_rate_limit_key(ip: str, site_key: str) -> str:
     return f"{len(ip)}:{ip}:{site_key}"
 
 
-def _get_per_ip_limiter(request: Request) -> RateLimiter:
-    limiter = getattr(request.app.state, "per_ip_limiter", None)
+def _get_or_create_limiter(
+    request: Request, attr: str, limit: int, window_seconds: float
+) -> RateLimiter:
+    # Duplication check after 1.5.a-e: the shared getattr-fallback-
+    # construct-store shape both accessors below need, extracted once they
+    # turned out to differ only in the attribute name and which two
+    # Settings fields feed the constructor.
+    limiter = getattr(request.app.state, attr, None)
     if limiter is None:
-        settings = request.app.state.settings
-        limiter = RateLimiter(
-            limit=settings.session_rate_limit_per_ip,
-            window_seconds=settings.session_rate_limit_per_ip_window_seconds,
-        )
-        request.app.state.per_ip_limiter = limiter
+        limiter = RateLimiter(limit=limit, window_seconds=window_seconds)
+        setattr(request.app.state, attr, limiter)
     return limiter
+
+
+def _get_per_ip_limiter(request: Request) -> RateLimiter:
+    settings = request.app.state.settings
+    return _get_or_create_limiter(
+        request,
+        "per_ip_limiter",
+        settings.session_rate_limit_per_ip,
+        settings.session_rate_limit_per_ip_window_seconds,
+    )
 
 
 def _get_site_key_limiter(request: Request) -> RateLimiter:
-    limiter = getattr(request.app.state, "site_key_limiter", None)
-    if limiter is None:
-        settings = request.app.state.settings
-        limiter = RateLimiter(
-            limit=settings.session_rate_limit_per_site_key,
-            window_seconds=settings.session_rate_limit_per_site_key_window_seconds,
-        )
-        request.app.state.site_key_limiter = limiter
-    return limiter
+    settings = request.app.state.settings
+    return _get_or_create_limiter(
+        request,
+        "site_key_limiter",
+        settings.session_rate_limit_per_site_key,
+        settings.session_rate_limit_per_site_key_window_seconds,
+    )
 
 
 @router.options("/session", include_in_schema=False)

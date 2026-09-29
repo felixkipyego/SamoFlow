@@ -1,21 +1,12 @@
 # backend/tests/test_ratelimit.py
 # Task 1.5.a: RateLimiter is pure Python (no FastAPI, no Settings, no
 # database), so every test here runs fully offline -- no test database, no
-# network, no real sleeps. Time is driven entirely by _FakeClock, the same
-# injectable-clock pattern already used for StatusCache (Task 1.4.h,
-# test_dependencies.py).
+# network, no real sleeps. Time is driven entirely by _FakeClock (moved to
+# tests/conftest.py at the duplication check after 1.5.a-e -- it was
+# byte-identical to test_dependencies.py's own copy, the same
+# injectable-clock pattern already used for StatusCache, Task 1.4.h).
 from app.ratelimit import RateLimiter
-
-
-class _FakeClock:
-    def __init__(self, start: float = 1_000.0) -> None:
-        self._now = start
-
-    def __call__(self) -> float:
-        return self._now
-
-    def advance(self, seconds: float) -> None:
-        self._now += seconds
+from tests.conftest import _FakeClock
 
 
 def test_exactly_limit_requests_allowed_then_the_next_is_rejected() -> None:
@@ -153,3 +144,24 @@ def test_get_retry_after_is_a_real_countdown_not_the_static_window() -> None:
     # really does track the remaining time, not a fixed number.
     clock.advance(10.0)  # now t=1030.0, 30s left
     assert limiter.get_retry_after("k") == 30.0
+
+
+def test_get_retry_after_is_independent_across_two_simultaneously_blocked_keys() -> None:
+    # Duplication check after 1.5.a-e (finding C2): not just that counters
+    # are isolated per key (already proven by
+    # test_two_keys_never_share_a_counter above), but that get_retry_after
+    # itself returns a DIFFERENT, correctly-computed value per key when
+    # both are blocked at the same time with different remaining windows.
+    clock = _FakeClock()
+    limiter = RateLimiter(limit=1, window_seconds=60, clock=clock)
+
+    assert limiter.check("a") is True  # recorded at t=1000.0
+    clock.advance(10.0)  # now t=1010.0
+    assert limiter.check("b") is True  # recorded at t=1010.0
+
+    clock.advance(20.0)  # now t=1030.0 -- both keys now blocked
+    assert limiter.check("a") is False  # "a" recorded 30s ago
+    assert limiter.check("b") is False  # "b" recorded 20s ago
+
+    assert limiter.get_retry_after("a") == 30.0  # 60 - 30
+    assert limiter.get_retry_after("b") == 40.0  # 60 - 20

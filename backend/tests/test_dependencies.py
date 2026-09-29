@@ -36,24 +36,10 @@ from app.main import create_app
 from app.plans import models as plans_models  # noqa: F401 (registers "plans" on Base.metadata)
 from app.tenancy.models import SiteKey, Tenant, Visitor
 from app.tenancy.repository import TenantScopedRepository
-from tests.conftest import VALID_ENV, db_session, http_client
+from tests.conftest import VALID_ENV, _FakeClock, db_session, http_client
 
 ORIGIN = "https://widget.example"
 OTHER_ORIGIN = "https://not-the-origin-it-was-issued-for.example"
-
-
-class _FakeClock:
-    # Injectable time source (Task 1.4.h design point 3): starts at an
-    # arbitrary fixed point and only ever moves when a test tells it to --
-    # never real time, so TTL expiry is deterministic, not timing-flaky.
-    def __init__(self, start: float = 1_000.0) -> None:
-        self._now = start
-
-    def __call__(self) -> float:
-        return self._now
-
-    def advance(self, seconds: float) -> None:
-        self._now += seconds
 
 
 class _ForgeableTenantBody(BaseModel):
