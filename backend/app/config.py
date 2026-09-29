@@ -63,6 +63,17 @@ class Settings(BaseSettings):
     jwt_signing_key_previous: SecretStr | None = Field(default=None, min_length=32)
     api_host: str = Field(min_length=1)
     api_port: int = Field(ge=1, le=65535)
+    # Task 1.5.b: two independent rate-limit policies for
+    # POST /api/v1/session (docs/SPEC.md §9), each a (limit, window) pair.
+    # Not secrets -- ordinary configurable integers, no SecretStr, no
+    # guarded accessor, no allow-list. gt=0 is pydantic's own built-in
+    # constraint (rule 11, same mechanism api_port already uses above),
+    # not a hand-rolled positivity check -- it rejects 0 and negative
+    # values for all four fields with no custom validator needed.
+    session_rate_limit_per_site_key: int = Field(default=10, gt=0)
+    session_rate_limit_per_site_key_window_seconds: float = Field(default=60, gt=0)
+    session_rate_limit_per_ip: int = Field(default=30, gt=0)
+    session_rate_limit_per_ip_window_seconds: float = Field(default=60, gt=0)
 
     @field_validator("database_url")
     @classmethod

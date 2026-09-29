@@ -27,6 +27,11 @@ def test_valid_environment_loads_with_correct_types_and_values(monkeypatch):
     assert settings.api_host == "127.0.0.1"
     assert settings.api_port == 8000
     assert isinstance(settings.api_port, int)
+    assert settings.session_rate_limit_per_site_key == 10
+    assert isinstance(settings.session_rate_limit_per_site_key, int)
+    assert settings.session_rate_limit_per_site_key_window_seconds == 60
+    assert settings.session_rate_limit_per_ip == 30
+    assert settings.session_rate_limit_per_ip_window_seconds == 60
 
 
 @pytest.mark.parametrize("missing", REQUIRED_VARS)
@@ -63,6 +68,15 @@ def test_missing_required_variable_raises_and_names_field(monkeypatch, missing):
         {"API_PORT": "0"},
         {"API_PORT": "70000"},
         {"API_HOST": ""},
+        # Task 1.5.b: non-integer value for a limit field, non-numeric
+        # value for a window field -- pydantic's own type coercion, no
+        # custom parsing.
+        {"SESSION_RATE_LIMIT_PER_SITE_KEY": "10.5"},
+        {"SESSION_RATE_LIMIT_PER_SITE_KEY": "abc"},
+        {"SESSION_RATE_LIMIT_PER_SITE_KEY_WINDOW_SECONDS": "abc"},
+        {"SESSION_RATE_LIMIT_PER_IP": "10.5"},
+        {"SESSION_RATE_LIMIT_PER_IP": "abc"},
+        {"SESSION_RATE_LIMIT_PER_IP_WINDOW_SECONDS": "abc"},
     ],
 )
 def test_malformed_value_rejected(monkeypatch, overrides):
@@ -265,3 +279,32 @@ def test_database_url_without_a_host_rejected(monkeypatch):
     with pytest.raises(ValidationError) as exc_info:
         Settings()
     assert TEST_PASSWORD not in str(exc_info.value)
+
+
+# Task 1.5.b: the four rate-limit Settings fields, each an env var name
+# derived the same way REQUIRED_VARS/ALL_SETTINGS_VARS are (field_name.upper()).
+RATE_LIMIT_FIELDS = (
+    ("SESSION_RATE_LIMIT_PER_SITE_KEY", "session_rate_limit_per_site_key"),
+    (
+        "SESSION_RATE_LIMIT_PER_SITE_KEY_WINDOW_SECONDS",
+        "session_rate_limit_per_site_key_window_seconds",
+    ),
+    ("SESSION_RATE_LIMIT_PER_IP", "session_rate_limit_per_ip"),
+    ("SESSION_RATE_LIMIT_PER_IP_WINDOW_SECONDS", "session_rate_limit_per_ip_window_seconds"),
+)
+
+
+@pytest.mark.parametrize(("env_var", "attr"), RATE_LIMIT_FIELDS)
+def test_rate_limit_field_overridable_via_its_own_env_var(monkeypatch, env_var, attr):
+    set_valid_env(monkeypatch, VALID_ENV, **{env_var: "7"})
+    settings = Settings()
+    assert getattr(settings, attr) == 7
+
+
+@pytest.mark.parametrize(("env_var", "attr"), RATE_LIMIT_FIELDS)
+@pytest.mark.parametrize("bad_value", ["0", "-1"])
+def test_rate_limit_field_rejects_zero_and_negative(monkeypatch, env_var, attr, bad_value):
+    set_valid_env(monkeypatch, VALID_ENV, **{env_var: bad_value})
+    with pytest.raises(ValidationError) as exc_info:
+        Settings()
+    assert env_var.lower() in str(exc_info.value)
