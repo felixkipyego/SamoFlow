@@ -30,9 +30,10 @@ SUBPACKAGES = [
 # app.tenancy.repository is no longer a raising stub as of Task 1.2.d (its
 # TenantScopedRepository is real, tested separately in
 # test_tenancy_repository.py) -- removed from this list, not just left to
-# fail here.
+# fail here. app.auth.routes is no longer a raising stub as of Task 1.4.g
+# (POST /api/v1/session is real, tested separately in test_session.py) --
+# removed the same way.
 STUB_ENTRY_POINTS = [
-    ("app.auth.routes", "create_session"),
     ("app.plans.service", "get_plan_limits"),
     ("app.chat.routes", "stream_chat_response"),
     ("app.agent.graph", "build_graph"),

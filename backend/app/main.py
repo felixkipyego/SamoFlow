@@ -13,6 +13,7 @@ from importlib.metadata import version
 
 from fastapi import FastAPI
 
+from app.auth.routes import router as auth_router
 from app.config import Settings, get_settings
 from app.health import router as health_router
 
@@ -36,4 +37,5 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     )
     app.state.settings = settings
     app.include_router(health_router)
+    app.include_router(auth_router)
     return app
