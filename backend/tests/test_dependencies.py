@@ -5,7 +5,11 @@
 # throwaway FastAPI app defined here -- the same httpx.AsyncClient +
 # ASGITransport pattern test_main.py/test_session.py already established,
 # giving full HTTP-level control over headers and status codes rather than
-# hand-building a Starlette Request object.
+# hand-building a Starlette Request object. Task 1.4.i adds
+# get_tenant_repository()'s own tests, through a second throwaway route on
+# the same app (/whoami-tenant) that deliberately accepts a tenant_id-named
+# query parameter and body field a hostile caller might try, to prove the
+# constructed repository is never scoped by anything but the JWT.
 #
 # All tests need the real database (via the shared reset_test_database
 # fixture, conftest.py): even a structurally-invalid request (bad
@@ -19,12 +23,19 @@ import jwt
 import pytest
 import sqlalchemy as sa
 from fastapi import Depends, FastAPI
+from pydantic import BaseModel
 
-from app.auth.dependencies import StatusCache, VerifiedIdentity, get_current_visitor
+from app.auth.dependencies import (
+    StatusCache,
+    VerifiedIdentity,
+    get_current_visitor,
+    get_tenant_repository,
+)
 from app.auth.tokens import decode_session_token, encode_session_token
 from app.main import create_app
 from app.plans import models as plans_models  # noqa: F401 (registers "plans" on Base.metadata)
 from app.tenancy.models import SiteKey, Tenant, Visitor
+from app.tenancy.repository import TenantScopedRepository
 from tests.conftest import VALID_ENV, db_session, http_client
 
 ORIGIN = "https://widget.example"
@@ -45,6 +56,14 @@ class _FakeClock:
         self._now += seconds
 
 
+class _ForgeableTenantBody(BaseModel):
+    # Deliberately accepts a tenant_id-named field, the same as the query
+    # parameter below -- a plausible shape a real (buggy) endpoint might
+    # have, so the hostile-caller test proves get_tenant_repository()
+    # ignores it, not merely that this throwaway route never reads it.
+    tenant_id: str | None = None
+
+
 def _build_test_app() -> FastAPI:
     app = FastAPI()
 
@@ -53,6 +72,19 @@ def _build_test_app() -> FastAPI:
         identity: VerifiedIdentity = Depends(get_current_visitor),  # noqa: B008
     ):
         return {"tenant_id": str(identity.tenant_id), "vid": str(identity.vid), "org": identity.org}
+
+    @app.post("/whoami-tenant")
+    async def whoami_tenant(
+        body: _ForgeableTenantBody,
+        tenant_id: str | None = None,
+        repo: TenantScopedRepository = Depends(get_tenant_repository),  # noqa: B008
+    ):
+        # Reveals which tenant the constructed repository is actually
+        # scoped to, via an existing read method (1.2.d) -- never a new
+        # one (this task only wires TenantScopedRepository to a request,
+        # per its own instruction not to touch the class itself).
+        tenant = await repo.get_tenant()
+        return {"tenant_id": str(tenant.id)}
 
     return app
 
@@ -140,6 +172,28 @@ async def _get(app, *, token: str | None = None, origins: list[str] | None = Non
         headers.extend(("origin", o) for o in origins)
     async with await http_client(app) as client:
         return await client.get("/whoami", headers=headers)
+
+
+async def _post_whoami_tenant(
+    app,
+    *,
+    token: str | None = None,
+    origins: list[str] | None = None,
+    json_body: dict | None = None,
+    query: dict | None = None,
+    extra_headers: dict | None = None,
+):
+    headers: list[tuple[str, str]] = []
+    if token is not None:
+        headers.append(("authorization", f"Bearer {token}"))
+    if origins is not None:
+        headers.extend(("origin", o) for o in origins)
+    if extra_headers:
+        headers.extend(extra_headers.items())
+    async with await http_client(app) as client:
+        return await client.post(
+            "/whoami-tenant", json=json_body or {}, params=query or {}, headers=headers
+        )
 
 
 # -- Authorization header parsing (4a/4b) ------------------------------------
@@ -442,3 +496,59 @@ async def test_a_real_session_issued_token_is_accepted_by_get_current_visitor(_s
     assert body["tenant_id"] == str(ids["tenant_active"]) == str(expected_claims.tenant_id)
     assert body["vid"] == str(expected_claims.vid)
     assert body["org"] == ORIGIN == expected_claims.origin
+
+
+# -- get_tenant_repository (Task 1.4.i) --------------------------------------
+
+
+async def test_get_tenant_repository_ignores_a_forged_tenant_id_in_every_injection_point(_seeded):
+    # Mirrors 1.2.e's own hostile-caller test, but through the full
+    # HTTP/dependency-injection stack, not a direct Python function call: a
+    # real request carries a valid JWT for tenant A, with tenant B's real
+    # id (not a random, nonexistent UUID) forged into a query parameter, a
+    # request body field, AND a custom header simultaneously -- all three
+    # plausible injection points at once. get_tenant_repository() takes no
+    # Request parameter at all, so none of the three can reach it; the
+    # constructed repository must be scoped to A regardless.
+    ids = _seeded
+    tenant_b = uuid.uuid4()
+    async with db_session() as session:
+        session.add(Tenant(id=tenant_b, name="Tenant B", status="active"))
+        await session.commit()
+
+    token_a = _token_for(ids["tenant_active"], ids["visitor_live"], origin=ORIGIN)
+    app = _build_test_app()
+    response = await _post_whoami_tenant(
+        app,
+        token=token_a,
+        origins=[ORIGIN],
+        json_body={"tenant_id": str(tenant_b)},
+        query={"tenant_id": str(tenant_b)},
+        extra_headers={"X-Tenant-Id": str(tenant_b)},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["tenant_id"] == str(ids["tenant_active"])
+    assert response.json()["tenant_id"] != str(tenant_b)
+
+
+async def test_get_tenant_repository_propagates_get_current_visitors_401(_seeded):
+    # Proves the composition: a failure in get_current_visitor (reusing
+    # 1.4.h's own expired-token case) propagates cleanly through
+    # get_tenant_repository as the same 401 -- the repository is never
+    # constructed with some default/empty identity when verification
+    # fails, since FastAPI never calls a dependency once one of its own
+    # sub-dependencies has raised.
+    ids = _seeded
+    payload = {
+        "iss": "widgetplatform",
+        "aud": "widget-api",
+        "sub": str(ids["visitor_live"]),
+        "tid": str(ids["tenant_active"]),
+        "org": ORIGIN,
+        "exp": datetime.now(UTC) - timedelta(minutes=10),
+    }
+    expired_token = jwt.encode(payload, VALID_ENV["JWT_SIGNING_KEY"], algorithm="HS256")
+    app = _build_test_app()
+    response = await _post_whoami_tenant(app, token=expired_token, origins=[ORIGIN], json_body={})
+    assert response.status_code == 401

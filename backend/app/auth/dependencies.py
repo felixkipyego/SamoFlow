@@ -2,7 +2,10 @@
 # Task 1.4.h: the verified-identity dependency (docs/SPEC.md §4.3's "Origin
 # binding" and "Kill switch" rules). Every authenticated endpoint from here
 # forward depends on this module -- it is the ONLY place a request's caller
-# identity is established from a bearer token.
+# identity is established from a bearer token. Task 1.4.i adds
+# get_tenant_repository(), the final wiring step: the ONLY place a real
+# request ever constructs TenantScopedRepository, built on top of
+# get_current_visitor() rather than anything from the request itself.
 #
 # VerifiedIdentity is immutable and carries exactly (tenant_id, vid, org) --
 # nothing else. Downstream code must never read tenant_id/vid/site info from
@@ -40,6 +43,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.auth.tokens import InvalidSessionToken, decode_session_token
 from app.db import get_db_session
 from app.tenancy.models import SiteKey, Tenant, Visitor
+from app.tenancy.repository import TenantScopedRepository
 
 _FAILURE_DETAIL = "session could not be verified"
 _CACHE_TTL_SECONDS = 60.0
@@ -195,3 +199,27 @@ async def get_current_visitor(
         raise _unauthorized()
 
     return VerifiedIdentity(tenant_id=claims.tenant_id, vid=claims.vid, org=claims.origin)
+
+
+def get_tenant_repository(
+    identity: VerifiedIdentity = Depends(get_current_visitor),  # noqa: B008
+    session: AsyncSession = Depends(get_db_session),  # noqa: B008
+) -> TenantScopedRepository:
+    # Task 1.4.i: the ONLY place a real request ever constructs
+    # TenantScopedRepository -- confirmed live by grepping backend/app for
+    # every direct `TenantScopedRepository(` call site: the sole other one
+    # is app/auth/routes.py's own POST /api/v1/session handler (1.4.g),
+    # which is a deliberate, structurally necessary exception -- session
+    # creation is the one request that has no JWT yet to verify (that's
+    # the whole point of the endpoint), so its tenant_id comes from the
+    # looked-up site key instead of a VerifiedIdentity. Every OTHER,
+    # post-authentication endpoint depends on THIS function.
+    #
+    # tenant_id comes from identity.tenant_id alone -- the dependency takes
+    # no Request parameter at all, so it structurally cannot read a query
+    # parameter, request body field, or header, however a caller might try
+    # to name one. This is what makes the hostile-caller property
+    # (test_dependencies.py) hold regardless of which injection point a
+    # forged tenant_id is placed in: there is no code path here that could
+    # ever consult one.
+    return TenantScopedRepository(tenant_id=identity.tenant_id, session=session)
