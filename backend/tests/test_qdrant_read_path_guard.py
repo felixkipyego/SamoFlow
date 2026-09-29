@@ -42,7 +42,14 @@ APP_DIR = BACKEND_DIR / "app"
 # build_qdrant_client()). Review it by hand. (Step 2.5's ingestion writer
 # will be added here deliberately -- see the open marker in
 # PROJECT_SPEC.md, owned by Step 2.5, that it must use write methods only.)
-CLIENT_ACCESS_ALLOWLIST: frozenset[str] = frozenset({"app/qdrant.py", "app/retrieval/service.py"})
+# Task 1.4.k: app/main.py added -- the lifespan hook calls
+# get_qdrant_client().close() during shutdown, a CONFIG method (see
+# CONFIG_METHODS below), not a READ, so app/main.py does NOT also need
+# READ_ALLOWLIST membership -- the same shape app/qdrant.py itself already
+# has (client access without read access).
+CLIENT_ACCESS_ALLOWLIST: frozenset[str] = frozenset(
+    {"app/qdrant.py", "app/retrieval/service.py", "app/main.py"}
+)
 
 # NOTE: adding a file here is a deliberate decision -- it means that file may
 # call a method classified as READ below. Review it by hand.

@@ -2,16 +2,21 @@
 # Tests for Task 1.1.e's app factory (backend/app/main.py) and health
 # route (backend/app/health.py). Task 1.4.j adds /ready's own tests here
 # too, right next to /health's -- one small module, not two test files.
+# Task 1.4.k adds the lifespan hook's own tests: driven via
+# app.router.lifespan_context(app), the standard Starlette mechanism for
+# manually triggering startup/shutdown outside a real ASGI server run
+# (confirmed live: httpx's installed ASGITransport has no lifespan= option
+# of its own, so this is the correct way, not an assumption).
 import time
 
 import pytest
 
-from app import db
+from app import db, qdrant
 from app.config import Settings, SettingsError, get_settings
 from app.main import create_app
 from app.plans import models as plans_models  # noqa: F401 (registers "plans" on Base.metadata)
 from app.tenancy import models as tenancy_models  # noqa: F401 (registers tenancy tables)
-from tests.conftest import fresh_import, http_client, set_valid_env
+from tests.conftest import fresh_import, http_client, require_test_database, set_valid_env
 
 # 203.0.113.0/24 is TEST-NET-3 (RFC 5737): reserved for documentation, never
 # routable. Used here to prove /health answers without contacting anything.
@@ -191,3 +196,120 @@ async def test_ready_returns_503_without_leaking_the_password_and_respects_its_t
 
     db.get_engine.cache_clear()
     db._session_factory.cache_clear()
+
+
+# -- Lifespan hook (Task 1.4.k) -----------------------------------------------
+
+
+def _clear_engine_and_qdrant_caches():
+    db.get_engine.cache_clear()
+    db._session_factory.cache_clear()
+    qdrant.get_qdrant_client.cache_clear()
+
+
+async def test_lifespan_never_creates_engine_or_qdrant_client_when_unused(monkeypatch):
+    # (a) Nothing touches Postgres or Qdrant during this app's short life --
+    # proves the lazy contract survives the lifespan hook itself: shutdown
+    # must not be what FIRST creates either singleton just to tear it down.
+    # cache_info().currsize is pure introspection on the lru_cache wrapper
+    # (this project's own established "created yet?" mechanism, first used
+    # in app/qdrant.py's own test fixture, Task 1.3.b) -- it never calls the
+    # wrapped function itself.
+    set_valid_env(monkeypatch, VALID_ENV)
+    _clear_engine_and_qdrant_caches()
+
+    app = create_app()
+    async with app.router.lifespan_context(app):
+        pass
+
+    assert db.get_engine.cache_info().currsize == 0
+    assert qdrant.get_qdrant_client.cache_info().currsize == 0
+
+
+async def test_lifespan_disposes_engine_and_closes_qdrant_client_that_were_actually_used(
+    monkeypatch,
+):
+    # (b) Real usage, then a real shutdown, checking ACTUAL state -- not
+    # merely that dispose()/close() didn't raise. Postgres: a real request
+    # to /ready against the real test database. Qdrant: no HTTP-layer route
+    # touches it yet (Step 3.1's retrieve() is the first one), so
+    # get_qdrant_client() is called directly here to simulate "something
+    # used it during this process's life" -- the task's own explicitly
+    # allowed substitute; a fake, unreachable URL is fine, since
+    # construction alone (never a real call) is all that is needed to prove
+    # closure afterward.
+    database_url = require_test_database()
+    set_valid_env(
+        monkeypatch, VALID_ENV, DATABASE_URL=database_url, QDRANT_URL="http://127.0.0.1:1"
+    )
+    _clear_engine_and_qdrant_caches()
+
+    app = create_app()
+    async with app.router.lifespan_context(app):
+        async with await http_client(app) as client:
+            response = await client.get("/ready")
+        assert response.status_code == 200
+
+        engine = db.get_engine()
+        pool_before_shutdown = engine.pool
+        qdrant_client = qdrant.get_qdrant_client()
+        assert qdrant_client._client.closed is False
+
+    # Shutdown has now run (the `async with` block above exited).
+    # engine.dispose() (confirmed live against the real database) replaces
+    # engine.pool with a brand-new Pool object -- a genuine, direct proof of
+    # disposal, not an inference from "no exception was raised".
+    assert engine.pool is not pool_before_shutdown
+    assert qdrant_client._client.closed is True
+
+    _clear_engine_and_qdrant_caches()
+
+
+async def test_lifespan_engine_disposal_failure_does_not_prevent_qdrant_closure(monkeypatch):
+    # (c) The engine's own dispose() is made to raise -- the Qdrant client
+    # must still be closed, and shutdown itself must still complete without
+    # raising (if it did, this test would error right here, at the
+    # `async with` block's own __aexit__).
+    set_valid_env(monkeypatch, VALID_ENV, QDRANT_URL="http://127.0.0.1:1")
+    _clear_engine_and_qdrant_caches()
+
+    app = create_app()
+    async with app.router.lifespan_context(app):
+        engine = db.get_engine()
+        qdrant_client = qdrant.get_qdrant_client()
+
+        async def _raise_dispose(self):
+            raise RuntimeError("simulated engine disposal failure")
+
+        # AsyncEngine has no per-instance __dict__ (a plain instance-attribute
+        # monkeypatch raises "attribute is read-only") -- patched on the
+        # class instead; monkeypatch restores it automatically, and only one
+        # engine instance exists in this test regardless.
+        monkeypatch.setattr(type(engine), "dispose", _raise_dispose)
+
+    assert qdrant_client._client.closed is True
+
+    _clear_engine_and_qdrant_caches()
+
+
+async def test_lifespan_qdrant_closure_failure_does_not_prevent_engine_disposal(monkeypatch):
+    # (c), the reverse: the Qdrant client's own close() is made to raise --
+    # the engine must still be disposed, and shutdown itself must still
+    # complete without raising.
+    set_valid_env(monkeypatch, VALID_ENV, QDRANT_URL="http://127.0.0.1:1")
+    _clear_engine_and_qdrant_caches()
+
+    app = create_app()
+    async with app.router.lifespan_context(app):
+        engine = db.get_engine()
+        pool_before_shutdown = engine.pool
+        qdrant_client = qdrant.get_qdrant_client()
+
+        async def _raise_close():
+            raise RuntimeError("simulated Qdrant client closure failure")
+
+        monkeypatch.setattr(qdrant_client, "close", _raise_close)
+
+    assert engine.pool is not pool_before_shutdown
+
+    _clear_engine_and_qdrant_caches()

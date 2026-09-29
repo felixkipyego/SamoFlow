@@ -9,15 +9,59 @@
 # because Task 1.1.b's `pip install -e .` check made the package
 # importable-as-installed; a plain `python -m app.main` without that
 # install step would raise importlib.metadata.PackageNotFoundError here.
+#
+# Task 1.4.k: the lifespan hook. Resolves the API half of the
+# shutdown-disposal open marker (the worker's own lifecycle hook stays a
+# separate, still-open concern owned by Step 2.1). Startup does nothing
+# new -- get_engine()/get_qdrant_client() both stay lazy, exactly as they
+# already are (Tasks 1.2.a/1.3.b): this hook only disposes what THIS
+# process actually created, never forces creation just to immediately
+# tear it down.
+#
+# "Created yet?" without creating: get_engine.cache_info().currsize (an
+# lru_cache-wrapped, zero-arg function's own cache introspection -- pure,
+# never calls the wrapped function) is already this project's own
+# established mechanism for exactly this check, first used in
+# app/qdrant.py's own test fixture (Task 1.3.b, test_qdrant.py's
+# _close_the_shared_live_client_once). Reused here rather than inventing a
+# second one.
+import logging
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from importlib.metadata import version
 
 from fastapi import FastAPI
 
 from app.auth.routes import router as auth_router
 from app.config import Settings, get_settings
+from app.db import get_engine
 from app.health import router as health_router
+from app.qdrant import get_qdrant_client
 
 _TITLE = "widgetplatform API"  # neutral name; no brand name in code
+
+logger = logging.getLogger(__name__)
+
+
+@asynccontextmanager
+async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
+    yield
+    # Each disposal in its own try/except: one failing must never prevent
+    # the other from being attempted, and must never crash the shutdown
+    # sequence itself -- logged (same logging.getLogger(__name__) + the
+    # standard library's own logging convention Task 1.4.j established),
+    # never raised further.
+    if get_engine.cache_info().currsize:
+        try:
+            await get_engine().dispose()
+        except Exception:
+            logger.exception("failed to dispose the database engine during shutdown")
+
+    if get_qdrant_client.cache_info().currsize:
+        try:
+            await get_qdrant_client().close()
+        except Exception:
+            logger.exception("failed to close the Qdrant client during shutdown")
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
@@ -34,6 +78,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         docs_url="/docs" if docs_enabled else None,
         redoc_url="/redoc" if docs_enabled else None,
         openapi_url="/openapi.json" if docs_enabled else None,
+        lifespan=_lifespan,
     )
     app.state.settings = settings
     app.include_router(health_router)
