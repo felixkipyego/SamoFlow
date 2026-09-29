@@ -16,11 +16,14 @@
 import uuid
 
 import pytest
+from httpx import ASGITransport, AsyncClient
 
 from app.auth.secrets import generate_visitor_secret, hash_visitor_secret
 from app.auth.tokens import decode_session_token
+from app.config import get_settings
 from app.main import create_app
 from app.plans import models as plans_models  # noqa: F401 (registers "plans" on Base.metadata)
+from app.ratelimit import RateLimiter
 from app.tenancy.models import SiteKey, Tenant, Visitor
 from tests.conftest import VALID_ENV, db_session, http_client, set_valid_env
 
@@ -383,3 +386,239 @@ async def test_success_response_echoes_exact_origin_and_carries_vary(_seeded):
         )
     assert response.headers["access-control-allow-origin"] == ALLOWED_ORIGIN
     assert response.headers["vary"] == "Origin"
+
+
+# -- Task 1.5.c: rate limiting -------------------------------------------
+#
+# _FakeClock below is a third near-identical copy of the same tiny
+# injectable-clock helper already in test_ratelimit.py (1.5.a) and
+# test_dependencies.py (1.4.h) -- worth centralizing (e.g. into
+# conftest.py) at the now-overdue duplication check (PROJECT_SPEC.md §8),
+# not fixed here since that is a separate, already-flagged task.
+
+
+class _FakeClock:
+    def __init__(self, start: float = 1_000.0) -> None:
+        self._now = start
+
+    def __call__(self) -> float:
+        return self._now
+
+    def advance(self, seconds: float) -> None:
+        self._now += seconds
+
+
+def _client_from_ip(app, ip: str) -> AsyncClient:
+    # http_client() (tests/conftest.py) hardcodes ASGITransport's default
+    # client tuple ("127.0.0.1", 123) -- every request through it looks
+    # like it comes from the same source IP. Proving the per-IP limiter is
+    # scoped by request.client.host requires a SECOND, distinct fake source
+    # IP -- ASGITransport's own `client` constructor argument, not
+    # exercised by any existing test.
+    return AsyncClient(
+        transport=ASGITransport(app=app, client=(ip, 12345)), base_url="http://test"
+    )
+
+
+async def test_eleventh_request_from_one_site_key_within_the_window_is_429(_seeded, monkeypatch):
+    # A low configured limit, not 11 real requests against the production
+    # default of 10 -- simpler and clearer, same proof either way.
+    monkeypatch.setenv("SESSION_RATE_LIMIT_PER_SITE_KEY", "3")
+    # _seeded already forced a get_settings() read (via db_session()'s own
+    # get_engine() call, during fixture setup, before this env override) --
+    # clear the cache so create_app() below reads the override, not the
+    # stale cached Settings instance from before it (established pattern:
+    # test_config.py's test_get_settings_is_cached_and_resets_after_cache_clear).
+    get_settings.cache_clear()
+    app = create_app()
+    async with await http_client(app) as client:
+        for _ in range(3):
+            response = await client.post(
+                "/api/v1/session",
+                json={"site_key": "pk_live_live_key"},
+                headers={"Origin": ALLOWED_ORIGIN},
+            )
+            # Each of the first 3 succeeds or fails on its own merits
+            # (never on rate-limiting grounds).
+            assert response.status_code != 429
+        blocked = await client.post(
+            "/api/v1/session",
+            json={"site_key": "pk_live_live_key"},
+            headers={"Origin": ALLOWED_ORIGIN},
+        )
+    assert blocked.status_code == 429
+    body = blocked.json()
+    assert body["detail"] == "too many requests"
+    assert isinstance(body["retry_after"], int | float)
+    assert 0 < body["retry_after"] <= 60
+    assert "retry-after" in blocked.headers
+    assert blocked.headers["retry-after"].isdigit()
+    assert int(blocked.headers["retry-after"]) > 0
+
+
+async def test_different_ip_or_site_key_pair_is_unaffected_by_another_pairs_limit(
+    _seeded, monkeypatch
+):
+    monkeypatch.setenv("SESSION_RATE_LIMIT_PER_SITE_KEY", "1")
+    get_settings.cache_clear()  # see the sibling test above for why
+    app = create_app()
+    async with await http_client(app) as client:
+        first = await client.post(
+            "/api/v1/session",
+            json={"site_key": "pk_live_live_key"},
+            headers={"Origin": ALLOWED_ORIGIN},
+        )
+        assert first.status_code != 429
+
+        blocked_same_pair = await client.post(
+            "/api/v1/session",
+            json={"site_key": "pk_live_live_key"},
+            headers={"Origin": ALLOWED_ORIGIN},
+        )
+        assert blocked_same_pair.status_code == 429
+
+        # Same IP, a DIFFERENT site_key: unaffected.
+        different_site_key = await client.post(
+            "/api/v1/session",
+            json={"site_key": "pk_live_draft_key"},
+            headers={"Origin": DRAFT_ALLOWED_ORIGIN},
+        )
+        assert different_site_key.status_code != 429
+
+    # A DIFFERENT IP, the SAME site_key (already exhausted for the first
+    # IP): also unaffected.
+    async with _client_from_ip(app, "203.0.113.7") as other_ip_client:
+        different_ip = await other_ip_client.post(
+            "/api/v1/session",
+            json={"site_key": "pk_live_live_key"},
+            headers={"Origin": ALLOWED_ORIGIN},
+        )
+    assert different_ip.status_code != 429
+
+
+async def test_per_ip_limiter_trips_across_many_different_site_keys(_seeded, monkeypatch):
+    # docs/SPEC.md §16: "many new visitors from one IP hit the IP cap" --
+    # four DIFFERENT site keys, each hit exactly once (so no individual
+    # site_key's own limit is anywhere near tripped), from the same IP.
+    monkeypatch.setenv("SESSION_RATE_LIMIT_PER_IP", "3")
+    get_settings.cache_clear()  # see test_eleventh_request_... above for why
+    app = create_app()
+    site_keys = [
+        "pk_live_live_key",
+        "pk_live_draft_key",
+        "pk_live_suspended_key",
+        "pk_live_suspended_tenant_key",
+    ]
+    async with await http_client(app) as client:
+        results = [
+            await client.post(
+                "/api/v1/session", json={"site_key": key}, headers={"Origin": ALLOWED_ORIGIN}
+            )
+            for key in site_keys
+        ]
+    assert all(r.status_code != 429 for r in results[:3])
+    assert results[3].status_code == 429
+
+
+async def test_per_ip_limiter_checked_first_and_can_trip_before_any_site_key_state_exists(
+    _seeded, monkeypatch
+):
+    monkeypatch.setenv("SESSION_RATE_LIMIT_PER_IP", "1")
+    get_settings.cache_clear()  # see test_eleventh_request_... above for why
+    app = create_app()
+    async with await http_client(app) as client:
+        first = await client.post(
+            "/api/v1/session",
+            json={"site_key": "pk_live_live_key"},
+            headers={"Origin": ALLOWED_ORIGIN},
+        )
+        assert first.status_code != 429
+
+        # A site_key NEVER seen before by either limiter -- the (IP,
+        # site_key) limiter has zero prior state for this exact key, and
+        # would allow it if checked alone. It must still be blocked here,
+        # proving the per-IP check runs first and short-circuits before
+        # the site-key check (and before any DB lookup) ever happens.
+        second = await client.post(
+            "/api/v1/session",
+            json={"site_key": "pk_live_a_brand_new_never_used_site_key"},
+            headers={"Origin": ALLOWED_ORIGIN},
+        )
+    assert second.status_code == 429
+
+
+async def test_retry_after_is_a_real_countdown_not_the_static_window(_seeded):
+    # Direct access to the SAME clock instance the app uses: pre-seed
+    # app.state with our own RateLimiter/_FakeClock BEFORE any request,
+    # exactly like StatusCache's own test convention (test_dependencies.py,
+    # Task 1.4.h) -- the getattr-fallback shape both use means the lazy
+    # construction path in app/auth/routes.py never triggers here.
+    clock = _FakeClock()
+    app = create_app()
+    app.state.site_key_limiter = RateLimiter(limit=1, window_seconds=60, clock=clock)
+    app.state.per_ip_limiter = RateLimiter(limit=30, window_seconds=60, clock=clock)
+
+    async with await http_client(app) as client:
+        first = await client.post(
+            "/api/v1/session",
+            json={"site_key": "pk_live_live_key"},
+            headers={"Origin": ALLOWED_ORIGIN},
+        )
+        assert first.status_code != 429
+
+        clock.advance(20.0)  # 20s into the 60s window -- 40s should remain
+
+        blocked = await client.post(
+            "/api/v1/session",
+            json={"site_key": "pk_live_live_key"},
+            headers={"Origin": ALLOWED_ORIGIN},
+        )
+    assert blocked.status_code == 429
+    assert blocked.json()["retry_after"] == 40.0
+    assert blocked.headers["retry-after"] == "40"
+
+
+async def test_options_preflight_is_never_rate_limited(_seeded, monkeypatch):
+    # Folds in Task 1.5.d: confirms the OPTIONS preflight handler (1.4.g)
+    # is untouched by 1.5.c -- it has no rate-limit-checking code at all
+    # (see app/auth/routes.py's session_preflight), so it cannot be blocked
+    # regardless of how exhausted either limiter is.
+    monkeypatch.setenv("SESSION_RATE_LIMIT_PER_IP", "1")
+    get_settings.cache_clear()  # see test_eleventh_request_... above for why
+    app = create_app()
+    async with await http_client(app) as client:
+        await client.post(
+            "/api/v1/session",
+            json={"site_key": "pk_live_live_key"},
+            headers={"Origin": ALLOWED_ORIGIN},
+        )
+        exhausted = await client.post(
+            "/api/v1/session",
+            json={"site_key": "pk_live_live_key"},
+            headers={"Origin": ALLOWED_ORIGIN},
+        )
+        assert exhausted.status_code == 429
+
+        preflight = await client.options("/api/v1/session", headers={"Origin": ALLOWED_ORIGIN})
+    assert preflight.status_code == 200
+
+
+async def test_a_successful_non_rate_limited_response_is_unaffected_by_1_5_c(_seeded):
+    # Same assertions test_first_visit_without_secret_creates_visitor_and_
+    # returns_new_secret (1.4.g) already established, plus an explicit
+    # check that no Retry-After header leaks onto a successful response --
+    # proving 1.5.c adds no observable change to the success path.
+    app = create_app()
+    async with await http_client(app) as client:
+        response = await client.post(
+            "/api/v1/session",
+            json={"site_key": "pk_live_live_key"},
+            headers={"Origin": ALLOWED_ORIGIN},
+        )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["test_mode"] is False
+    assert isinstance(body["visitor_secret"], str)
+    assert response.headers["access-control-allow-origin"] == ALLOWED_ORIGIN
+    assert response.headers["vary"] == "Origin"
+    assert "retry-after" not in response.headers

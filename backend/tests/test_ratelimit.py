@@ -122,3 +122,34 @@ def test_expired_entries_are_actually_pruned_and_memory_does_not_grow_unbounded(
 
     assert len(limiter._attempts) == 1
     assert list(limiter._attempts.keys()) == ["probe"]
+
+
+# -- get_retry_after (Task 1.5.c) --------------------------------------------
+
+
+def test_get_retry_after_is_zero_for_a_never_checked_key() -> None:
+    limiter = RateLimiter(limit=1, window_seconds=60, clock=_FakeClock())
+    assert limiter.get_retry_after("never-seen") == 0.0
+
+
+def test_get_retry_after_is_zero_for_a_key_under_its_limit() -> None:
+    clock = _FakeClock()
+    limiter = RateLimiter(limit=5, window_seconds=60, clock=clock)
+    assert limiter.check("k") is True
+    assert limiter.get_retry_after("k") == 0.0
+
+
+def test_get_retry_after_is_a_real_countdown_not_the_static_window() -> None:
+    clock = _FakeClock()
+    limiter = RateLimiter(limit=1, window_seconds=60, clock=clock)
+
+    assert limiter.check("k") is True  # recorded at t=1000.0
+    clock.advance(20.0)  # now t=1020.0, 40s left in the window
+    assert limiter.check("k") is False  # blocked -- the limit is 1
+
+    assert limiter.get_retry_after("k") == 40.0
+
+    # Advancing further shrinks the countdown further still -- proving it
+    # really does track the remaining time, not a fixed number.
+    clock.advance(10.0)  # now t=1030.0, 30s left
+    assert limiter.get_retry_after("k") == 30.0

@@ -31,6 +31,12 @@
 # are two DIFFERENT policies, so they get two separate RateLimiter
 # instances (with disjoint key spaces by construction, since each caller
 # builds its own key string) -- not one instance juggling two limits.
+#
+# Task 1.5.c adds get_retry_after() below (a small addition to this
+# already-Done module, needed by the 429 response's own Retry-After header
+# and JSON body -- 1.5.a did not anticipate this method, so it is added
+# here rather than reimplemented at the call site, matching 1.5.a's own
+# "no imports from anything web-specific" layering discipline).
 import time
 from collections import deque
 from collections.abc import Callable
@@ -85,6 +91,25 @@ class RateLimiter:
 
         self._attempts.setdefault(key, deque()).append(now)
         return True
+
+    def get_retry_after(self, key: str) -> float:
+        # How many seconds until `key` would next be allowed -- a real
+        # countdown against that key's own oldest currently-counted
+        # timestamp (it ages out of the trailing window at
+        # timestamp + window_seconds), not a static restatement of
+        # self._window_seconds. Only meaningful for a key that is
+        # CURRENTLY at or over the limit (i.e. the same key a check() call
+        # that just returned False was made against): returns 0.0 for any
+        # key that is not currently blocked, rather than a misleading wait
+        # time for a key that could be checked again right now. Read-only
+        # (no pruning): a key that just failed check() was already pruned
+        # by that same call (check()'s own full sweep), so attempts[0] here
+        # is already the correct, unexpired oldest timestamp.
+        attempts = self._attempts.get(key)
+        if attempts is None or len(attempts) < self._limit:
+            return 0.0
+        remaining = attempts[0] + self._window_seconds - self._clock()
+        return max(0.0, remaining)
 
     def _prune_expired(self, cutoff: float) -> None:
         emptied_keys = []

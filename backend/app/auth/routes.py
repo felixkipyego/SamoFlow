@@ -20,6 +20,34 @@
 # response only ever carries Access-Control-Allow-Origin once the origin
 # check has actually passed; Vary: Origin is present on every response
 # (success, failure, or preflight) regardless of outcome.
+#
+# Task 1.5.c: two RateLimiter instances (1.5.a), configured from 1.5.b's
+# four Settings fields, checked before ANY other work in create_session --
+# even before the origin well-formedness check below, since rate limiting
+# is at least as cheap as that check and this is the worst-case abuse path
+# (a flood); "cheapest first" (docs/SPEC.md §9) taken to its logical start.
+# Per-IP is checked FIRST, then (IP, site_key) -- Step 1.5 breakdown
+# decision (b): per-IP is the broader, cheaper-to-reject check, and must
+# trip on its own for docs/SPEC.md §16's "many new visitors from one IP
+# hit the IP cap" scenario even when no individual site_key's own limit is
+# anywhere near tripped -- see test_session.py's own 1.5.c tests for the
+# constructed proof. Both limiters live on app.state, lazily created via
+# _get_per_ip_limiter()/_get_site_key_limiter() below -- the EXACT shape
+# app/auth/dependencies.py's _get_status_cache() (Task 1.4.h) already uses
+# (getattr-fallback-then-construct-then-store), not eager construction in
+# create_app(). This task's own instructions expected the wiring to live in
+# create_app() itself "alongside 1.4.h's status_cache setup" -- checked
+# first, as asked, and that assumption doesn't hold: status_cache is not
+# actually initialized in create_app() either, it is lazily created in
+# app/auth/dependencies.py in this exact shape. Following the real,
+# verified pattern instead of the assumed one. This also means a fresh
+# create_app() call gets fresh, empty limiter state automatically (no
+# explicit reset needed between tests), and a test can pre-seed
+# app.state.per_ip_limiter/site_key_limiter with its own injectable-clock
+# RateLimiter before making any request -- exactly like StatusCache's own
+# test convention.
+import math
+
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import JSONResponse, Response
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -29,6 +57,7 @@ from app.auth.schemas import SessionRequest, SessionResponse
 from app.auth.secrets import generate_visitor_secret, hash_visitor_secret
 from app.auth.tokens import encode_session_token
 from app.db import get_db_session
+from app.ratelimit import RateLimiter
 from app.tenancy.repository import TenantScopedRepository, get_site_key_by_key
 
 router = APIRouter(prefix="/api/v1")
@@ -38,6 +67,13 @@ router = APIRouter(prefix="/api/v1")
 # drifting into two subtly different "failure" responses over time.
 _FAILURE_BODY = {"detail": "session request could not be completed"}
 _FAILURE_STATUS = 403
+
+# A NEW, distinct response shape from the 403 failure body above -- never
+# reused or extended -- since a rate limit is a different failure category
+# (docs/SPEC.md §11's own "rate limited (plain language, no internals)"
+# widget state is separately named from the failure states the 403 covers;
+# Step 1.5 breakdown decision (d)).
+_RATE_LIMITED_STATUS = 429
 
 # docs/SPEC.md §4.2 (session flow, point 5) / §5 "Widget look": these six
 # fields are the only ones ever public. tenants.config also holds several
@@ -74,6 +110,64 @@ def _failure_response() -> JSONResponse:
     )
 
 
+def _rate_limited_response(retry_after: float) -> JSONResponse:
+    # Retry-After: an integer number of seconds is the conventional form
+    # for this header's "delay-seconds" value (RFC 9110 §10.2.3 -- the
+    # only alternative form is a full HTTP-date, not needed here), rounded
+    # UP (never down, and never to 0) so a client that waits exactly this
+    # long never retries a moment too early. The JSON body's own
+    # retry_after keeps one decimal place -- more precise than the header
+    # for a programmatic caller, without exposing meaningless float noise.
+    header_seconds = max(1, math.ceil(retry_after))
+    return JSONResponse(
+        status_code=_RATE_LIMITED_STATUS,
+        content={"detail": "too many requests", "retry_after": round(retry_after, 1)},
+        headers={"Retry-After": str(header_seconds)},
+    )
+
+
+def _site_key_rate_limit_key(ip: str, site_key: str) -> str:
+    # site_key is fully client-controlled (SessionRequest.site_key has no
+    # charset/length constraint) and this combined string becomes a single
+    # RateLimiter key for the (ip, site_key) pair. Naive concatenation
+    # (f"{ip}:{site_key}", or even ip + site_key with no separator at all)
+    # would let a crafted site_key value collide two DIFFERENT (ip,
+    # site_key) pairs onto the same key string -- e.g. ip="1.2.3.4",
+    # site_key="5:x" and ip="1.2.3.4:5", site_key="x" would both produce
+    # "1.2.3.4:5:x" -- letting one visitor's requests silently share, or
+    # poison, another's rate-limit counter. Length-prefixing the IP first
+    # (a netstring-style encoding) makes this provably injective regardless
+    # of what characters either part contains: two different (ip,
+    # site_key) pairs can never produce the same encoded string, since the
+    # length prefix fixes exactly how many of the following characters
+    # belong to ip.
+    return f"{len(ip)}:{ip}:{site_key}"
+
+
+def _get_per_ip_limiter(request: Request) -> RateLimiter:
+    limiter = getattr(request.app.state, "per_ip_limiter", None)
+    if limiter is None:
+        settings = request.app.state.settings
+        limiter = RateLimiter(
+            limit=settings.session_rate_limit_per_ip,
+            window_seconds=settings.session_rate_limit_per_ip_window_seconds,
+        )
+        request.app.state.per_ip_limiter = limiter
+    return limiter
+
+
+def _get_site_key_limiter(request: Request) -> RateLimiter:
+    limiter = getattr(request.app.state, "site_key_limiter", None)
+    if limiter is None:
+        settings = request.app.state.settings
+        limiter = RateLimiter(
+            limit=settings.session_rate_limit_per_site_key,
+            window_seconds=settings.session_rate_limit_per_site_key_window_seconds,
+        )
+        request.app.state.site_key_limiter = limiter
+    return limiter
+
+
 @router.options("/session", include_in_schema=False)
 async def session_preflight(request: Request) -> Response:
     # No Depends(get_db_session), no body parsing: this handler cannot
@@ -98,6 +192,22 @@ async def create_session(
     request: Request,
     session: AsyncSession = Depends(get_db_session),  # noqa: B008 (FastAPI's own Depends() idiom)
 ) -> Response:
+    # Rate limiting first, before anything else in this handler (see this
+    # module's own header comment for the full reasoning and the exact key
+    # formats). request.client can be None per the ASGI spec (rare in
+    # practice behind a real server, but not impossible) -- "unknown"
+    # groups any such request under one shared bucket rather than crashing.
+    ip = request.client.host if request.client else "unknown"
+
+    per_ip_limiter = _get_per_ip_limiter(request)
+    if not per_ip_limiter.check(ip):
+        return _rate_limited_response(per_ip_limiter.get_retry_after(ip))
+
+    site_key_limiter = _get_site_key_limiter(request)
+    site_key_limit_key = _site_key_rate_limit_key(ip, payload.site_key)
+    if not site_key_limiter.check(site_key_limit_key):
+        return _rate_limited_response(site_key_limiter.get_retry_after(site_key_limit_key))
+
     # (a) Origin must be present exactly once (a missing or repeated
     # Origin header is rejected here, before any database access;
     # well-formedness/allow-list matching is 1.4.f's job, at step (e)).
