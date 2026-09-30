@@ -100,6 +100,16 @@ class Settings(BaseSettings):
     # explicitly.
     job_retry_base_seconds: float = Field(default=60, gt=0)
     job_max_attempts: int = Field(default=5, gt=0)
+    # Task 2.1.d: how long worker.py's run() waits between poll attempts
+    # when claim_next_job() finds nothing ready -- never a tight spin
+    # loop. Same treatment as the fields directly above (plain
+    # configurable number, gt=0 is pydantic's own built-in constraint).
+    # 2 seconds: noticeably shorter than job_retry_base_seconds's own
+    # 60-second floor (this is "is anything ready yet", not a retry
+    # delay), but long enough that an idle worker doesn't burn CPU/DB
+    # round trips -- retuned later with real load-test numbers if needed
+    # (Phase 7), like every other estimate in this project.
+    worker_poll_interval_seconds: float = Field(default=2, gt=0)
 
     @field_validator("database_url")
     @classmethod

@@ -86,6 +86,7 @@ async def mark_job_failed(
     job_id: uuid.UUID,
     error: str,
     clock: Callable[[], datetime] = lambda: datetime.now(UTC),
+    permanent: bool = False,
 ) -> None:
     # Backoff formula (PROJECT_SPEC.md's Step 2.1.c decision entry):
     # next_run_at = clock() + base_seconds * 2**attempts, attempts counted
@@ -108,17 +109,37 @@ async def mark_job_failed(
     # reference within this one state transition, rather than mixing a
     # Python-side clock for one field and the database's own func.now()
     # for the other.
+    #
+    # permanent (Task 2.1.d): added to this existing 2.1.c function
+    # rather than a second, near-duplicate mark_job_failed_permanently()
+    # -- one function with a branch, not two copies of the shared
+    # job-lookup/error/updated_at plumbing. False (the default) is
+    # 2.1.c's own original behavior, byte-for-byte unchanged: attempts
+    # increments, backoff applies, "failed" only once max_attempts is
+    # exhausted. permanent=True is for a structural, non-transient error
+    # -- worker.py's own "no handler registered for this job_type"
+    # case -- where retrying is guaranteed to reproduce the identical
+    # failure, so it skips straight to "failed" instead of burning
+    # max_attempts retries and their backoff delay to reach the same
+    # terminal state. attempts is deliberately NOT incremented here: it
+    # counts real handler-execution attempts, and none was made -- there
+    # was no handler to run. Never used for a handler that raises (that
+    # failure could be transient and keeps the normal retry treatment);
+    # only for "no handler exists for this job_type at all".
     job = await session.get(Job, job_id)
     if job is None:
         raise ValueError(f"job {job_id} does not exist")
     now = clock()
-    job.attempts += 1
     job.error = error
-    if job.attempts >= job.max_attempts:
+    if permanent:
         job.status = "failed"
     else:
-        job.status = "pending"
-        base_seconds = get_settings().job_retry_base_seconds
-        job.next_run_at = now + timedelta(seconds=base_seconds * (2**job.attempts))
+        job.attempts += 1
+        if job.attempts >= job.max_attempts:
+            job.status = "failed"
+        else:
+            job.status = "pending"
+            base_seconds = get_settings().job_retry_base_seconds
+            job.next_run_at = now + timedelta(seconds=base_seconds * (2**job.attempts))
     job.updated_at = now
     await session.flush()
