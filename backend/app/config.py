@@ -8,7 +8,9 @@
 # stop working the moment auth is enabled on a real deployment). Task 1.4.a
 # adds jwt_signing_key (required) and jwt_signing_key_previous (optional,
 # for rotation via a future `kid` header -- PyJWT/the token module itself
-# arrive in 1.4.b, this task only adds the secret plumbing).
+# arrive in 1.4.b, this task only adds the secret plumbing). Task 2.1.a
+# adds db_connection_encryption_key (required): the pgcrypto passphrase
+# for db_connections.encrypted_credentials.
 #
 # ASSUMPTION: pydantic and pydantic-settings are not new dependencies here.
 # pydantic-settings==2.15.0 is already an approved runtime dependency
@@ -74,6 +76,15 @@ class Settings(BaseSettings):
     session_rate_limit_per_site_key_window_seconds: float = Field(default=60, gt=0)
     session_rate_limit_per_ip: int = Field(default=30, gt=0)
     session_rate_limit_per_ip_window_seconds: float = Field(default=60, gt=0)
+    # Task 2.1.a: the pgcrypto passphrase for db_connections.
+    # encrypted_credentials (docs/SPEC.md §5.6: "Credentials are encrypted
+    # at rest"). Required, same discipline as qdrant_api_key/
+    # jwt_signing_key -- an unencrypted-at-rest credential would silently
+    # work today and silently stay wrong on a real deployment if this were
+    # optional. min_length=32 matches jwt_signing_key's own established
+    # floor (rule 11 -- reuse an already-justified number, not a new one
+    # invented here).
+    db_connection_encryption_key: SecretStr = Field(min_length=32)
 
     @field_validator("database_url")
     @classmethod
@@ -123,6 +134,16 @@ class Settings(BaseSettings):
     def _require_a_clean_signing_key(cls, value: SecretStr) -> SecretStr:
         _require_no_whitespace_or_control_chars(
             value.get_secret_value(), "JWT_SIGNING_KEY", "it is used as UTF-8 bytes to sign tokens"
+        )
+        return value
+
+    @field_validator("db_connection_encryption_key")
+    @classmethod
+    def _require_a_clean_encryption_key(cls, value: SecretStr) -> SecretStr:
+        _require_no_whitespace_or_control_chars(
+            value.get_secret_value(),
+            "DB_CONNECTION_ENCRYPTION_KEY",
+            "it is used as a pgcrypto passphrase",
         )
         return value
 
@@ -182,6 +203,10 @@ class Settings(BaseSettings):
         if self.jwt_signing_key_previous is None:
             return None
         return self.jwt_signing_key_previous.get_secret_value()
+
+    def db_connection_encryption_key_str(self) -> str:
+        # The one explicit call that unwraps the secret. Never log this.
+        return self.db_connection_encryption_key.get_secret_value()
 
 
 class SettingsError(Exception):

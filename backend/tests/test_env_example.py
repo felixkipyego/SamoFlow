@@ -158,6 +158,13 @@ def test_jwt_signing_key_previous_placeholder_is_empty():
     assert values["JWT_SIGNING_KEY_PREVIOUS"] == ""
 
 
+def test_db_connection_encryption_key_placeholder_is_32_chars_and_starts_with_change_me():
+    values = _parse_env_example()
+    placeholder = values["DB_CONNECTION_ENCRYPTION_KEY"]
+    assert len(placeholder) >= 32
+    assert placeholder.startswith("change-me")
+
+
 def test_first_non_blank_line_is_the_header_warning():
     lines = _lines()
     first_non_blank = next(line for line in lines if line.strip())

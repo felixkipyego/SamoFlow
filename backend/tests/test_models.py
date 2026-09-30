@@ -9,6 +9,7 @@ import uuid
 from sqlalchemy.dialects.postgresql import UUID
 
 from app.db import Base
+from app.ingest import models as ingest_models  # noqa: F401
 from app.plans import models as plans_models  # noqa: F401
 from app.tenancy import models as tenancy_models  # noqa: F401
 from tests.conftest import (
@@ -107,3 +108,39 @@ def test_uuid_type_hint_matches_python_uuid():
     # (as_uuid=False would hand back plain strings at runtime instead).
     column = Base.metadata.tables["tenants"].columns["id"]
     assert column.type.python_type is uuid.UUID
+
+
+def test_jobs_source_id_is_nullable():
+    # Task 2.1.a: a deliberate decision, not an afterthought -- reconcile
+    # and refresh-scheduling jobs are not always tied to one source row.
+    column = Base.metadata.tables["jobs"].columns["source_id"]
+    assert column.nullable is True
+
+
+def test_jobs_next_run_at_is_indexed():
+    # Task 2.1.a: 2.1.c's claiming query filters/orders on this column.
+    column = Base.metadata.tables["jobs"].columns["next_run_at"]
+    assert column.index, "jobs.next_run_at has no index"
+
+
+def test_db_connections_model_has_no_custom_repr_that_would_dump_columns():
+    # Task 2.1.a: confirms the premise the credential-column design relies
+    # on -- unlike pydantic's BaseModel (which dumps every field in its
+    # own default repr()/str(), exactly why SecretStr exists), a plain
+    # SQLAlchemy declarative model with no custom __repr__ does not. This
+    # is what makes storing ciphertext in an ordinary column safe against
+    # accidental repr/str logging: repr()/str() never reach column values
+    # at all. The live, real-encryption leak proof (does the ORIGINAL
+    # PLAINTEXT ever appear anywhere once a real row is fetched) is in
+    # test_ingest_repository.py -- this test only proves the mechanism
+    # neither class defines its own __repr__/__str__.
+    assert "__repr__" not in ingest_models.DbConnection.__dict__
+    assert "__str__" not in ingest_models.DbConnection.__dict__
+    db_connection = ingest_models.DbConnection(
+        tenant_id=uuid.uuid4(),
+        host="db.example.internal",
+        encrypted_credentials=b"placeholder",
+        allowlisted_tables={},
+        row_templates={},
+    )
+    assert repr(db_connection).startswith("<app.ingest.models.DbConnection object at 0x")

@@ -53,6 +53,7 @@ _HARMLESS_ENV = {
     "QDRANT_URL": "http://203.0.113.1:6333",
     "QDRANT_API_KEY": "harmless-test-key",  # noqa: S105 (test fixture value, not a real secret)
     "JWT_SIGNING_KEY": "harmless-jwt-signing-key-32-chars-ok",  # noqa: S105
+    "DB_CONNECTION_ENCRYPTION_KEY": "harmless-db-connection-key-32-chars-ok",  # noqa: S105
     "API_HOST": "127.0.0.1",
     "API_PORT": "8000",
 }
@@ -219,7 +220,7 @@ def test_alembic_subprocess_env_excludes_stray_libpq_variables(monkeypatch):
     assert "PGUSER" not in env
 
 
-def test_alembic_subprocess_env_has_exactly_the_seven_settings_variables_plus_path_and_home(
+def test_alembic_subprocess_env_has_exactly_the_eight_settings_variables_plus_path_and_home(
     monkeypatch,
 ):
     monkeypatch.setenv("SOME_OTHER_STRAY_VAR", "should-not-be-inherited")
@@ -232,6 +233,7 @@ def test_alembic_subprocess_env_has_exactly_the_seven_settings_variables_plus_pa
         "QDRANT_URL",
         "QDRANT_API_KEY",
         "JWT_SIGNING_KEY",
+        "DB_CONNECTION_ENCRYPTION_KEY",
         "API_HOST",
         "API_PORT",
     }
@@ -322,16 +324,26 @@ def test_upgrade_head_is_idempotent_and_never_prints_the_password(_test_engine):
 
     # Table list includes the real migration's 5 tables (Task 1.2.c) --
     # was just ["alembic_version"] before any migration existed (1.1.h).
-    assert set(_table_names(engine)) == {"alembic_version", *EXPECTED_TABLES}
+    # Task 2.1.a added its four ingestion tables to EXPECTED_TABLES for
+    # test_models.py's own Python-metadata-only checks, but 2.1.a is
+    # schema-only (models, no migration yet) -- 2.1.b is the migration
+    # that actually creates them for real. Excluded here, narrowly and
+    # explicitly, until 2.1.b lands; remove this exclusion then.
+    not_yet_migrated = {"sources", "documents", "db_connections", "jobs"}
+    assert set(_table_names(engine)) == {"alembic_version", *(EXPECTED_TABLES - not_yet_migrated)}
 
     inspector = sa.inspect(engine)
 
     for table_name, pk_column in EXPECTED_PK_COLUMNS.items():
+        if table_name in not_yet_migrated:
+            continue
         assert inspector.get_pk_constraint(table_name)["constrained_columns"] == [pk_column], (
             f"{table_name}'s primary key column does not match the model"
         )
 
     for (table_name, column_name), referred_table in CASCADE_FK_COLUMNS.items():
+        if table_name in not_yet_migrated:
+            continue
         foreign_keys = inspector.get_foreign_keys(table_name)
         (fk,) = [fk for fk in foreign_keys if fk["constrained_columns"] == [column_name]]
         assert fk["referred_table"] == referred_table
@@ -340,6 +352,8 @@ def test_upgrade_head_is_idempotent_and_never_prints_the_password(_test_engine):
         )
 
     for table_name, (constraint_name, allowed_values) in EXPECTED_STATUS_CHECK_CONSTRAINTS.items():
+        if table_name in not_yet_migrated:
+            continue
         check_constraints = inspector.get_check_constraints(table_name)
         (status_check,) = [c for c in check_constraints if c["name"] == constraint_name]
         for status_value in allowed_values:

@@ -64,6 +64,12 @@ def test_missing_required_variable_raises_and_names_field(monkeypatch, missing):
         {"JWT_SIGNING_KEY": "a" * 20 + "\n" + "a" * 20},
         {"JWT_SIGNING_KEY_PREVIOUS": "a" * 31},
         {"JWT_SIGNING_KEY_PREVIOUS": "b" * 20 + " " + "b" * 20},
+        {"DB_CONNECTION_ENCRYPTION_KEY": ""},
+        {"DB_CONNECTION_ENCRYPTION_KEY": "short"},
+        {"DB_CONNECTION_ENCRYPTION_KEY": "a" * 31},  # one character short of the minimum
+        {"DB_CONNECTION_ENCRYPTION_KEY": "a" * 20 + " " + "a" * 20},
+        {"DB_CONNECTION_ENCRYPTION_KEY": "a" * 20 + "\t" + "a" * 20},
+        {"DB_CONNECTION_ENCRYPTION_KEY": "a" * 20 + "\n" + "a" * 20},
         {"API_PORT": "abc"},
         {"API_PORT": "0"},
         {"API_PORT": "70000"},
@@ -202,6 +208,40 @@ def test_settings_error_chain_never_carries_the_jwt_signing_key(
     monkeypatch, value, distinctive_substring
 ):
     set_valid_env(monkeypatch, VALID_ENV, JWT_SIGNING_KEY=value)
+    with pytest.raises(SettingsError) as exc_info:
+        get_settings()
+    err = exc_info.value
+    assert_secret_not_in_exception_chain(err, distinctive_substring)
+    assert err.__cause__ is None
+    assert err.__context__ is None
+
+
+@pytest.mark.parametrize(
+    ("value", "distinctive_substring"),
+    [
+        ("distinctive-dbkey 123", "distinctive-dbkey"),
+        ("distinctive-short", "distinctive-short"),
+    ],
+)
+def test_get_settings_raises_settings_error_on_malformed_db_connection_encryption_key(
+    monkeypatch, value, distinctive_substring
+):
+    set_valid_env(monkeypatch, VALID_ENV, DB_CONNECTION_ENCRYPTION_KEY=value)
+    with pytest.raises(SettingsError):
+        get_settings()
+
+
+@pytest.mark.parametrize(
+    ("value", "distinctive_substring"),
+    [
+        ("distinctive-dbkey 123", "distinctive-dbkey"),
+        ("distinctive-short", "distinctive-short"),
+    ],
+)
+def test_settings_error_chain_never_carries_the_db_connection_encryption_key(
+    monkeypatch, value, distinctive_substring
+):
+    set_valid_env(monkeypatch, VALID_ENV, DB_CONNECTION_ENCRYPTION_KEY=value)
     with pytest.raises(SettingsError) as exc_info:
         get_settings()
     err = exc_info.value

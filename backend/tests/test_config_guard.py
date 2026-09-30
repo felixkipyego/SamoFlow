@@ -3,9 +3,12 @@
 # Task 1.3.a1 extends it to qdrant_api_key_str(); Task 1.4.a extends it to
 # jwt_signing_key_str()/jwt_signing_key_previous_str(), starting
 # ALLOWED_JWT_KEY_CALLERS empty; Task 1.4.b adds its first real entry,
-# app/auth/tokens.py): parses every .py file under backend/app and
+# app/auth/tokens.py; Task 2.1.a extends it to
+# db_connection_encryption_key_str(), starting
+# ALLOWED_DB_CONNECTION_ENCRYPTION_KEY_CALLERS with its one real caller,
+# app/ingest/repository.py): parses every .py file under backend/app and
 # backend/alembic with ast (not text search, so comments/strings never
-# trigger it) and enforces four rules from PROJECT_SPEC.md's decisions log:
+# trigger it) and enforces five rules from PROJECT_SPEC.md's decisions log:
 #   - only app/config.py may construct Settings() directly;
 #   - nothing calls a method named errors() (that leaks raw input, see
 #     config.py's model_config comment);
@@ -15,7 +18,9 @@
 #     qdrant_api_key_str() outside app/config.py;
 #   - only files listed in ALLOWED_JWT_KEY_CALLERS may call
 #     jwt_signing_key_str()/jwt_signing_key_previous_str() outside
-#     app/config.py.
+#     app/config.py;
+#   - only files listed in ALLOWED_DB_CONNECTION_ENCRYPTION_KEY_CALLERS may
+#     call db_connection_encryption_key_str() outside app/config.py.
 import ast
 
 from tests.conftest import BACKEND_DIR, called_name, iter_python_files
@@ -36,6 +41,11 @@ ALLOWED_QDRANT_API_KEY_CALLERS: tuple[str, ...] = ("app/qdrant.py",)
 # receives the real JWT signing key(s). Review it by hand.
 ALLOWED_JWT_KEY_CALLERS: tuple[str, ...] = ("app/auth/tokens.py",)
 
+# NOTE: adding a file here is a deliberate decision: it means that file
+# receives the real pgcrypto passphrase for db_connections' credentials.
+# Review it by hand.
+ALLOWED_DB_CONNECTION_ENCRYPTION_KEY_CALLERS: tuple[str, ...] = ("app/ingest/repository.py",)
+
 # Duplication check after 1.3.a1/a2/b: both secret accessors are checked by
 # the same single branch below instead of one copy-pasted elif per accessor
 # -- a third one later needs one entry here, not a third branch. Task 1.4.a
@@ -46,6 +56,7 @@ _SECRET_ACCESSOR_ALLOW_LISTS: dict[str, tuple[str, ...]] = {
     "qdrant_api_key_str": ALLOWED_QDRANT_API_KEY_CALLERS,
     "jwt_signing_key_str": ALLOWED_JWT_KEY_CALLERS,
     "jwt_signing_key_previous_str": ALLOWED_JWT_KEY_CALLERS,
+    "db_connection_encryption_key_str": ALLOWED_DB_CONNECTION_ENCRYPTION_KEY_CALLERS,
 }
 
 

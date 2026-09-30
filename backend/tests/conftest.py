@@ -152,6 +152,7 @@ VALID_ENV = {
     "QDRANT_URL": "http://localhost:6333",
     "QDRANT_API_KEY": "test-qdrant-key",  # noqa: S105 (test fixture value, not a real secret)
     "JWT_SIGNING_KEY": "test-jwt-signing-key-at-least-32-chars",  # noqa: S105
+    "DB_CONNECTION_ENCRYPTION_KEY": "test-db-connection-key-at-least-32-chars",  # noqa: S105
     "API_HOST": "127.0.0.1",
     "API_PORT": "8000",
 }
@@ -341,7 +342,17 @@ def fresh_import(module_name):
 # the same facts against a live database via sa.inspect() after a real
 # migration -- two different, real proofs, but the same expected data, so a
 # schema change only needs updating it once.
-EXPECTED_TABLES = {"tenants", "site_keys", "visitors", "conversations", "plans"}
+EXPECTED_TABLES = {
+    "tenants",
+    "site_keys",
+    "visitors",
+    "conversations",
+    "plans",
+    "sources",
+    "documents",
+    "db_connections",
+    "jobs",
+}
 
 EXPECTED_PK_COLUMNS = {
     "tenants": "id",
@@ -349,14 +360,28 @@ EXPECTED_PK_COLUMNS = {
     "visitors": "vid",
     "conversations": "cid",
     "plans": "id",
+    "sources": "id",
+    "documents": "id",
+    "db_connections": "id",
+    "jobs": "id",
 }
 
 # tenant_id columns cascade from tenants (PROJECT_SPEC.md decision: DB-level
 # ON DELETE CASCADE from tenants down to site_keys/visitors/conversations).
+# Task 2.1.a extends this with the four ingestion tables' own tenant_id
+# columns, plus documents.source_id and jobs.source_id (both cascade from
+# sources, not tenants -- the dict's value names the actual referenced
+# table for each entry, not always "tenants").
 CASCADE_FK_COLUMNS = {
     ("site_keys", "tenant_id"): "tenants",
     ("visitors", "tenant_id"): "tenants",
     ("conversations", "tenant_id"): "tenants",
+    ("sources", "tenant_id"): "tenants",
+    ("documents", "tenant_id"): "tenants",
+    ("db_connections", "tenant_id"): "tenants",
+    ("jobs", "tenant_id"): "tenants",
+    ("documents", "source_id"): "sources",
+    ("jobs", "source_id"): "sources",
 }
 
 # site_key_id (visitors) and vid (conversations) are a separate edge the
@@ -375,6 +400,13 @@ NO_ACTION_FK_COLUMNS = {
 EXPECTED_STATUS_CHECK_CONSTRAINTS = {
     "site_keys": ("ck_site_keys_status", frozenset({"draft", "live", "suspended"})),
     "tenants": ("ck_tenants_status", frozenset({"active", "suspended"})),
+    # Task 2.1.a: sources.type is docs/SPEC.md §5.1's own closed, spec-fixed
+    # four-value adapter vocabulary; jobs.status is this project's own
+    # closed job-lifecycle vocabulary (see app/ingest/models.py's Job class
+    # for the full reasoning, including why there is no fifth "retrying"
+    # or "cancelled" state).
+    "sources": ("ck_sources_type", frozenset({"urls", "crawl", "upload", "database"})),
+    "jobs": ("ck_jobs_status", frozenset({"pending", "running", "succeeded", "failed"})),
 }
 
 # Composite unique indexes, keyed by table -- same (name, value) shape as
@@ -407,6 +439,18 @@ async def reset_test_database(monkeypatch) -> AsyncIterator[str]:
     db._session_factory.cache_clear()
 
     sync_engine = sa.create_engine(database_url, poolclass=sa.pool.NullPool)
+    with sync_engine.begin() as connection:
+        # Task 2.1.a: db_connections.encrypted_credentials needs pgcrypto's
+        # pgp_sym_encrypt/pgp_sym_decrypt. Extensions are database-level,
+        # not touched by drop_all/create_all below (those only affect
+        # tables), so a test-db container that has never had this test
+        # run against it needs this explicitly -- confirmed live: dropping
+        # the extension and re-running test_ingest_repository.py fails
+        # with "function pgp_sym_decrypt(...) does not exist" without
+        # this. 2.1.b's own real migration must do the same
+        # (CREATE EXTENSION IF NOT EXISTS pgcrypto), not just this test
+        # fixture -- see PROJECT_SPEC.md's Step 2.1.a decision entry.
+        connection.execute(sa.text("CREATE EXTENSION IF NOT EXISTS pgcrypto"))
     db.Base.metadata.drop_all(sync_engine)
     db.Base.metadata.create_all(sync_engine)
     sync_engine.dispose()
