@@ -26,7 +26,7 @@ fail() {
 
 # Shared by the api and worker checks below; word-splitting each
 # "-e NAME=value" token is safe since none contain whitespace.
-APP_ENV_ARGS="-e APP_ENV=development -e DATABASE_URL=postgresql+psycopg://widgetplatform:change-me@postgres:5432/widgetplatform -e QDRANT_URL=http://qdrant:6333 -e QDRANT_API_KEY=smoke-test-key -e JWT_SIGNING_KEY=smoke-test-jwt-signing-key-32-chars-ok -e API_HOST=0.0.0.0 -e API_PORT=8000"
+APP_ENV_ARGS="-e APP_ENV=development -e DATABASE_URL=postgresql+psycopg://widgetplatform:change-me@postgres:5432/widgetplatform -e QDRANT_URL=http://qdrant:6333 -e QDRANT_API_KEY=smoke-test-key -e JWT_SIGNING_KEY=smoke-test-jwt-signing-key-32-chars-ok -e DB_CONNECTION_ENCRYPTION_KEY=smoke-test-db-connection-key-32-chars-ok -e API_HOST=0.0.0.0 -e API_PORT=8000"
 
 stop_and_time() {
     # $1 = container id; fails unless docker stop exits 0 within 10s.
