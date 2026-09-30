@@ -45,7 +45,7 @@ A production-ready, multi-tenant, embeddable AI widget platform: one website is 
 | 1.3 | Qdrant collection [SECURITY] | Done | Completed 2026-09-28; all subtasks 1.3.a1, 1.3.a2, 1.3.b–1.3.f done; see closure summary below the Step 1.3 task list |
 | 1.4 | Session endpoint and JWT [SECURITY] | Done | Completed 2026-09-29; all subtasks 1.4.a–1.4.l done; see closure summary below the Step 1.4 task list |
 | 1.5 | Rate limiter and limits | Done | Completed 2026-09-30; all subtasks 1.5.a–1.5.f done; see closure summary below the Step 1.5 task list |
-| 1.6 | Phase 1 acceptance | Not started | – |
+| 1.6 | Phase 1 acceptance | Done | Completed 2026-09-30; all subtasks 1.6.a–1.6.e done; see closure summary below the Step 1.6 task list, and the separate Phase 1 closure section right after it |
 | 2.1 | Ingestion tables and job queue | Not started | – |
 | 2.2 | Domain verification [SECURITY] | Not started | – |
 | 2.3 | Safe fetcher (SSRF guard) [SECURITY] | Not started | – |
@@ -488,6 +488,17 @@ A production-ready, multi-tenant, embeddable AI widget platform: one website is 
   **What it asserts**: a dedicated seed (its own tenant + site key, via `db_session()`, depending on `reset_test_database` directly rather than the shared `_seeded` fixture, since this test needs no other test's unrelated rows) with a distinctive tenant name (`"Distinctive End-to-End Tenant 1.6.d"`); a real `POST /api/v1/session` call through the real `create_app()` app (never `encode_session_token()` called directly) for that site key; the real `session_token` from that response used as a Bearer token against `/whoami-tenant`; asserts both `tenant_id` equals the seeded id AND `name` equals the exact seeded distinctive string — proving the full chain (session issuance → token → verified identity → scoped repository → real query) carries the right identity correctly end to end, not just that some id matches.
 
   Verified: `docker info` confirmed running; `make lint` clean; the new test run standalone: **1 passed**; full `test_dependencies.py`: **23 passed** (22 existing + 1 new, no regressions from the `/whoami-tenant` response extension); full `backend/tests` without a test database: **306 passed, 104 skipped** (up from 306 passed, 103 skipped — the 1 new live test skips cleanly, nothing else changed); `make test-all` against the real test-db and test-qdrant: **410 passed** (306 + the 104 previously-skipped, all for real), both services confirmed cleaned up afterward (`docker ps -a` shows no leftover containers); `git status --short` showed exactly the one expected modified file (`backend/tests/test_dependencies.py`), `.env` correctly absent. No ASSUMPTION/UNCERTAIN markers needed. **Correction on the task's own next-task guess**: there is no "Step 1.7" — the components table's own next row after 1.6 is 2.1 (Phase 2's first step), confirmed by reading the table directly. Current task set to 1.6.e, next to Step 2.1. Counter reaches n=1.
+- 2026-09-30: Step 1.6.e — close out Step 1.6, and write the Phase 1 closure summary (PROJECT_SPEC.md only, no code/test changes).
+
+  **Consistency review**: read every decision line and open marker recorded under 1.6.a–1.6.d. No contradictions or stale claims found, with one exception fixed: the `ensure_collection()` ownership marker (recorded at 1.3.c) still said "Owner Step 1.6" — no longer accurate now that Step 1.6 is closing without deciding it (1.6.b deliberately declined to); reassigned to **Step 2.1** (the first ingestion job, the next point this actually becomes relevant), with the reassignment itself recorded in the marker's own text. The Qdrant-isolation-rerun marker is correctly marked RESOLVED, pointing at 1.6.c's real 16-passed output. 1.6.b's row correctly shows Done with its content living entirely inside 1.6.a's entry (confirmed by reading both directly) — same pattern as 1.5.e, not duplicated or missing. Test counts chain correctly end to end: 306/103 (1.6.a/b, unchanged, no code) → 306/103 confirmed again at 1.6.c → 306/104 at 1.6.d (+1 new test) → 306/104 confirmed fresh again at this close-out; `make test-all` chains 409 → 409 (1.6.c) → 410 (1.6.d) → 410 (this close-out).
+
+  **docs/SPEC.md §16 acceptance record** added as its own dedicated section (not folded into the closure summary, given its length) — every "Identity and threads" and "Abuse and cost" line marked CONFIRMED ACCEPTED (naming the task that proved it) or DEFERRED (naming the exact owning future step), using the clause-level splits already agreed at the Step 1.6 breakdown for the three straddling lines. Every other §16 group (Ingestion/crawler, Escalation, Streaming, Injection, Dashboard) noted as not applicable to Phase 1 at all, not enumerated line by line again.
+
+  Step 1.6 marked Done in the main components table and its own task list; a closure summary added (built: the live health check with no hidden `ensure_collection()` dependency; the fresh, independent full-suite acceptance gate; the one new end-to-end test; the full §16 acceptance record).
+
+  **Phase 1 closure** added as a separate, distinct section, one level up from Step 1.6's own closure — confirmed first that PROJECT_SPEC.md's own Components and status table (§4) has no phase-level row or status field at all; rather than inventing one ad hoc, this new section's own existence and content is the record, stated explicitly as such. One line per component (1.1, 1.1b, 1.1c, 1.2, 1.3, 1.4, 1.5, 1.6) naming what it delivered — a rollup, not a re-derivation of any step's own closure summary. docs/SPEC.md §18's own Phase 1 accept line quoted exactly ("`docker compose up` gives a healthy stack; session flow and identity tests pass") and stated plainly as now satisfied, with a pointer to 1.6.a/1.6.c/1.6.d's own evidence and to the §16 acceptance record above it, not repeating either.
+
+  Verified fresh, not copied from a prior entry: `docker info` confirmed running; `make lint` clean; full `backend/tests` without a test database: **306 passed, 104 skipped** (unchanged from 1.6.d — this task touches no code or tests); `make test-all`: **410 passed** (likewise unchanged), both test services confirmed cleaned up (`docker ps -a` shows no leftover containers) afterward; `git status --short` showed exactly the one expected file (`PROJECT_SPEC.md`), `.env` correctly absent. No ASSUMPTION/UNCERTAIN markers needed. Current task set to Step 2.1, next to "Step 2.1 breakdown" (no subtask breakdown exists yet — matching the precedent set at every prior Step's own first entry). Counter stays at n=1 — this task, like 1.6.a–1.6.c, produced zero code or test changes, so it does not add a second count on top of 1.6.d's.
 
   Tests (all live, real HTTP stack via `httpx.AsyncClient`/`ASGITransport` against a real `create_app()`, matching 1.4.g/h's own convention): (a) a low configured `SESSION_RATE_LIMIT_PER_SITE_KEY=3` (not 11 real requests against the production default) — the 4th request from one `(IP, site_key)` pair is 429 with the exact body/header shape; (b) a different site_key (same IP) and a different IP (same site_key, via a new `_client_from_ip()` helper built on `ASGITransport`'s own `client` constructor argument, not exercised by any prior test) are both unaffected by an exhausted pair; (c) four DIFFERENT real site keys from one IP (`SESSION_RATE_LIMIT_PER_IP=3`) trip the per-IP limiter on the 4th, even though none individually exceeds its own site-key limit; (d) the order proof described above; (e) `app.state.site_key_limiter`/`per_ip_limiter` pre-seeded directly with a shared injectable-clock `RateLimiter` (matching `StatusCache`'s own test convention exactly, `test_dependencies.py`) — confirms `retry_after` is `40.0`, not the full `60`-second window, after the fake clock advances 20s into it; (f) 1.5.d's own proof, folded in; (g) an explicit regression test plus the full pre-existing `test_session.py` suite run unmodified confirms a non-rate-limited success response is byte-for-byte unaffected (same body/headers, and explicitly no leaked `Retry-After` header).
 
@@ -520,9 +531,9 @@ A production-ready, multi-tenant, embeddable AI widget platform: one website is 
 
 ## 7. Current task and next task
 
-Current: Step 1.6.e Close-out and Phase 1 closure summary.
-Next: Step 2.1 Ingestion tables and job queue (there is no "Step 1.7" — 1.6 is Phase 1's last step; the task table's own next row after 1.6 is 2.1, the first step of Phase 2).
-Do not modify (completed tasks): 1.1.a, 1.1.b, 1.1.c, 1.1.d, 1.1.e, 1.1.f, 1.1.g, 1.1.h, 1.1.i, 1.1.j, 1.1.k, 1.1.l, 1.1.m, 1.1.n, 1.1.o.a, 1.1.o.b, 1.1.o.c, 1.1.o.d, 1.1.o.e, 1.1.o.f, 1.1.o.g, 1.1.o.h, 1.1b, 1.1c, 1.2.a, 1.2.b, 1.2.c, 1.2.d, 1.2.e, 1.2.f, 1.3.a1, 1.3.a2, 1.3.b, 1.3.c, 1.3.d, 1.3.e, 1.3.f, 1.4.a, 1.4.b, 1.4.c, 1.4.d, 1.4.e, 1.4.f, 1.4.g, 1.4.h, 1.4.i, 1.4.j, 1.4.k, 1.4.l, 1.5.a, 1.5.b, 1.5.c, 1.5.d, 1.5.e, 1.5.f, 1.6.a, 1.6.b, 1.6.c, 1.6.d.
+Current: Step 2.1 Ingestion tables and job queue.
+Next: Step 2.1 breakdown (no subtask breakdown recorded yet — Phase 1 is now Done in full; see its closure section above).
+Do not modify (completed tasks): 1.1.a, 1.1.b, 1.1.c, 1.1.d, 1.1.e, 1.1.f, 1.1.g, 1.1.h, 1.1.i, 1.1.j, 1.1.k, 1.1.l, 1.1.m, 1.1.n, 1.1.o.a, 1.1.o.b, 1.1.o.c, 1.1.o.d, 1.1.o.e, 1.1.o.f, 1.1.o.g, 1.1.o.h, 1.1b, 1.1c, 1.2.a, 1.2.b, 1.2.c, 1.2.d, 1.2.e, 1.2.f, 1.3.a1, 1.3.a2, 1.3.b, 1.3.c, 1.3.d, 1.3.e, 1.3.f, 1.4.a, 1.4.b, 1.4.c, 1.4.d, 1.4.e, 1.4.f, 1.4.g, 1.4.h, 1.4.i, 1.4.j, 1.4.k, 1.4.l, 1.5.a, 1.5.b, 1.5.c, 1.5.d, 1.5.e, 1.5.f, 1.6.a, 1.6.b, 1.6.c, 1.6.d, 1.6.e.
 
 ### Step 1.1 task list (approved)
 
@@ -712,11 +723,86 @@ see there rather than repeating it here.
 | 1.6.b | Record the finding from 1.6.a's live check on whether a fresh stack's health depends on `ensure_collection()` ever having been called. Expected outcome: health is independent of it (the stack is healthy; Qdrant simply has no collection until something calls `ensure_collection()`) — if so, leave the existing `ensure_collection()` ownership marker (recorded at 1.3.c) open with no urgency and do **not** decide its deploy-step ownership here, since that is a real design decision, not something to settle in passing during acceptance. Confirmed genuinely done, not just adjacent work: the finding (`knowledge_chunks` does not exist in a fresh stack; neither `/health` nor `/ready` depends on it) was produced and recorded entirely at Task 1.6.a — see its decision-log entry, and the confirmation line below it. The `ensure_collection()` ownership question itself remains open, undecided — this task only confirmed there is no urgency forcing that decision now | Done |
 | 1.6.c | Fresh full-suite run as 1.6's own explicit acceptance gate, distinct from any prior task's own reported numbers: `make lint`; full `backend/tests` without a test database (real, freshly-observed counts); `make test-all` (real, freshly-observed counts); confirm `backend/tests/test_qdrant_isolation.py` passes standalone — resolves the Step-1.6-owned Qdrant-isolation-rerun marker (recorded at 1.3.d) by literally doing what it says | Done |
 | 1.6.d | One new, genuinely end-to-end test: a real `POST /api/v1/session` response's own token, driven through `get_current_visitor` and `get_tenant_repository`, ending in an actual tenant-scoped repository read (e.g. `get_tenant()`) whose result is asserted against the originally-seeded row — the one concrete coverage gap found at this step's own planning (no existing test drives the full real chain with a real issued token all the way to a real scoped DB read) | Done |
-| 1.6.e | Close-out: record, clause-level, which docs/SPEC.md §16 lines are now confirmed accepted for Phase 1 and which are explicitly deferred (naming the owning future step for each of the three straddling lines: the token/`retrieve()`-mediated cross-tenant isolation line → Step 3.1; "a widget token on admin endpoints returns 401" → Phase 6; "the retention sweep deletes expired chats" → Step 4.2). Mark Step 1.6 Done in the main components table and in this task list. Add a separate Phase 1 closure summary in PROJECT_SPEC.md, one level up from Step 1.6's own step-level closure — a higher-level rollup across all of Phase 1's steps (1.1, 1.1b, 1.1c, 1.2, 1.3, 1.4, 1.5, 1.6), not a repeat of any one step's own summary | Not started |
+| 1.6.e | Close-out: record, clause-level, which docs/SPEC.md §16 lines are now confirmed accepted for Phase 1 and which are explicitly deferred (naming the owning future step for each of the three straddling lines: the token/`retrieve()`-mediated cross-tenant isolation line → Step 3.1; "a widget token on admin endpoints returns 401" → Phase 6; "the retention sweep deletes expired chats" → Step 4.2). Mark Step 1.6 Done in the main components table and in this task list. Add a separate Phase 1 closure summary in PROJECT_SPEC.md, one level up from Step 1.6's own step-level closure — a higher-level rollup across all of Phase 1's steps (1.1, 1.1b, 1.1c, 1.2, 1.3, 1.4, 1.5, 1.6), not a repeat of any one step's own summary | Done |
+
+### Step 1.6 closure summary (2026-09-30)
+
+Built: confirmation that a fresh Compose deployment, using `.env.example`'s
+own defaults, is genuinely healthy end to end, with no hidden dependency on
+`ensure_collection()` ever having been called (1.6.a/b); a fresh, independent
+full-suite acceptance gate (`make lint`, the full suite without a database,
+`make test-all`, and `test_qdrant_isolation.py` re-run standalone) rather
+than trusting any prior task's own reported numbers (1.6.c); the one real
+end-to-end test proving a session-issued token carries identity all the way
+through `get_current_visitor` and `get_tenant_repository` to an actual
+tenant-scoped database read (1.6.d); and the full docs/SPEC.md §16
+acceptance status for everything built through this phase, recorded
+immediately below.
+
+What's still outstanding (deferred deliberately, not forgotten) is tracked
+entirely in section 9's Open markers list below — see there rather than
+repeating it here.
+
+### docs/SPEC.md §16 acceptance record (Phase 1)
+
+This is PROJECT_SPEC.md's own acceptance record — not a restatement of
+docs/SPEC.md §16 itself — naming which task proved each line, and which
+future step owns each undone clause. Only the "Identity and threads" and
+"Abuse and cost" groups apply to what exists through Step 1.6; every other
+§16 group (Ingestion and crawler, Escalation, Streaming, Injection,
+Dashboard) has no built code yet anywhere in this project and is not
+applicable to Phase 1 at all.
+
+**Identity and threads:**
+- "A tenant A token can never return tenant B's chunks, including through the hybrid query's dense and sparse sub-queries." — **CONFIRMED ACCEPTED** for the underlying Qdrant filter/index isolation mechanism (1.3.d; re-verified standalone, real output, at 1.6.c: `test_qdrant_isolation.py`, 16 passed). **DEFERRED**: the token/`retrieve()`-mediated version → **Step 3.1** (no `retrieve()` exists yet).
+- "Visitor A can't read or resume visitor B's conversation, even within the same tenant." — **DEFERRED** in full → **Step 4.2** (Conversations endpoints and retention sweep). `get_conversation_by_id()` (1.2) filters only by `tenant_id`, not `vid` — visitor-level enforcement has no endpoint to live in yet.
+- "Another visitor's `conversation_id` returns 404, and client-sent `thread_id`/`client_id`/`configurable` is ignored." — **DEFERRED** in full → **Step 3.2** (checkpointer) / **Step 4.1** (`/chat`) — neither exists.
+- "`/api/v1/session` from a non-allowlisted or missing `Origin` returns 403, and a token replayed with a different `Origin` returns 401." — **CONFIRMED ACCEPTED** (1.4.g, 1.4.h; `test_session.py`, `test_dependencies.py`; re-verified fresh at 1.6.c).
+- "Expired, forged, `alg=none` and wrong-`aud` tokens return 401, and a widget token on admin endpoints returns 401." — **CONFIRMED ACCEPTED** for the first clause (1.4.h). **DEFERRED**: "a widget token on admin endpoints" → **Phase 6** (no admin endpoints exist).
+- "A model-generated tool call containing `client_id` has no effect." — **DEFERRED** in full → **Step 3.6** (tool wrapper doesn't exist).
+- "A suspended tenant is blocked within the cache TTL, and the retention sweep deletes expired chats and nothing newer." — **CONFIRMED ACCEPTED** for the first clause (1.4.h's `StatusCache` TTL test). **DEFERRED**: "the retention sweep" → **Step 4.2**.
+
+**Abuse and cost:**
+- "The 11th message in a minute returns 429 with `Retry-After`, and a second concurrent stream is refused." — **DEFERRED** in full → **Steps 4.1/4.3** (per 1.5.f's own marker; `/chat` doesn't exist).
+- "A session-creation flood from one IP is blocked, and many new visitors from one IP hit the IP cap." — **CONFIRMED ACCEPTED** in full (1.5.c, 1.5.e; `test_session.py`; re-verified fresh at 1.6.c).
+- Every remaining "Abuse and cost" line (100% quota, fallback/escalation exemption, restart reload, the 503-during-reload window, SMTP retry, trace-text-at-30-days) — **DEFERRED** in full → **Steps 4.3/4.4/4.5** (quota, escalation and tracing systems don't exist).
+
+### Phase 1 closure (2026-09-30)
+
+PROJECT_SPEC.md's own Components and status table (§4) has no phase-level
+row or status field — only per-step rows. This section itself is the
+record that Phase 1 is complete; no new status field is added to §4 for
+it, to avoid a second, redundant place that could drift out of sync.
+
+**What each component delivered** (one line each, a rollup — not a
+re-derivation of any step's own closure summary above):
+- **1.1 Repo skeleton and Compose**: a hardened, non-root Docker image; a Postgres+Qdrant+api+worker Compose stack; a two-job CI workflow; hash-pinned lockfiles; weekly + change-triggered dependency/image security scanning.
+- **1.1b Whole-application skeleton**: 12 subpackage stub modules (one per docs/SPEC.md §21 subpackage), each raising `NotImplementedError` with a `TODO(<owning step>)`, proving the repo layout matches the spec's own module map before any real feature exists.
+- **1.1c Marker check**: `make hooks`, a marker-visibility script (TODO/ASSUMPTION/UNCERTAIN/NOTE), wired into the Makefile.
+- **1.2 Database, migrations and tenant-scoped access**: 5 ORM models; the first Alembic migration, hand-verified against a live database; `TenantScopedRepository`, the sole enforcement point for "all tenant-scoped database access goes through the tenant-scoped repository helpers" (§21), proven via cross-tenant hostile-caller isolation tests.
+- **1.3 Qdrant collection [SECURITY]**: an authenticated Qdrant service; idempotent collection-schema setup (`ensure_collection()`); a strict `tenant_filter()`; two-tenant isolation proofs across dense, sparse and hybrid queries; an import-confinement read-path guard.
+- **1.4 Session endpoint and JWT [SECURITY]**: `POST /api/v1/session` issuing rotatable HS256 JWTs; a verified-identity dependency with a TTL-cached tenant/site-key status check; the repository dependency completing the chain from a verified JWT to an automatically tenant-scoped query.
+- **1.5 Rate limiter and limits**: a pure, framework-agnostic sliding-window-log `RateLimiter`; validated Settings-driven limit/window configuration; both a per-`(IP, site_key)` and a per-IP counter wired into `POST /api/v1/session`, with a real `Retry-After` countdown and a proven collision-safe key encoding.
+- **1.6 Phase 1 acceptance**: see its own closure summary immediately above.
+
+**docs/SPEC.md §18's own Phase 1 accept line**, quoted exactly:
+> "`docker compose up` gives a healthy stack; session flow and identity tests pass."
+
+**This line is now satisfied.** Evidence: the first clause by 1.6.a's live
+Compose health check (a fresh stack, from `.env.example`'s own defaults,
+reaches healthy with no hidden dependency on `ensure_collection()`); the
+second clause by 1.6.c's fresh, independent full-suite acceptance gate
+(a re-run of it, fresh again, at this close-out: **306 passed, 104
+skipped** without a database; **410 passed** with `make test-all`, both
+test services confirmed cleaned up) plus 1.6.d's new end-to-end test
+proving a real session-issued token carries identity all the way through
+to an actual tenant-scoped database read. The full line-by-line
+docs/SPEC.md §16 acceptance status is recorded immediately above — not
+repeated here.
 
 ## 8. Task counter since the last duplication check
 
-n = 1 (run the duplication check at 3; never exceed 4) — reset on the basis that 1.6.a, 1.6.b and 1.6.c (and 1.5.f before them) produced zero code or test changes (see the decision log entry above); 1.6.d counted since that reset.
+n = 1 (run the duplication check at 3; never exceed 4) — reset on the basis that 1.6.a, 1.6.b and 1.6.c (and 1.5.f before them) produced zero code or test changes (see the decision log entry above); 1.6.d counted since that reset. 1.6.e stays at n=1, unchanged, on the same zero-code-or-test-changes basis (PROJECT_SPEC.md only) — it does not add a second count.
 
 ## 9. Open markers
 
@@ -743,7 +829,7 @@ n = 1 (run the duplication check at 3; never exceed 4) — reset on the basis th
 - Owner 6.1: remove or update `backend/tests/test_layout_placeholders.py` when tooling is added to `dashboard/`; the test exists to stop tooling being added before the dashboard tooling decision.
 - Owner Phase 7: arm64 image build and vulnerability scan in CI (complements the existing "verify the image builds and runs on arm64" marker above — this one is specifically about wiring it into the pipeline, not just manual verification).
 - Owner Step 2.5 (recorded at Task 1.3.c, 2026-09-28): `app/qdrant.py`'s `DENSE_VECTOR_SIZE = 1536` is an `ASSUMPTION` (`text-embedding-3-small`'s output dimension) — revisit the real embedding model and dimension before any data exists; if either changes, the (still-empty) `knowledge_chunks` collection must be recreated, not migrated in place.
-- Owner Step 1.6 (recorded at Task 1.3.c, 2026-09-28): decide who calls `ensure_collection()` in a deployed system (a deploy step, like `migrate`, or the first ingestion job) — nothing calls it yet; 1.3.c only builds the function itself.
+- Owner Step 2.1 (recorded at Task 1.3.c, 2026-09-28; reassigned at Step 1.6's own close-out, 2026-09-30 — Step 1.6 confirmed empirically, at 1.6.a, that there is no urgency forcing this decision (a fresh stack is fully healthy with no collection at all), but explicitly declined to decide it itself, since it is a real design decision, not something to settle in passing during acceptance; Step 2.1, the first ingestion job, is the next point this actually becomes relevant): decide who calls `ensure_collection()` in a deployed system (a deploy step, like `migrate`, or the first ingestion job) — nothing calls it yet; 1.3.c only builds the function itself.
 - Owner Step 3.1 or Phase 7 (recorded at Task 1.3.c, 2026-09-28, not built now): per-tenant HNSW tuning for `knowledge_chunks` (`hnsw_config.m = 0` plus a non-zero `hnsw_config.payload_m`, alongside the existing `is_tenant` index) — Qdrant's own multitenancy guidance recommends this pairing for large multi-tenant collections; confirmed it can be applied to an existing collection later via the update-collection-parameters API (server rebuilds segments in the background), so it does not have to be decided before real data exists.
 - Owner Step 2.5 (recorded at Task 1.3.d, 2026-09-28): write the `client_id` payload value as `str(tenant_id)` in canonical lowercase form — `tenant_filter()` matches that exact string, produced by `uuid.UUID`'s own `str()`, so the ingestion writer must use the same form (not, for example, an uppercase or hyphen-stripped variant) or every filtered query for that tenant will silently return nothing.
 - Owner Step 3.1 [SECURITY] (recorded at Task 1.3.d, 2026-09-28; re-confirmed at Task 1.3.e's H1 housekeeping): `retrieve()` must build its filter with `tenant_filter()` inside **both** prefetches, and also on the outer query as defense in depth — re-verified live (fresh this session) that this exact configuration returns byte-for-byte identical results to filtering both prefetches alone, so adding the outer filter costs nothing and gives one more independent layer. Never rely on an outer-only filter (dropping either prefetch's own filter): that configuration is not committed anywhere, is not a documented Qdrant guarantee beyond this repo's own empirical checks, and a small prefetch limit could still let another tenant's candidates crowd out a tenant's own matches before fusion runs. Step 3.1 must re-run these isolation cases (dense, sparse, hybrid, the orphan point, a no-points tenant) **through `retrieve()` itself**, not just through `query_points()` directly, since 1.3.d only proves the underlying Qdrant mechanism is leak-proof, not that `retrieve()` wires it up correctly. Added at Task 1.3.e: `retrieve()` must live in `app/retrieval/service.py` specifically — `test_qdrant_read_path_guard.py`'s `READ_ALLOWLIST`/`CLIENT_ACCESS_ALLOWLIST` already name exactly that path as the one file allowed both to hold a Qdrant client and to call a read method on it; putting `retrieve()` anywhere else fails the guard built in 1.3.e. Added at the Step 1.4 breakdown (2026-09-28): the identity that reaches `tenant_filter()` must be `VerifiedIdentity.tenant_id` specifically, threaded through `get_tenant_repository` and whatever `retrieve()`'s own caller looks like by Step 3.1 — never re-derived from a request body/query field. Confirmed still reads correctly at Task 1.4.l's close-out (2026-09-29): both now exist as real, built code, not planned deliverables — `VerifiedIdentity(tenant_id, vid, org)` (Task 1.4.h, `backend/app/auth/dependencies.py`) and `get_tenant_repository()` (Task 1.4.i, same module), which already constructs `TenantScopedRepository(tenant_id=identity.tenant_id, ...)` exactly as this marker anticipated — nothing here needs rewording beyond naming the real functions instead of the tasks that built them.
