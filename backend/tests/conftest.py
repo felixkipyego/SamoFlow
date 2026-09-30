@@ -53,6 +53,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app import db, qdrant
 from app.config import POSTGRES_SCHEME, Settings, get_settings
+from app.ingest.repository import IngestRepository
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 BACKEND_DIR = Path(__file__).resolve().parent.parent
@@ -128,6 +129,32 @@ def called_name(node: ast.Call) -> str | None:
     if isinstance(func, ast.Attribute):
         return func.attr
     return None
+
+
+def check_call_allowlist(
+    paths, target_name: str, allowlist: tuple[str, ...], self_file: Path | None = None
+) -> list[str]:
+    # Shared by test_config_guard.py and test_ingest_repository_guard.py
+    # (duplication check after 2.1.a/b): both walked an AST, matched a
+    # Call node's name via called_name() above, and reported the same
+    # "calls X() but this file is not in its allow-list" shape -- this is
+    # that one shared shape, parameterized by which name and which list.
+    # Each guard's own OTHER rules (test_config_guard.py's Settings()/
+    # errors() checks) stay separate, since they differ.
+    violations = []
+    for path in paths:
+        if path == self_file:
+            continue
+        rel = path.relative_to(BACKEND_DIR).as_posix()
+        tree = ast.parse(path.read_text(), filename=str(path))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Call) and called_name(node) == target_name:
+                if rel not in allowlist:
+                    violations.append(
+                        f"{path}:{node.lineno}: calls {target_name}() but {rel!r} "
+                        "is not in its allow-list"
+                    )
+    return violations
 
 
 def minimal_subprocess_env() -> dict[str, str]:
@@ -481,6 +508,30 @@ async def db_session() -> AsyncIterator[AsyncSession]:
     # site the plain "async with db_session() as session:" shape instead.
     async with aclosing(db.get_db_session()) as session_gen:
         yield await anext(session_gen)
+
+
+async def assert_db_connection_credential_round_trip(
+    tenant_id: uuid.UUID, credentials: dict[str, str], host: str = "round-trip-proof.internal"
+) -> None:
+    # Shared by test_ingest_repository.py and test_alembic.py (duplication
+    # check after 2.1.a/b): both had a near-identical 12-13 line
+    # seed-create-read-assert block proving a credential written through
+    # IngestRepository.create_db_connection() reads back correctly,
+    # unchanged, through get_decrypted_credentials() -- one shared helper
+    # instead of two copies. Neither caller asserts on `host` itself, so
+    # it stays an optional, defaulted parameter rather than something
+    # every call site must repeat.
+    async with db_session() as session:
+        repo = IngestRepository(tenant_id=tenant_id, session=session)
+        db_connection = await repo.create_db_connection(host=host, credentials=credentials)
+        await session.commit()
+        db_connection_id = db_connection.id
+
+    async with db_session() as session:
+        repo = IngestRepository(tenant_id=tenant_id, session=session)
+        decrypted = await repo.get_decrypted_credentials(db_connection_id)
+
+    assert decrypted == credentials
 
 
 @asynccontextmanager

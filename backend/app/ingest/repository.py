@@ -28,10 +28,25 @@ import uuid
 from dataclasses import dataclass
 
 from sqlalchemy import func, select
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
 from app.ingest.models import DbConnection
+
+
+class CredentialEncryptionError(Exception):
+    """Raised by create_db_connection()/get_decrypted_credentials() for any
+    failure of the pgp_sym_encrypt()/pgp_sym_decrypt() statement itself
+    (e.g. a wrong or rotated db_connection_encryption_key). The message is
+    always this fixed, generic description -- never the original
+    exception's string form. SQLAlchemy's default exception formatting
+    embeds every bound parameter of the failing statement, which includes
+    the key itself, so the original exception is never re-raised, chained,
+    or logged; it is only caught and replaced (duplication check after
+    2.1.a/b, item C1 -- found live: a wrong-key pgp_sym_decrypt() failure's
+    own str(exc) contained the literal key value).
+    """
 
 
 @dataclass(frozen=True)
@@ -54,9 +69,24 @@ class IngestRepository:
         # via a scalar SELECT before the row is constructed -- there is no
         # client-side implementation of pgp_sym_encrypt to call directly.
         key = get_settings().db_connection_encryption_key_str()
-        encrypted = (
-            await self.session.execute(select(func.pgp_sym_encrypt(json.dumps(credentials), key)))
-        ).scalar_one()
+        encryption_error: CredentialEncryptionError | None = None
+        try:
+            encrypted = (
+                await self.session.execute(
+                    select(func.pgp_sym_encrypt(json.dumps(credentials), key))
+                )
+            ).scalar_one()
+        except SQLAlchemyError:
+            # Raised below, outside this except block, so Python never
+            # implicitly chains __context__/__cause__ to the original
+            # exception (matching app/auth/tokens.py's decode_session_token()
+            # convention) -- confirmed live that `raise ... from None` alone
+            # does NOT clear __context__, only __suppress_context__.
+            encryption_error = CredentialEncryptionError(
+                "failed to encrypt credentials for storage"
+            )
+        if encryption_error is not None:
+            raise encryption_error
         db_connection = DbConnection(
             tenant_id=self.tenant_id,
             host=host,
@@ -72,13 +102,21 @@ class IngestRepository:
         # The one explicit call that unwraps the credential. Never log
         # this, and never log its return value.
         key = get_settings().db_connection_encryption_key_str()
-        result = await self.session.execute(
-            select(func.pgp_sym_decrypt(DbConnection.encrypted_credentials, key)).where(
-                DbConnection.id == db_connection_id,
-                DbConnection.tenant_id == self.tenant_id,
+        encryption_error: CredentialEncryptionError | None = None
+        try:
+            result = await self.session.execute(
+                select(func.pgp_sym_decrypt(DbConnection.encrypted_credentials, key)).where(
+                    DbConnection.id == db_connection_id,
+                    DbConnection.tenant_id == self.tenant_id,
+                )
             )
-        )
-        raw = result.scalar_one_or_none()
+            raw = result.scalar_one_or_none()
+        except SQLAlchemyError:
+            # See create_db_connection()'s identical comment above: raised
+            # outside this except block on purpose.
+            encryption_error = CredentialEncryptionError("failed to decrypt stored credentials")
+        if encryption_error is not None:
+            raise encryption_error
         if raw is None:
             raise ValueError(
                 f"db_connection {db_connection_id} does not belong to tenant {self.tenant_id}"

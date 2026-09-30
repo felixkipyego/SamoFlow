@@ -6,7 +6,11 @@
 # app/auth/tokens.py; Task 2.1.a extends it to
 # db_connection_encryption_key_str(), starting
 # ALLOWED_DB_CONNECTION_ENCRYPTION_KEY_CALLERS with its one real caller,
-# app/ingest/repository.py): parses every .py file under backend/app and
+# app/ingest/repository.py; duplication check after 2.1.a/b moves the
+# secret-accessor allow-list check itself into a shared
+# check_call_allowlist() helper, tests/conftest.py, reused by
+# test_ingest_repository_guard.py -- the Settings()/errors() checks below
+# stay this file's own, since they differ): parses every .py file under backend/app and
 # backend/alembic with ast (not text search, so comments/strings never
 # trigger it) and enforces five rules from PROJECT_SPEC.md's decisions log:
 #   - only app/config.py may construct Settings() directly;
@@ -23,7 +27,7 @@
 #     call db_connection_encryption_key_str() outside app/config.py.
 import ast
 
-from tests.conftest import BACKEND_DIR, called_name, iter_python_files
+from tests.conftest import BACKEND_DIR, called_name, check_call_allowlist, iter_python_files
 
 APP_DIR = BACKEND_DIR / "app"
 ALEMBIC_DIR = BACKEND_DIR / "alembic"
@@ -63,7 +67,6 @@ _SECRET_ACCESSOR_ALLOW_LISTS: dict[str, tuple[str, ...]] = {
 def test_config_guard():
     violations = []
     for path in iter_python_files(APP_DIR, ALEMBIC_DIR):
-        rel = path.relative_to(BACKEND_DIR).as_posix()
         tree = ast.parse(path.read_text(), filename=str(path))
         for node in ast.walk(tree):
             if not isinstance(node, ast.Call):
@@ -80,12 +83,20 @@ def test_config_guard():
                     f"{path}:{node.lineno}: calls a method named errors(); "
                     "log str(exc) instead, never exc.errors()"
                 )
-            elif (
-                name in _SECRET_ACCESSOR_ALLOW_LISTS
-                and path != CONFIG_FILE
-                and rel not in _SECRET_ACCESSOR_ALLOW_LISTS[name]
-            ):
-                violations.append(
-                    f"{path}:{node.lineno}: calls {name}() but {rel!r} is not in its allow-list"
-                )
+
+    # Duplication check after 2.1.a/b: the allow-list-checking shape below
+    # (shared with test_ingest_repository_guard.py) is now
+    # check_call_allowlist() (tests/conftest.py) -- one call per secret
+    # accessor, self_file=CONFIG_FILE matching the "and path != CONFIG_FILE"
+    # exemption every accessor above already had.
+    for target_name, allowlist in _SECRET_ACCESSOR_ALLOW_LISTS.items():
+        violations.extend(
+            check_call_allowlist(
+                iter_python_files(APP_DIR, ALEMBIC_DIR),
+                target_name,
+                allowlist,
+                self_file=CONFIG_FILE,
+            )
+        )
+
     assert not violations, "\n".join(violations)

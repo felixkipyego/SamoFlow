@@ -37,7 +37,6 @@ from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 
 from app import db
 from app.config import get_settings
-from app.ingest.repository import IngestRepository
 from app.plans import models as plans_models  # noqa: F401 (registers "plans" on Base.metadata)
 from app.tenancy.models import Tenant
 from tests.conftest import (
@@ -46,6 +45,7 @@ from tests.conftest import (
     EXPECTED_STATUS_CHECK_CONSTRAINTS,
     EXPECTED_TABLES,
     EXPECTED_UNIQUE_INDEXES,
+    assert_db_connection_credential_round_trip,
     db_session,
     minimal_subprocess_env,
     require_test_database,
@@ -592,19 +592,9 @@ async def test_downgrade_from_head_removes_ingestion_tables_but_keeps_pgcrypto(
         await session.commit()
 
     credentials = {"username": "dbuser", "password": "post-migration-proof-password"}
-    async with db_session() as session:
-        repo = IngestRepository(tenant_id=tenant_id, session=session)
-        db_connection = await repo.create_db_connection(
-            host="proof-db.internal", credentials=credentials
-        )
-        await session.commit()
-        db_connection_id = db_connection.id
-
-    async with db_session() as session:
-        repo = IngestRepository(tenant_id=tenant_id, session=session)
-        decrypted = await repo.get_decrypted_credentials(db_connection_id)
-
-    assert decrypted == credentials
+    await assert_db_connection_credential_round_trip(
+        tenant_id, credentials, host="proof-db.internal"
+    )
 
     await db.get_engine().dispose()
     db.get_engine.cache_clear()

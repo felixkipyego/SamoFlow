@@ -20,10 +20,15 @@ import uuid
 import pytest
 import sqlalchemy as sa
 
-from app.ingest.repository import IngestRepository
+from app.config import get_settings
+from app.ingest.repository import CredentialEncryptionError, IngestRepository
 from app.plans import models as plans_models  # noqa: F401 (registers "plans" on Base.metadata)
 from app.tenancy.models import Tenant
-from tests.conftest import db_session
+from tests.conftest import (
+    assert_db_connection_credential_round_trip,
+    assert_secret_not_in_exception_chain,
+    db_session,
+)
 
 DISTINCTIVE_PASSWORD = "sUpEr-DiStInCtIvE-fake-password-123-never-leak-me"  # noqa: S105 (test fixture value, not a real secret)
 
@@ -45,19 +50,7 @@ async def _seeded_tenants(reset_test_database):
 async def test_create_and_get_decrypted_credentials_round_trip(_seeded_tenants):
     ids = _seeded_tenants
     credentials = {"username": "dbuser", "password": DISTINCTIVE_PASSWORD}
-    async with db_session() as session:
-        repo = IngestRepository(tenant_id=ids["tenant_a"], session=session)
-        db_connection = await repo.create_db_connection(
-            host="db.example.internal", credentials=credentials
-        )
-        await session.commit()
-        db_connection_id = db_connection.id
-
-    async with db_session() as session:
-        repo = IngestRepository(tenant_id=ids["tenant_a"], session=session)
-        decrypted = await repo.get_decrypted_credentials(db_connection_id)
-
-    assert decrypted == credentials
+    await assert_db_connection_credential_round_trip(ids["tenant_a"], credentials)
 
 
 async def test_raw_sql_select_never_returns_plaintext_credentials(_seeded_tenants):
@@ -143,3 +136,72 @@ async def test_get_decrypted_credentials_raises_the_same_way_for_a_nonexistent_i
         repo = IngestRepository(tenant_id=ids["tenant_a"], session=session)
         with pytest.raises(ValueError):
             await repo.get_decrypted_credentials(uuid.uuid4())
+
+
+async def test_identical_plaintext_encrypts_to_different_ciphertext_across_rows(_seeded_tenants):
+    # Duplication check after 2.1.a/b, item C2: pgp_sym_encrypt() must never
+    # behave like deterministic/ECB-style encryption -- two rows (even
+    # across different tenants) encrypting the exact same credential
+    # dict must produce different encrypted_credentials bytes, or an
+    # attacker who can compare ciphertexts (without decrypting either)
+    # could still learn that two tenants share a password.
+    ids = _seeded_tenants
+    same_credentials = {"username": "dbuser", "password": DISTINCTIVE_PASSWORD}
+    raw_values = []
+    for tenant_id in (ids["tenant_a"], ids["tenant_b"]):
+        async with db_session() as session:
+            repo = IngestRepository(tenant_id=tenant_id, session=session)
+            db_connection = await repo.create_db_connection(
+                host="db.example.internal", credentials=same_credentials
+            )
+            await session.commit()
+            db_connection_id = db_connection.id
+
+        async with db_session() as session:
+            raw = (
+                await session.execute(
+                    sa.text("SELECT encrypted_credentials FROM db_connections WHERE id = :id"),
+                    {"id": db_connection_id},
+                )
+            ).scalar_one()
+        raw_values.append(bytes(raw))
+
+    assert raw_values[0] != raw_values[1]
+
+
+async def test_get_decrypted_credentials_never_leaks_the_key_on_a_wrong_key_failure(
+    _seeded_tenants, monkeypatch
+):
+    # Duplication check after 2.1.a/b, item C1: a genuine failure path in
+    # IngestRepository itself, not just a Settings-validation-layer proof
+    # like test_config.py's own leak tests -- reproduced live before
+    # writing this test: encrypt with one key, then attempt to decrypt the
+    # same row with a different key (the same shape as an operational
+    # key-rotation mistake). Confirmed live that SQLAlchemy's own default
+    # exception formatting embeds every bound parameter -- including the
+    # key itself -- in str(exc) unless the repository sanitizes it; this
+    # asserts the NEW, sanitized CredentialEncryptionError, walking its
+    # full chain (both keys, not just the wrong one, in case a future
+    # change ever binds the right key into the same failing statement).
+    ids = _seeded_tenants
+    right_key = "right-key-DISTINCTIVE-fake-38924710293847"
+    wrong_key = "WRONG-key-DISTINCTIVE-fake-91827364509182"
+
+    monkeypatch.setenv("DB_CONNECTION_ENCRYPTION_KEY", right_key)
+    get_settings.cache_clear()
+    async with db_session() as session:
+        repo = IngestRepository(tenant_id=ids["tenant_a"], session=session)
+        db_connection = await repo.create_db_connection(
+            host="db.example.internal", credentials={"username": "u", "password": "p"}
+        )
+        await session.commit()
+        db_connection_id = db_connection.id
+
+    monkeypatch.setenv("DB_CONNECTION_ENCRYPTION_KEY", wrong_key)
+    get_settings.cache_clear()
+    async with db_session() as session:
+        repo = IngestRepository(tenant_id=ids["tenant_a"], session=session)
+        with pytest.raises(CredentialEncryptionError) as exc_info:
+            await repo.get_decrypted_credentials(db_connection_id)
+
+    assert_secret_not_in_exception_chain(exc_info.value, right_key, wrong_key)
