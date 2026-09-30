@@ -32,13 +32,18 @@ SUBPACKAGES = [
 # test_tenancy_repository.py) -- removed from this list, not just left to
 # fail here. app.auth.routes is no longer a raising stub as of Task 1.4.g
 # (POST /api/v1/session is real, tested separately in test_session.py) --
-# removed the same way.
+# removed the same way. app.ingest.service is no longer a raising stub as
+# of Task 2.1.c -- enqueue_ingestion_job()'s own real replacement is
+# IngestRepository.enqueue() (app/ingest/repository.py, tested in
+# test_ingest_repository.py), not a same-named function in service.py, so
+# the now-empty stub file was deleted outright rather than left as
+# purposeless scaffolding; a real service.py can be recreated fresh
+# whenever a later ingestion step (2.2+) actually needs one.
 STUB_ENTRY_POINTS = [
     ("app.plans.service", "get_plan_limits"),
     ("app.chat.routes", "stream_chat_response"),
     ("app.agent.graph", "build_graph"),
     ("app.retrieval.service", "retrieve"),
-    ("app.ingest.service", "enqueue_ingestion_job"),
     ("app.handoff.routes", "submit_escalation"),
     ("app.notifications.service", "send_email"),
     ("app.mcp.service", "search_knowledge_base"),

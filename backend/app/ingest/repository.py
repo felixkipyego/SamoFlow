@@ -32,7 +32,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
-from app.ingest.models import DbConnection
+from app.ingest.models import DbConnection, Job
 
 
 class CredentialEncryptionError(Exception):
@@ -122,3 +122,40 @@ class IngestRepository:
                 f"db_connection {db_connection_id} does not belong to tenant {self.tenant_id}"
             )
         return json.loads(raw)
+
+    async def enqueue(
+        self,
+        job_type: str,
+        payload: dict | None = None,
+        source_id: uuid.UUID | None = None,
+    ) -> Job:
+        # Task 2.1.c: a method here, not a standalone function like
+        # create_tenant()/get_site_key_by_key() (app/tenancy/repository.py)
+        # -- those are standalone specifically because no tenant_id exists
+        # yet at the point they're called; enqueueing always happens on
+        # behalf of a specific tenant's own already-known action (a source
+        # being added, a scheduled refresh), so it fits this class's own
+        # invariant (a real tenant_id, already required to construct this
+        # repository) exactly the way create_visitor()/create_conversation()
+        # do on TenantScopedRepository. status="pending" and next_run_at
+        # are not set explicitly here: status has no column default (every
+        # other status column in this codebase -- sources.status,
+        # documents.status -- is set explicitly too), but next_run_at and
+        # attempts both already default correctly via the model's own
+        # TIMESTAMP_NOW/server_default (now, and 0) -- see
+        # app/ingest/models.py. max_attempts IS set explicitly, from
+        # Settings, rather than left to the column's own server_default=5:
+        # see PROJECT_SPEC.md's Step 2.1.c decision entry for why (the
+        # column default stays only as an inert defensive floor for any
+        # insert that bypasses this method).
+        job = Job(
+            tenant_id=self.tenant_id,
+            source_id=source_id,
+            job_type=job_type,
+            status="pending",
+            max_attempts=get_settings().job_max_attempts,
+            payload=payload or {},
+        )
+        self.session.add(job)
+        await self.session.flush()
+        return job

@@ -85,6 +85,21 @@ class Settings(BaseSettings):
     # floor (rule 11 -- reuse an already-justified number, not a new one
     # invented here).
     db_connection_encryption_key: SecretStr = Field(min_length=32)
+    # Task 2.1.c: the job queue's own retry policy. Not secrets -- same
+    # treatment as the session-rate-limit fields above (plain configurable
+    # numbers, gt=0 is pydantic's own built-in constraint, no custom
+    # validator). job_max_attempts is read by enqueue() (IngestRepository)
+    # to set each new job row's own max_attempts column at creation time --
+    # mark_job_failed() then compares against that row's own persisted
+    # value, not a fresh Settings read, so changing this setting later
+    # never shifts the retry ceiling of an already-created job. jobs.
+    # max_attempts' DB-level server_default=5 (app/ingest/models.py, from
+    # 2.1.a) stays as an inert defensive floor for any insert that
+    # bypasses enqueue(); it no longer governs behavior for jobs created
+    # through the sanctioned path once enqueue() always sets it
+    # explicitly.
+    job_retry_base_seconds: float = Field(default=60, gt=0)
+    job_max_attempts: int = Field(default=5, gt=0)
 
     @field_validator("database_url")
     @classmethod

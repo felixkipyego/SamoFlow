@@ -21,6 +21,8 @@ import pytest
 import sqlalchemy as sa
 
 from app.config import get_settings
+from app.ingest.models import Job
+from app.ingest.queue import claim_next_job
 from app.ingest.repository import CredentialEncryptionError, IngestRepository
 from app.plans import models as plans_models  # noqa: F401 (registers "plans" on Base.metadata)
 from app.tenancy.models import Tenant
@@ -167,6 +169,46 @@ async def test_identical_plaintext_encrypts_to_different_ciphertext_across_rows(
         raw_values.append(bytes(raw))
 
     assert raw_values[0] != raw_values[1]
+
+
+async def test_enqueue_creates_a_pending_job_with_the_right_initial_state(_seeded_tenants):
+    # Task 2.1.c: enqueue() is a method here, not a standalone function --
+    # see queue.py's own header comment and PROJECT_SPEC.md's Step 2.1.c
+    # decision entry for why (a real tenant_id is always already known at
+    # enqueue time, unlike create_tenant()'s case).
+    ids = _seeded_tenants
+    async with db_session() as session:
+        repo = IngestRepository(tenant_id=ids["tenant_a"], session=session)
+        job = await repo.enqueue(job_type="crawl", payload={"url": "https://example.com"})
+        await session.commit()
+        job_id = job.id
+
+    async with db_session() as session:
+        row = (await session.execute(sa.select(Job).where(Job.id == job_id))).scalar_one()
+
+    assert row.tenant_id == ids["tenant_a"]
+    assert row.source_id is None
+    assert row.job_type == "crawl"
+    assert row.status == "pending"
+    assert row.attempts == 0
+    assert row.max_attempts == get_settings().job_max_attempts
+    assert row.payload == {"url": "https://example.com"}
+    assert row.next_run_at is not None
+
+    # next_run_at's own "now" default is a database server-side value
+    # (func.now(), matching TIMESTAMP_NOW everywhere else in this
+    # codebase) -- comparing it against an app-process Python timestamp
+    # would be comparing two different clocks with no guaranteed
+    # sub-millisecond sync between the app process and the Postgres
+    # container, a real, observed flake, not a hypothetical one. The
+    # behavioral guarantee that actually matters -- "immediately eligible
+    # for claiming" -- is proven functionally instead: claim_next_job()
+    # must succeed on this exact job right away.
+    async with db_session() as session:
+        claimed = await claim_next_job(session)
+        await session.commit()
+    assert claimed is not None
+    assert claimed.id == job_id
 
 
 async def test_get_decrypted_credentials_never_leaks_the_key_on_a_wrong_key_failure(
