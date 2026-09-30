@@ -69,8 +69,11 @@ def _build_test_app() -> FastAPI:
         # scoped to, via an existing read method (1.2.d) -- never a new
         # one (this task only wires TenantScopedRepository to a request,
         # per its own instruction not to touch the class itself).
+        # `name` added at Task 1.6.d: proving a real row was read requires
+        # a field that couldn't already be inferred from the JWT's own
+        # `tid` claim -- `tenant_id` alone doesn't prove that.
         tenant = await repo.get_tenant()
-        return {"tenant_id": str(tenant.id)}
+        return {"tenant_id": str(tenant.id), "name": tenant.name}
 
     return app
 
@@ -482,6 +485,69 @@ async def test_a_real_session_issued_token_is_accepted_by_get_current_visitor(_s
     assert body["tenant_id"] == str(ids["tenant_active"]) == str(expected_claims.tenant_id)
     assert body["vid"] == str(expected_claims.vid)
     assert body["org"] == ORIGIN == expected_claims.origin
+
+
+async def test_a_real_session_token_carries_identity_through_to_a_real_repository_read(
+    reset_test_database,
+):
+    # Task 1.6.d: the one genuinely new end-to-end test in Step 1.6. The
+    # test above (C1) stops at get_current_visitor; this one's job is
+    # specifically to go further -- into get_tenant_repository and an
+    # ACTUAL repository read (repo.get_tenant()) -- and to assert against
+    # a distinctive field (tenant.name) that could not already be inferred
+    # from the JWT's own `tid` claim, proving the full chain (session
+    # issuance -> token -> verified identity -> scoped repository -> real
+    # query) carries the right identity correctly, not just a matching id.
+    #
+    # A dedicated seed, not the shared _seeded fixture: this test needs
+    # its own distinctive tenant name, unrelated to any other test's data,
+    # so depends on reset_test_database directly (a fresh empty schema)
+    # rather than _seeded's own unrelated tenant/site-key/visitor rows.
+    distinctive_name = "Distinctive End-to-End Tenant 1.6.d"
+    tenant_id = uuid.uuid4()
+    site_key_id = uuid.uuid4()
+
+    async with db_session() as session:
+        session.add(Tenant(id=tenant_id, name=distinctive_name, status="active"))
+        await session.flush()
+        session.add(
+            SiteKey(
+                id=site_key_id,
+                key="pk_live_e2e_1_6_d",
+                tenant_id=tenant_id,
+                allowed_origins=[ORIGIN],
+                environment="production",
+                status="live",
+            )
+        )
+        await session.commit()
+
+    # (1) A REAL POST /api/v1/session call, through the real create_app()
+    # app -- never encode_session_token() called directly. Proving this
+    # real issuance path works end to end is the whole point.
+    session_app = create_app()
+    async with await http_client(session_app) as client:
+        session_response = await client.post(
+            "/api/v1/session",
+            json={"site_key": "pk_live_e2e_1_6_d"},
+            headers={"Origin": ORIGIN},
+        )
+    assert session_response.status_code == 200
+    token = session_response.json()["session_token"]
+
+    # (2) That real token drives get_current_visitor -> get_tenant_repository
+    # -> repo.get_tenant() through the existing /whoami-tenant throwaway
+    # route (1.4.i) -- already composes exactly these two dependencies
+    # correctly, reused as-is; its response now also returns tenant.name
+    # (a small test-only extension above), since tenant_id alone would
+    # not prove a real row was read.
+    whoami_app = _build_test_app()
+    response = await _post_whoami_tenant(whoami_app, token=token, origins=[ORIGIN])
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["tenant_id"] == str(tenant_id)
+    assert body["name"] == distinctive_name
 
 
 # -- get_tenant_repository (Task 1.4.i) --------------------------------------
