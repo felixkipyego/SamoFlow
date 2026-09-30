@@ -28,18 +28,25 @@ import py_compile
 import subprocess
 import sys
 import traceback
+import uuid
 from pathlib import Path
 
 import pytest
 import sqlalchemy as sa
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 
+from app import db
+from app.config import get_settings
+from app.ingest.repository import IngestRepository
+from app.plans import models as plans_models  # noqa: F401 (registers "plans" on Base.metadata)
+from app.tenancy.models import Tenant
 from tests.conftest import (
     CASCADE_FK_COLUMNS,
     EXPECTED_PK_COLUMNS,
     EXPECTED_STATUS_CHECK_CONSTRAINTS,
     EXPECTED_TABLES,
     EXPECTED_UNIQUE_INDEXES,
+    db_session,
     minimal_subprocess_env,
     require_test_database,
 )
@@ -322,28 +329,19 @@ def test_upgrade_head_is_idempotent_and_never_prints_the_password(_test_engine):
     first = _run_alembic("upgrade", "head", engine=engine)
     assert first.returncode == 0, first.stdout + first.stderr
 
-    # Table list includes the real migration's 5 tables (Task 1.2.c) --
-    # was just ["alembic_version"] before any migration existed (1.1.h).
-    # Task 2.1.a added its four ingestion tables to EXPECTED_TABLES for
-    # test_models.py's own Python-metadata-only checks, but 2.1.a is
-    # schema-only (models, no migration yet) -- 2.1.b is the migration
-    # that actually creates them for real. Excluded here, narrowly and
-    # explicitly, until 2.1.b lands; remove this exclusion then.
-    not_yet_migrated = {"sources", "documents", "db_connections", "jobs"}
-    assert set(_table_names(engine)) == {"alembic_version", *(EXPECTED_TABLES - not_yet_migrated)}
+    # Table list includes the real migration's 5 tables (Task 1.2.c), plus
+    # 2.1.b's own four ingestion tables -- was just ["alembic_version"]
+    # before any migration existed (1.1.h).
+    assert set(_table_names(engine)) == {"alembic_version", *EXPECTED_TABLES}
 
     inspector = sa.inspect(engine)
 
     for table_name, pk_column in EXPECTED_PK_COLUMNS.items():
-        if table_name in not_yet_migrated:
-            continue
         assert inspector.get_pk_constraint(table_name)["constrained_columns"] == [pk_column], (
             f"{table_name}'s primary key column does not match the model"
         )
 
     for (table_name, column_name), referred_table in CASCADE_FK_COLUMNS.items():
-        if table_name in not_yet_migrated:
-            continue
         foreign_keys = inspector.get_foreign_keys(table_name)
         (fk,) = [fk for fk in foreign_keys if fk["constrained_columns"] == [column_name]]
         assert fk["referred_table"] == referred_table
@@ -352,8 +350,6 @@ def test_upgrade_head_is_idempotent_and_never_prints_the_password(_test_engine):
         )
 
     for table_name, (constraint_name, allowed_values) in EXPECTED_STATUS_CHECK_CONSTRAINTS.items():
-        if table_name in not_yet_migrated:
-            continue
         check_constraints = inspector.get_check_constraints(table_name)
         (status_check,) = [c for c in check_constraints if c["name"] == constraint_name]
         for status_value in allowed_values:
@@ -364,6 +360,15 @@ def test_upgrade_head_is_idempotent_and_never_prints_the_password(_test_engine):
         (index,) = [i for i in indexes if i["name"] == index_name]
         assert index["unique"] is True
         assert index["column_names"] == columns
+
+    # Task 2.1.b: db_connections.encrypted_credentials needs pgcrypto --
+    # the real migration (not just the test fixture's own workaround,
+    # 2.1.a's own bug) must be the thing that enables it.
+    with engine.connect() as connection:
+        installed_extensions = {
+            row[0] for row in connection.execute(sa.text("SELECT extname FROM pg_extension"))
+        }
+    assert "pgcrypto" in installed_extensions
 
     second = _run_alembic("upgrade", "head", engine=engine)
     assert second.returncode == 0, second.stdout + second.stderr
@@ -510,9 +515,18 @@ def test_downgrade_from_head_removes_the_visitor_index_and_tenant_status_check(_
     # dcd1f5b27bb7's downgrade() actually removes both objects from a real
     # database, not just that upgrade() creates them (already proven by
     # test_upgrade_head_is_idempotent_and_never_prints_the_password above).
+    #
+    # Upgrades to dcd1f5b27bb7 explicitly, not "head", and downgrades "-1"
+    # from THERE -- found live at Task 2.1.b: this test originally
+    # upgraded to "head" and downgraded "-1", which broke the moment
+    # 2.1.b's own migration extended the revision chain (head's "-1" then
+    # landed one migration too early, still inside dcd1f5b27bb7's own
+    # state, never reaching what this test actually checks). Targeting
+    # the specific revision by name makes this test's own boundary
+    # independent of however many later migrations exist on top.
     engine = _test_engine
     _reset_public_schema(engine)
-    migrated = _run_alembic("upgrade", "head", engine=engine)
+    migrated = _run_alembic("upgrade", "dcd1f5b27bb7", engine=engine)
     assert migrated.returncode == 0, migrated.stdout + migrated.stderr
 
     downgraded = _run_alembic("downgrade", "-1", engine=engine)
@@ -527,3 +541,71 @@ def test_downgrade_from_head_removes_the_visitor_index_and_tenant_status_check(_
 
     restored = _run_alembic("upgrade", "head", engine=engine)
     assert restored.returncode == 0, restored.stdout + restored.stderr
+
+
+async def test_downgrade_from_head_removes_ingestion_tables_but_keeps_pgcrypto(
+    _test_engine, monkeypatch
+):
+    # Task 2.1.b: the same C1 pattern as the visitor-index/tenant-check
+    # downgrade test above, extended with the two additional proofs this
+    # migration's own downgrade() must get right: pgcrypto survives (its
+    # own comment in the migration file explains why it is never
+    # dropped), and a real credential round trip through the actual
+    # application code path (app.ingest.repository.IngestRepository) --
+    # not just the test fixture's own separate CREATE EXTENSION
+    # workaround -- still works correctly once the real migration
+    # restores the schema. This is the genuine, deployment-level proof
+    # that 2.1.a's own bug (encryption silently depending on whichever
+    # test happened to run first) is fixed for real, not just in tests.
+    engine = _test_engine
+    _reset_public_schema(engine)
+    migrated = _run_alembic("upgrade", "head", engine=engine)
+    assert migrated.returncode == 0, migrated.stdout + migrated.stderr
+
+    downgraded = _run_alembic("downgrade", "-1", engine=engine)
+    assert downgraded.returncode == 0, downgraded.stdout + downgraded.stderr
+
+    inspector = sa.inspect(engine)
+    remaining_tables = set(inspector.get_table_names())
+    assert not remaining_tables & {"sources", "documents", "db_connections", "jobs"}
+
+    with engine.connect() as connection:
+        installed_extensions = {
+            row[0] for row in connection.execute(sa.text("SELECT extname FROM pg_extension"))
+        }
+    assert "pgcrypto" in installed_extensions
+
+    restored = _run_alembic("upgrade", "head", engine=engine)
+    assert restored.returncode == 0, restored.stdout + restored.stderr
+
+    database_url = engine.url.render_as_string(hide_password=False)
+    for key, value in _HARMLESS_ENV.items():
+        monkeypatch.setenv(key, value)
+    monkeypatch.setenv("DATABASE_URL", database_url)
+    get_settings.cache_clear()
+    db.get_engine.cache_clear()
+    db._session_factory.cache_clear()
+
+    tenant_id = uuid.uuid4()
+    async with db_session() as session:
+        session.add(Tenant(id=tenant_id, name="Downgrade-Upgrade Proof Tenant", status="active"))
+        await session.commit()
+
+    credentials = {"username": "dbuser", "password": "post-migration-proof-password"}
+    async with db_session() as session:
+        repo = IngestRepository(tenant_id=tenant_id, session=session)
+        db_connection = await repo.create_db_connection(
+            host="proof-db.internal", credentials=credentials
+        )
+        await session.commit()
+        db_connection_id = db_connection.id
+
+    async with db_session() as session:
+        repo = IngestRepository(tenant_id=tenant_id, session=session)
+        decrypted = await repo.get_decrypted_credentials(db_connection_id)
+
+    assert decrypted == credentials
+
+    await db.get_engine().dispose()
+    db.get_engine.cache_clear()
+    db._session_factory.cache_clear()

@@ -10,7 +10,12 @@ from app.db import Base
 
 # Imported for the side effect of registering their tables on Base.metadata
 # (Task 1.2.b) -- target_metadata below must see every domain's models, not
-# just whichever one happened to be imported first.
+# just whichever one happened to be imported first. Task 2.1.b adds
+# app.ingest.models -- its absence here was a real, necessary-to-fix gap:
+# without it, autogenerate silently sees zero changes for the new tables
+# (target_metadata never contained them), confirmed live when a first
+# autogenerate attempt produced an empty upgrade()/downgrade() pair.
+from app.ingest import models as ingest_models  # noqa: F401
 from app.plans import models as plans_models  # noqa: F401
 from app.tenancy import models as tenancy_models  # noqa: F401
 
