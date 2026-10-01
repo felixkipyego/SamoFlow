@@ -170,8 +170,22 @@ services:
         condition: service_healthy
       qdrant:
         condition: service_healthy
-    # No healthcheck: the worker (Task 1.1.f) has no job loop or probe
-    # target yet (TODO(2.1)); it only awaits a shutdown signal.
+    healthcheck:
+      # The worker has no HTTP server (unlike the api service's own /ready
+      # above), so this checks a file-based heartbeat instead (Task 2.1.f):
+      # app/worker.py's own run() loop writes HEARTBEAT_PATH at the start
+      # of every iteration, including an idle one with nothing to claim.
+      # Same no-curl-in-the-image convention as api's own healthcheck --
+      # one shared function, check_heartbeat_fresh(), not duplicated
+      # shell-script freshness logic that could drift from the real one.
+      test:
+        [
+          "CMD",
+          "python3",
+          "-c",
+          "import sys; from app.worker import check_heartbeat_fresh; sys.exit(0 if check_heartbeat_fresh() else 1)",
+        ]
+      <<: *healthcheck-timing
     restart: unless-stopped
 
   migrate:

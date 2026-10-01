@@ -25,7 +25,7 @@ from app.config import SettingsError, get_settings
 from app.ingest.models import Job
 from app.ingest.repository import IngestRepository
 from app.tenancy.models import Tenant
-from app.worker import JOB_HANDLERS, run
+from app.worker import JOB_HANDLERS, check_heartbeat_fresh, run
 from tests.conftest import (
     ALL_SETTINGS_VARS,
     TEST_PASSWORD,
@@ -349,3 +349,93 @@ async def test_sigterm_mid_handler_finishes_the_current_job_and_claims_no_other(
     other_job_row = await _fetch_job(other_job_id)
     assert slow_job_row.status == "succeeded"  # handler finished normally, not left "running"
     assert other_job_row.status == "pending"  # never claimed after the signal
+
+
+# --- Task 2.1.f: worker healthcheck -----------------------------------------
+# The worker has no HTTP server, so its healthcheck is a file-based
+# heartbeat instead (app/worker.py's own HEARTBEAT_PATH/_write_heartbeat()/
+# check_heartbeat_fresh()). All three tests below are offline -- no real
+# database needed: claim_next_job is monkeypatched to return None
+# immediately (an idle iteration), exactly like the C1 test above, since the
+# heartbeat write happens before the claim attempt either way.
+
+
+async def _run_one_idle_iteration(monkeypatch, heartbeat_path, iterations=1):
+    import app.worker as worker_module
+
+    async def _claim_nothing(session):
+        return None
+
+    monkeypatch.setattr(worker_module, "HEARTBEAT_PATH", heartbeat_path)
+    monkeypatch.setattr(worker_module, "claim_next_job", _claim_nothing)
+    # 0.5s, not something tighter: check_heartbeat_fresh()'s own staleness
+    # threshold is HEARTBEAT_STALE_MULTIPLIER * worker_poll_interval_seconds
+    # (3x), so shrinking this value for test speed also shrinks the
+    # threshold the test's own later assertion is checked against -- too
+    # tight (e.g. 0.05s -> a 0.15s threshold) leaves no headroom for
+    # ordinary test-process overhead between the write and the assertion,
+    # a real flake this test hit once before settling on 0.5s.
+    monkeypatch.setenv("WORKER_POLL_INTERVAL_SECONDS", "0.5")
+    set_valid_env(monkeypatch, VALID_ENV)
+    get_settings.cache_clear()
+
+    await asyncio.wait_for(run(asyncio.Event(), max_iterations=iterations), timeout=10)
+
+
+async def test_heartbeat_is_written_fresh_after_one_loop_iteration(monkeypatch, tmp_path):
+    heartbeat_path = tmp_path / "heartbeat"
+    assert not heartbeat_path.exists()
+
+    await _run_one_idle_iteration(monkeypatch, heartbeat_path)
+
+    assert heartbeat_path.exists()
+    assert check_heartbeat_fresh(heartbeat_path)
+
+
+async def test_heartbeat_updates_on_every_idle_iteration_not_just_when_a_job_is_claimed(
+    monkeypatch, tmp_path
+):
+    # The property that makes idle-vs-wedged distinguishable: proven here
+    # by running TWO idle iterations (nothing ever claimed, via the same
+    # monkeypatched claim_next_job as _run_one_idle_iteration) and
+    # confirming the heartbeat's own written timestamp strictly advances
+    # between them -- not merely "still fresh" (which a single stale-ish
+    # write could also satisfy), a genuine second write.
+    heartbeat_path = tmp_path / "heartbeat"
+
+    await _run_one_idle_iteration(monkeypatch, heartbeat_path, iterations=1)
+    first_write = float(heartbeat_path.read_text())
+
+    await _run_one_idle_iteration(monkeypatch, heartbeat_path, iterations=1)
+    second_write = float(heartbeat_path.read_text())
+
+    assert second_write > first_write
+
+
+def test_check_heartbeat_fresh_detects_a_stale_heartbeat(monkeypatch, tmp_path):
+    # Testable without any Docker healthcheck machinery, as instructed:
+    # this is check_heartbeat_fresh()'s own pure logic, the same function
+    # deploy/docker-compose.yml's real healthcheck calls via its
+    # `python3 -c "..."` one-liner (matching the API's own no-curl-in-the-
+    # image convention, Task 1.4.j) -- one shared source of truth, not
+    # duplicated shell-script and Python logic that could drift apart.
+    # check_heartbeat_fresh() reads Settings (worker_poll_interval_seconds),
+    # so a valid environment is needed even though this test touches no
+    # database -- same requirement every other Settings-reading test here
+    # already has to satisfy.
+    set_valid_env(monkeypatch, VALID_ENV)
+    get_settings.cache_clear()
+    heartbeat_path = tmp_path / "heartbeat"
+
+    heartbeat_path.write_text(str(time.time()))
+    assert check_heartbeat_fresh(heartbeat_path) is True
+
+    # Simulates a wedged worker: the loop stopped iterating a long time
+    # ago, so its last heartbeat write is far older than any reasonable
+    # threshold -- HEARTBEAT_STALE_MULTIPLIER * worker_poll_interval_seconds
+    # (3 * 2 = 6s by default) is nowhere close to 9999s.
+    heartbeat_path.write_text(str(time.time() - 9999))
+    assert check_heartbeat_fresh(heartbeat_path) is False
+
+    missing_path = tmp_path / "does-not-exist"
+    assert check_heartbeat_fresh(missing_path) is False

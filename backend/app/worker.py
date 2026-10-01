@@ -11,7 +11,9 @@ import asyncio
 import logging
 import signal
 import sys
+import time
 from collections.abc import Awaitable, Callable
+from pathlib import Path
 
 from app import all_models  # noqa: F401
 from app.config import SettingsError, get_settings
@@ -33,6 +35,59 @@ from app.ingest.queue import claim_next_job, mark_job_failed, mark_job_succeeded
 # shared with alembic/env.py via app/all_models.py instead.
 
 logger = logging.getLogger(__name__)
+
+# Task 2.1.f: the worker has no HTTP server (unlike the API's own /ready,
+# Task 1.4.j), so its healthcheck needs a different mechanism -- a
+# file-based heartbeat. /tmp is the only writable path available: the
+# container runs with read_only: true + a tmpfs /tmp (deploy/
+# docker-compose.yml's x-app-hardening, applied to worker too), so this is
+# not an arbitrary choice, it's close to the only one. The file's content
+# is the write time itself (time.time(), as plain text) rather than relying
+# on the filesystem's own mtime: a human or script can `cat` it and
+# understand it immediately, and it avoids any mtime-semantics subtlety
+# across tmpfs/exec-into-container edge cases.
+HEARTBEAT_PATH = Path("/tmp/worker-heartbeat")  # noqa: S108 (not a shared/predictable-path risk: container-local tmpfs, no other process reads or writes it)
+
+# A multiple of worker_poll_interval_seconds, not a fixed number of seconds:
+# the heartbeat is written once per loop iteration (see run() below), and an
+# idle iteration's own wait is bounded by that same setting, so "how stale
+# is too stale" must scale with it. 3x covers one full normal idle-wait
+# between writes plus headroom for an occasional slow iteration (a DB
+# round-trip hiccup, a GC pause) without needing to approach
+# x-healthcheck-timing's own retries*interval=25s detection floor (deploy/
+# docker-compose.yml) -- this threshold, not Docker's own probe schedule,
+# is what actually decides "stale" here.
+HEARTBEAT_STALE_MULTIPLIER = 3
+
+# ASSUMPTION: a real, long-running handler (2.4-2.8) that runs for longer
+# than HEARTBEAT_STALE_MULTIPLIER * worker_poll_interval_seconds would make
+# the heartbeat go stale while the worker is still healthy, just busy --
+# the heartbeat is written once per iteration (at its start), not
+# progressively during a handler's own execution. Not a problem today:
+# every registered handler (noop, sleep -- both test/proof-only so far) is
+# either instant or a short, test-controlled duration. Revisit once a
+# genuinely long-running handler exists: either it must report its own
+# progress by writing the heartbeat periodically during its own work, or
+# this threshold must grow to cover the longest expected single-job
+# duration.
+
+
+def _write_heartbeat(path: Path = HEARTBEAT_PATH) -> None:
+    path.write_text(str(time.time()))
+
+
+def check_heartbeat_fresh(path: Path = HEARTBEAT_PATH) -> bool:
+    # The one function both deploy/docker-compose.yml's real healthcheck
+    # (invoked as a plain `python3 -c "..."` one-liner, matching the API's
+    # own no-curl-in-the-image convention, Task 1.4.j) and this file's own
+    # tests call -- one source of truth for "is this fresh", not duplicated
+    # shell-script logic and Python logic that could silently drift apart.
+    try:
+        written_at = float(path.read_text())
+    except (OSError, ValueError):
+        return False
+    threshold = HEARTBEAT_STALE_MULTIPLIER * get_settings().worker_poll_interval_seconds
+    return (time.time() - written_at) < threshold
 
 
 async def _noop_handler(payload: dict) -> None:
@@ -153,6 +208,24 @@ async def run(stop: asyncio.Event | None = None, max_iterations: int | None = No
     iterations = 0
     while not stop.is_set():
         try:
+            # Written first, every iteration -- including an idle one with
+            # nothing to claim (Task 2.1.f): idle-but-alive must be
+            # distinguishable from wedged, which an "only on a claimed job"
+            # heartbeat could not do (a worker with no pending jobs for a
+            # while would look identical to one that stopped iterating
+            # entirely). Inside this same try/except as the claim/process
+            # call below, not a separate one: a write failure (e.g. a full
+            # tmpfs) is exactly the kind of unexpected per-iteration
+            # failure that block already exists to catch, and a worker
+            # that cannot write its own heartbeat is arguably unhealthy in
+            # a real sense too, not just logging-wise. HEARTBEAT_PATH is
+            # passed explicitly (not left to _write_heartbeat()'s own
+            # default parameter) so a test can monkeypatch the module-level
+            # name and have it actually take effect here -- a default
+            # argument's value is bound once, at function-definition time,
+            # so monkeypatching the module attribute alone would not
+            # otherwise reach this call.
+            _write_heartbeat(HEARTBEAT_PATH)
             claimed = await _claim_and_process_one_job()
         except Exception as exc:
             # A transient failure reaching the database (or claiming/
