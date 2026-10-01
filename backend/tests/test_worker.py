@@ -3,7 +3,11 @@
 # Task 2.1.d extends this file with the real job-processing loop's own
 # tests (the noop handler, an unknown job_type, a raising handler, the
 # idle-poll interval) -- run() is the same function 1.1.f's own tests
-# already exercise, so one file, not a second.
+# already exercise, so one file, not a second. Task 2.1.e adds the real
+# process-level graceful-shutdown proof (a SIGTERM sent while a handler
+# is actively running), using the exact same _spawn_worker()/
+# _worker_subprocess_env() machinery 1.1.f's own SIGTERM test already
+# established.
 import asyncio
 import logging
 import os
@@ -237,3 +241,90 @@ async def test_run_sleeps_approximately_the_configured_poll_interval_when_idle(
 
     assert elapsed >= 0.2 * 0.8  # actually slept, not a tight spin
     assert elapsed < 2.0  # did not hang or wait far longer than configured
+
+
+# --- Task 2.1.e: graceful shutdown -----------------------------------------
+# A real, standalone `python -m app.worker` subprocess (matching 1.1.f's own
+# test_sigterm_shuts_down_the_real_process_cleanly, not an in-process unit
+# test of the mechanism) against the real test database: enqueue a slow job
+# and a second, merely-pending job, send a genuine SIGTERM while the slow
+# job's handler is actively running, and confirm (a) the in-flight job
+# reaches its correct terminal state rather than being left "running"
+# forever, and (b) no new job was claimed after the signal -- the second job
+# is still "pending".
+#
+# No code change was needed in run()'s own loop for this: `while not
+# stop.is_set():` is already re-evaluated fresh at the top of every
+# iteration, and stop.set() (the SIGTERM callback) is a plain cooperative
+# flag -- it never cancels an in-flight `await handler(...)`. So a signal
+# arriving mid-handler is only ever observed at the NEXT iteration boundary,
+# after the current job's handler has already run to completion and been
+# marked succeeded/failed -- exactly the "finish what you started, claim
+# nothing new" semantics this task asks for. Confirmed live, not assumed,
+# below (and this exact property is also why 1.1.f's own SIGTERM test,
+# which sends the signal between iterations rather than mid-handler, was
+# never sufficient proof of this specific case on its own).
+#
+# A real, unrelated bug found live while first writing this proof (not a
+# bug in the mechanism above): a genuine standalone `python -m app.worker`
+# process had never had anything import app.tenancy.models/app.plans.models,
+# so jobs.tenant_id's FK to tenants.id could not be resolved at
+# mark_job_succeeded()'s own flush -- NoReferencedTableError, every time.
+# 2.1.d's own tests never caught this because they called run() directly
+# under pytest, where some other already-imported test module had always
+# registered every domain's models first. Fixed in app/worker.py itself
+# (the same import-for-side-effect fix alembic/env.py already needed at
+# 2.1.b, for the identical reason).
+
+
+async def _poll_until_status(job_id, expected_status: str, timeout: float) -> None:
+    started = time.monotonic()
+    while time.monotonic() - started < timeout:
+        async with db_session() as session:
+            status = (
+                await session.execute(sa.select(Job.status).where(Job.id == job_id))
+            ).scalar_one()
+        if status == expected_status:
+            return
+        await asyncio.sleep(0.02)
+    raise AssertionError(f"job {job_id} never reached status {expected_status!r}")
+
+
+async def test_sigterm_mid_handler_finishes_the_current_job_and_claims_no_other(
+    reset_test_database,
+):
+    database_url = reset_test_database
+    tenant_id = uuid.uuid4()
+    async with db_session() as session:
+        session.add(Tenant(id=tenant_id, name="Shutdown Tenant", status="active"))
+        await session.commit()
+        repo = IngestRepository(tenant_id=tenant_id, session=session)
+        slow_job = await repo.enqueue(job_type="sleep", payload={"seconds": 0.5})
+        other_job = await repo.enqueue(job_type="noop", payload={})
+        await session.commit()
+        slow_job_id, other_job_id = slow_job.id, other_job.id
+
+    process = await _spawn_worker(
+        _worker_subprocess_env(**{**VALID_ENV, "DATABASE_URL": database_url})
+    )
+    try:
+        startup_line = await _wait_for_line_containing(
+            process.stderr, "app_env=development", timeout=10
+        )
+        assert startup_line is not None, "worker never logged its startup line"
+
+        # Poll the real row, not a log line: proves the handler is
+        # genuinely mid-flight (claimed, status flipped) before SIGTERM.
+        await _poll_until_status(slow_job_id, "running", timeout=10)
+        process.send_signal(signal.SIGTERM)
+        exit_code = await asyncio.wait_for(process.wait(), timeout=10)
+        assert exit_code == 0
+    finally:
+        if process.returncode is None:
+            process.kill()
+            await process.wait()
+
+    slow_job_row = await _fetch_job(slow_job_id)
+    other_job_row = await _fetch_job(other_job_id)
+    assert slow_job_row.status == "succeeded"  # handler finished normally, not left "running"
+    assert other_job_row.status == "pending"  # never claimed after the signal

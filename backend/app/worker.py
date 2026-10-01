@@ -18,6 +18,21 @@ from app.db import _session_factory
 from app.ingest.models import Job
 from app.ingest.queue import claim_next_job, mark_job_failed, mark_job_succeeded
 
+# Imported for the side effect of registering their tables on Base.metadata
+# (Task 1.2.b), exactly matching alembic/env.py's own convention and the
+# same real gap it hit at 2.1.b: without app.tenancy.models imported
+# *somewhere* in this process, jobs.tenant_id's FK to tenants.id cannot be
+# resolved at flush time, since SQLAlchemy needs both tables' mappers
+# registered to sort them -- found live while building this task (2.1.e):
+# a genuine standalone `python -m app.worker` subprocess, with nothing
+# else in-process to have already imported these, raised
+# NoReferencedTableError on its very first mark_job_succeeded() flush.
+# 2.1.d's own tests never caught this because they called run() directly
+# under pytest, where some other test module had always already imported
+# every domain's models first.
+from app.plans import models as plans_models  # noqa: F401
+from app.tenancy import models as tenancy_models  # noqa: F401
+
 logger = logging.getLogger(__name__)
 
 
@@ -28,6 +43,16 @@ async def _noop_handler(payload: dict) -> None:
     del payload
 
 
+async def _sleep_handler(payload: dict) -> None:
+    # Task 2.1.e: exists solely so a test can reliably send a real SIGTERM
+    # while a handler is actively running -- no other registered handler
+    # (noop returns instantly) gives graceful-shutdown's own "finish the
+    # in-flight job, don't claim a new one" behavior a window to prove
+    # itself against. payload["seconds"] (default 0) keeps this inert by
+    # default, same spirit as noop, just controllably slow when asked.
+    await asyncio.sleep(payload.get("seconds", 0))
+
+
 # A plain dict, not a decorator-based registry: this is the smallest,
 # most standard shape for "one string maps to one function" (rule 11) --
 # a decorator-based registration mechanism would be real abstraction for
@@ -35,6 +60,7 @@ async def _noop_handler(payload: dict) -> None:
 # later step (2.4+) needs registration split across multiple files.
 JOB_HANDLERS: dict[str, Callable[[dict], Awaitable[None]]] = {
     "noop": _noop_handler,
+    "sleep": _sleep_handler,
 }
 
 
@@ -67,6 +93,7 @@ async def _claim_and_process_one_job() -> bool:
     job = await _claim_one()
     if job is None:
         return False
+    logger.info("worker: claimed job %s (job_type=%s)", job.id, job.job_type)
 
     handler = JOB_HANDLERS.get(job.job_type)
     if handler is None:
@@ -111,6 +138,19 @@ async def run(stop: asyncio.Event | None = None, max_iterations: int | None = No
     # Only app_env, never database_url/qdrant_url: those must not reach logs.
     logger.info("worker starting: app_env=%s", settings.app_env)
 
+    # Graceful shutdown (Task 2.1.e): stop.is_set() is re-evaluated fresh
+    # here at the top of every iteration, and stop.set() (the SIGTERM
+    # signal handler, main()'s own add_signal_handler callback) is a plain
+    # cooperative flag -- it never cancels an in-flight
+    # `await _claim_and_process_one_job()`. So a signal arriving while a
+    # job's handler is actively running is only ever observed at the NEXT
+    # iteration boundary, after that job has already been claimed, run to
+    # completion, and marked succeeded/failed -- "finish what you started,
+    # claim nothing new" -- with no extra code needed beyond this check
+    # already being here. Confirmed live, not assumed: see
+    # test_worker.py's own test_sigterm_mid_handler_finishes_the_current_
+    # job_and_claims_no_other, a real SIGTERM sent to a real subprocess
+    # while a deliberately slow handler is mid-sleep.
     iterations = 0
     while not stop.is_set():
         try:
