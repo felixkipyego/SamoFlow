@@ -51,9 +51,18 @@ from httpx import ASGITransport, AsyncClient
 from qdrant_client import AsyncQdrantClient
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app import db, qdrant
+# all_models (imported below, for its side effect, like db/qdrant) registers
+# every domain's tables on Base.metadata -- needed so _seeded_tenant/
+# _fetch_job further down (duplication check after 2.1.c/d/e, items A1/A2)
+# work correctly on their own, not merely by accident because some other
+# already-collected test module happened to import app.plans.models first
+# (the exact fragility app/all_models.py exists to remove -- see its own
+# and app/worker.py's header comments).
+from app import all_models, db, qdrant  # noqa: F401
 from app.config import POSTGRES_SCHEME, Settings, get_settings
+from app.ingest.models import Job
 from app.ingest.repository import IngestRepository
+from app.tenancy.models import Tenant
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 BACKEND_DIR = Path(__file__).resolve().parent.parent
@@ -532,6 +541,30 @@ async def assert_db_connection_credential_round_trip(
         decrypted = await repo.get_decrypted_credentials(db_connection_id)
 
     assert decrypted == credentials
+
+
+@pytest.fixture
+async def _seeded_tenant(reset_test_database) -> AsyncIterator[uuid.UUID]:
+    # Shared by test_queue.py (2.1.c) and test_worker.py (2.1.d/e)
+    # (duplication check after 2.1.c/d/e, item A1): both had a
+    # byte-identical one-tenant seed fixture, differing only in the
+    # tenant's own `name` string (which neither file's tests ever assert
+    # on) -- one shared fixture instead of two copies.
+    tenant_id = uuid.uuid4()
+    async with db_session() as session:
+        session.add(Tenant(id=tenant_id, name="Seeded Tenant", status="active"))
+        await session.commit()
+    yield tenant_id
+
+
+async def _fetch_job(job_id: uuid.UUID) -> Job:
+    # Shared by test_queue.py and test_worker.py (duplication check after
+    # 2.1.c/d/e, item A2): test_worker.py already had this as its own
+    # local helper; test_queue.py repeated the same one-line
+    # select-and-scalar_one() query inline seven times instead. One
+    # shared helper, used by both.
+    async with db_session() as session:
+        return (await session.execute(sa.select(Job).where(Job.id == job_id))).scalar_one()
 
 
 @asynccontextmanager

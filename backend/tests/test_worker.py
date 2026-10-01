@@ -24,13 +24,13 @@ import sqlalchemy as sa
 from app.config import SettingsError, get_settings
 from app.ingest.models import Job
 from app.ingest.repository import IngestRepository
-from app.plans import models as plans_models  # noqa: F401 (registers "plans" on Base.metadata)
 from app.tenancy.models import Tenant
 from app.worker import JOB_HANDLERS, run
 from tests.conftest import (
     ALL_SETTINGS_VARS,
     TEST_PASSWORD,
     VALID_ENV,
+    _fetch_job,
     db_session,
     set_valid_env,
 )
@@ -64,6 +64,36 @@ async def test_startup_log_never_contains_database_url_or_password(monkeypatch, 
 async def test_run_with_no_environment_raises_settings_error():
     with pytest.raises(SettingsError):
         await run()
+
+
+async def test_run_logs_only_the_exception_type_never_the_message_on_unexpected_failure(
+    monkeypatch, caplog
+):
+    # Duplication check after 2.1.c/d/e, item C1: a real bug, found live --
+    # the per-iteration except-and-continue branch (run()'s own loop) used
+    # to call logger.exception(), which logs the full exception message and
+    # traceback via exc_info=True, directly contradicting that branch's own
+    # comment ("log only the exception's type, never str(exc)"). Fixed to
+    # logger.error() with only type(exc).__name__. No real DB is needed to
+    # trigger this: claim_next_job is monkeypatched to raise before ever
+    # issuing a query, so opening the session never attempts a real
+    # connection (SQLAlchemy connects lazily, on first actual I/O).
+    import app.worker as worker_module
+
+    async def _raise_with_secret(session):
+        raise ValueError("DISTINCTIVE-FAKE-SECRET-98765")
+
+    monkeypatch.setattr(worker_module, "claim_next_job", _raise_with_secret)
+    set_valid_env(monkeypatch, VALID_ENV)
+
+    with caplog.at_level(logging.INFO):
+        await asyncio.wait_for(run(asyncio.Event(), max_iterations=1), timeout=10)
+
+    assert "DISTINCTIVE-FAKE-SECRET-98765" not in caplog.text
+    assert any(
+        "unexpected failure" in record.message and "ValueError" in record.message
+        for record in caplog.records
+    ), "expected a log entry identifying the exception type"
 
 
 def _worker_subprocess_env(**overrides):
@@ -136,15 +166,11 @@ async def test_worker_with_empty_environment_exits_nonzero_without_traceback():
 # app/worker.py's own run() signature): bounds the loop to exactly one
 # claim attempt (whether or not a job was ready), composing with the
 # pre-existing `stop` event rather than replacing it.
-
-
-@pytest.fixture
-async def _seeded_tenant(reset_test_database):
-    tenant_id = uuid.uuid4()
-    async with db_session() as session:
-        session.add(Tenant(id=tenant_id, name="Worker Tenant", status="active"))
-        await session.commit()
-    yield tenant_id
+#
+# _seeded_tenant (bare fixture parameter) and _fetch_job() both come from
+# conftest.py now, not defined locally here -- duplication check after
+# 2.1.c/d/e, items A1/A2: this file and test_queue.py each had their own,
+# near-identical copies.
 
 
 async def _enqueue(tenant_id, job_type: str) -> uuid.UUID:
@@ -153,11 +179,6 @@ async def _enqueue(tenant_id, job_type: str) -> uuid.UUID:
         job = await repo.enqueue(job_type=job_type, payload={})
         await session.commit()
         return job.id
-
-
-async def _fetch_job(job_id) -> Job:
-    async with db_session() as session:
-        return (await session.execute(sa.select(Job).where(Job.id == job_id))).scalar_one()
 
 
 async def test_run_processes_a_noop_job_to_success(_seeded_tenant):

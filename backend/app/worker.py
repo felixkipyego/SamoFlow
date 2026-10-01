@@ -13,25 +13,24 @@ import signal
 import sys
 from collections.abc import Awaitable, Callable
 
+from app import all_models  # noqa: F401
 from app.config import SettingsError, get_settings
 from app.db import _session_factory
 from app.ingest.models import Job
 from app.ingest.queue import claim_next_job, mark_job_failed, mark_job_succeeded
 
-# Imported for the side effect of registering their tables on Base.metadata
-# (Task 1.2.b), exactly matching alembic/env.py's own convention and the
-# same real gap it hit at 2.1.b: without app.tenancy.models imported
-# *somewhere* in this process, jobs.tenant_id's FK to tenants.id cannot be
-# resolved at flush time, since SQLAlchemy needs both tables' mappers
-# registered to sort them -- found live while building this task (2.1.e):
-# a genuine standalone `python -m app.worker` subprocess, with nothing
-# else in-process to have already imported these, raised
+# all_models above is imported for the side effect of registering every
+# domain's tables on Base.metadata -- without it, jobs.tenant_id's FK to
+# tenants.id cannot be resolved at flush time, since SQLAlchemy needs both
+# tables' mappers registered to sort them. Found live at Task 2.1.e: a
+# genuine standalone `python -m app.worker` subprocess, with nothing else
+# in-process to have already imported app.tenancy.models, raised
 # NoReferencedTableError on its very first mark_job_succeeded() flush.
 # 2.1.d's own tests never caught this because they called run() directly
 # under pytest, where some other test module had always already imported
-# every domain's models first.
-from app.plans import models as plans_models  # noqa: F401
-from app.tenancy import models as tenancy_models  # noqa: F401
+# every domain's models first. Duplication check after 2.1.c/d/e: this
+# used to be worker.py's own separate plans/tenancy import block, now
+# shared with alembic/env.py via app/all_models.py instead.
 
 logger = logging.getLogger(__name__)
 
@@ -155,7 +154,7 @@ async def run(stop: asyncio.Event | None = None, max_iterations: int | None = No
     while not stop.is_set():
         try:
             claimed = await _claim_and_process_one_job()
-        except Exception:
+        except Exception as exc:
             # A transient failure reaching the database (or claiming/
             # marking a job) must not crash the whole worker process --
             # log only the exception's type, never str(exc): unlike a
@@ -164,7 +163,16 @@ async def run(stop: asyncio.Event | None = None, max_iterations: int | None = No
             # free of the DSN/credentials, so this stays defensive rather
             # than assuming it is safe. Treated exactly like "nothing was
             # ready": sleep the poll interval, try again next iteration.
-            logger.exception("worker: unexpected failure claiming/processing a job")
+            # NOTE: logger.exception() (and logger.error(..., exc_info=True))
+            # must never be used here -- both log the full exception message
+            # and traceback despite this comment's own intent, exactly the
+            # leak this is trying to avoid (duplication check after
+            # 2.1.c/d/e, item C1 -- a real bug, found live: the previous
+            # logger.exception() call here contradicted this very comment).
+            logger.error(
+                "worker: unexpected failure claiming/processing a job (%s)",
+                type(exc).__name__,
+            )
             claimed = False
 
         if not claimed:
