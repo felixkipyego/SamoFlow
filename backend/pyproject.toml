@@ -36,6 +36,17 @@ dependencies = [
     # `crypto` extra (pulling in `cryptography`) is only required for
     # asymmetric algorithms (RS/ES*), not used here.
     "pyjwt==2.15.1",
+    # Task 2.2.d. Version re-verified live on PyPI at build time (not
+    # assumed from this planning session), matching every prior pin's own
+    # precedent. Python's stdlib has no TXT-record query capability at all
+    # (socket.getaddrinfo resolves A/AAAA only) -- this is a new
+    # capability, not a replacement for anything. No extra: the base
+    # install has zero required dependencies of its own (confirmed live
+    # against PyPI's own metadata) -- `dnssec`/`doh`/`doq`/`trio` are all
+    # optional extras this project needs none of, since it only ever
+    # issues a plain TXT query over the system's own configured
+    # resolver(s), nothing DNSSEC- or DoH-related.
+    "dnspython==2.8.0",
 ]
 
 [project.optional-dependencies]
