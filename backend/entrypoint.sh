@@ -26,7 +26,17 @@ case "$mode" in
         # No API_HOST/API_PORT check here: Settings validates DATABASE_URL
         # (and every other required variable) itself when alembic/env.py
         # calls get_settings().
-        exec alembic upgrade head
+        #
+        # Task 2.1.g: ensure_collection() (app/qdrant.py) runs right after
+        # the schema migration, as this same deploy step's second idempotent
+        # setup action -- Postgres's schema and Qdrant's collection are both
+        # one-shot setup concerns, not the worker's own long-running loop
+        # (PROJECT_SPEC.md's own decision). alembic is not exec'd here (only
+        # the last command in this script should be, so it becomes PID 1):
+        # `set -eu` above already aborts this script with alembic's own
+        # exit code if it fails, before "python -m app.qdrant" ever runs.
+        alembic upgrade head
+        exec python -m app.qdrant
         ;;
     *)
         echo "Usage: entrypoint.sh {api|worker|migrate}" >&2

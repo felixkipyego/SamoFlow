@@ -33,7 +33,10 @@
 # is filtered here, narrowly (exact message, scoped to this one
 # construction via warnings.catch_warnings(), never a global filter) rather
 # than left to print on every client construction.
+import asyncio
+import logging
 import re
+import sys
 import uuid
 import warnings
 from collections.abc import Mapping
@@ -54,7 +57,9 @@ from qdrant_client.http.models import (
     VectorParams,
 )
 
-from app.config import get_settings
+from app.config import SettingsError, get_settings
+
+logger = logging.getLogger(__name__)
 
 # Exact text confirmed against the installed qdrant-client==1.19.1
 # (async_qdrant_remote.py); filtered by message, not blanket-suppressed, so
@@ -306,3 +311,45 @@ def tenant_filter(client_id: uuid.UUID) -> Filter:
     return Filter(
         must=[FieldCondition(key=CLIENT_ID_FIELD, match=MatchValue(value=str(client_id)))]
     )
+
+
+# --- Task 2.1.g: ensure_collection() wiring ---------------------------------
+# CLI entrypoint, run once by the migrate deploy step (entrypoint.sh's
+# "migrate" mode) after `alembic upgrade head` -- the Qdrant analog of that
+# same step's existing idempotent-setup job for Postgres. Not the worker's
+# own startup: the worker's run() is a long-running poll loop, not a
+# one-shot setup phase, so it is the wrong place for a setup step (decided
+# at this task's own planning, recorded in PROJECT_SPEC.md). Lives here, in
+# app/qdrant.py itself, rather than a new module, since this file is already
+# the one place in CLIENT_ACCESS_ALLOWLIST
+# (test_qdrant_read_path_guard.py) that both holds a real client and owns
+# ensure_collection() -- a new caller file would need its own deliberate
+# addition to that allow-list for no benefit.
+async def _ensure_collection_and_close() -> None:
+    client = get_qdrant_client()
+    try:
+        await ensure_collection(client)
+        logger.info("ensure_collection: %r is correctly configured", COLLECTION_NAME)
+    finally:
+        await client.close()
+
+
+def main() -> None:
+    """`python -m app.qdrant`. Mirrors app/worker.py's own main(): a clean
+    one-line message on a configuration or schema problem, no traceback --
+    SettingsError and CollectionSchemaMismatch's own messages are both
+    already proven free of secrets (see get_settings()'s and this module's
+    own docstrings), so printing them directly is safe.
+    """
+    logging.basicConfig(
+        level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s"
+    )
+    try:
+        asyncio.run(_ensure_collection_and_close())
+    except (SettingsError, CollectionSchemaMismatch) as exc:
+        print(str(exc), file=sys.stderr)
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()

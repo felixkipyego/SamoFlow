@@ -198,6 +198,12 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      # Task 2.1.g: migrate now also runs ensure_collection() (app/qdrant.py)
+      # after `alembic upgrade head`, so it needs qdrant healthy too, same as
+      # api/worker below -- otherwise `docker compose run --rm migrate` run
+      # before `up` (or standalone) would race a not-yet-ready Qdrant.
+      qdrant:
+        condition: service_healthy
     restart: "no"
 
   test-db:

@@ -189,3 +189,66 @@ def test_client_library_version_is_compatible_with_the_pinned_server():
     assert is_compatible(client_version, server_version), (
         f"client {client_version} vs server {server_version}"
     )
+
+
+# --- Task 2.1.g: the `python -m app.qdrant` CLI entrypoint ------------------
+# ensure_collection() itself is already fully covered (offline and live) by
+# test_qdrant_collection.py (Task 1.3.c) -- these two tests cover only the
+# CLI wiring main() adds: a clean failure with no traceback on a
+# misconfigured environment (matching test_worker.py's own precedent for
+# app/worker.py's main()), and that a real run against the real test-qdrant
+# exits 0 having set up the actual default collection, not just some
+# function called correctly in isolation.
+async def _spawn_qdrant_cli(env):
+    return await asyncio.create_subprocess_exec(
+        sys.executable,
+        "-m",
+        "app.qdrant",
+        cwd=BACKEND_DIR,
+        env=env,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+
+
+async def test_cli_with_empty_environment_exits_nonzero_without_traceback():
+    process = await _spawn_qdrant_cli(minimal_subprocess_env())
+    try:
+        _, stderr = await asyncio.wait_for(process.communicate(), timeout=10)
+    finally:
+        if process.returncode is None:
+            process.kill()
+            await process.wait()
+    assert process.returncode != 0
+    assert b"Traceback" not in stderr
+
+
+async def test_cli_ensures_the_real_default_collection_against_the_test_qdrant():
+    url, key = require_test_qdrant()
+    env = minimal_subprocess_env()
+    env.update(VALID_ENV)
+    env["QDRANT_URL"] = url
+    env["QDRANT_API_KEY"] = key
+    process = await _spawn_qdrant_cli(env)
+    try:
+        _, stderr = await asyncio.wait_for(process.communicate(), timeout=10)
+        assert process.returncode == 0, stderr
+    finally:
+        if process.returncode is None:
+            process.kill()
+            await process.wait()
+
+    client = qdrant.build_qdrant_client(url, key)
+    try:
+        assert await client.collection_exists(qdrant.COLLECTION_NAME)
+        # Re-run: the CLI's own idempotency, end to end through main(), not
+        # just ensure_collection() in isolation (already proven by
+        # test_qdrant_collection.py's test_ensure_collection_called_twice_is_
+        # a_no_op).
+        second = await _spawn_qdrant_cli(env)
+        _, second_stderr = await asyncio.wait_for(second.communicate(), timeout=10)
+        assert second.returncode == 0, second_stderr
+    finally:
+        if await client.collection_exists(qdrant.COLLECTION_NAME):
+            await client.delete_collection(qdrant.COLLECTION_NAME)
+        await client.close()
