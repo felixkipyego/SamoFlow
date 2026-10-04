@@ -332,16 +332,27 @@ def test_upgrade_head_is_idempotent_and_never_prints_the_password(_test_engine):
     # Table list includes the real migration's 5 tables (Task 1.2.c), plus
     # 2.1.b's own four ingestion tables -- was just ["alembic_version"]
     # before any migration existed (1.1.h).
-    assert set(_table_names(engine)) == {"alembic_version", *EXPECTED_TABLES}
+    # Task 2.2.a added verified_domains/audit_log to EXPECTED_TABLES for
+    # test_models.py's own Python-metadata-only checks, but 2.2.a is
+    # schema-only (models, no migration yet) -- 2.2.b is the migration
+    # that actually creates them for real. Excluded here, narrowly and
+    # explicitly, until 2.2.b lands; remove this exclusion then (same
+    # lifecycle as 2.1.a's own identical exclusion, removed at 2.1.b).
+    not_yet_migrated = {"verified_domains", "audit_log"}
+    assert set(_table_names(engine)) == {"alembic_version", *(EXPECTED_TABLES - not_yet_migrated)}
 
     inspector = sa.inspect(engine)
 
     for table_name, pk_column in EXPECTED_PK_COLUMNS.items():
+        if table_name in not_yet_migrated:
+            continue
         assert inspector.get_pk_constraint(table_name)["constrained_columns"] == [pk_column], (
             f"{table_name}'s primary key column does not match the model"
         )
 
     for (table_name, column_name), referred_table in CASCADE_FK_COLUMNS.items():
+        if table_name in not_yet_migrated:
+            continue
         foreign_keys = inspector.get_foreign_keys(table_name)
         (fk,) = [fk for fk in foreign_keys if fk["constrained_columns"] == [column_name]]
         assert fk["referred_table"] == referred_table
