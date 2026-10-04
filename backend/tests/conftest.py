@@ -468,17 +468,29 @@ NO_ACTION_FK_COLUMNS = {
 # Closed-vocabulary CHECK constraints, keyed by table (Task 1.4.d adds
 # tenants; site_keys' own was already checked ad hoc before this -- moved
 # here so both share one dict-driven test instead of two near-identical
-# ones, the same convention as CASCADE_FK_COLUMNS above).
+# ones, the same convention as CASCADE_FK_COLUMNS above). Each table maps
+# to a LIST of (constraint_name, allowed_values) pairs, not a single pair
+# directly -- generalized at Task 2.2.b, when verified_domains became the
+# first table needing two independent closed vocabularies (method, status)
+# at once; every pre-existing table here still has exactly one, now as a
+# one-item list.
 EXPECTED_STATUS_CHECK_CONSTRAINTS = {
-    "site_keys": ("ck_site_keys_status", frozenset({"draft", "live", "suspended"})),
-    "tenants": ("ck_tenants_status", frozenset({"active", "suspended"})),
+    "site_keys": [("ck_site_keys_status", frozenset({"draft", "live", "suspended"}))],
+    "tenants": [("ck_tenants_status", frozenset({"active", "suspended"}))],
     # Task 2.1.a: sources.type is docs/SPEC.md §5.1's own closed, spec-fixed
     # four-value adapter vocabulary; jobs.status is this project's own
     # closed job-lifecycle vocabulary (see app/ingest/models.py's Job class
     # for the full reasoning, including why there is no fifth "retrying"
     # or "cancelled" state).
-    "sources": ("ck_sources_type", frozenset({"urls", "crawl", "upload", "database"})),
-    "jobs": ("ck_jobs_status", frozenset({"pending", "running", "succeeded", "failed"})),
+    "sources": [("ck_sources_type", frozenset({"urls", "crawl", "upload", "database"}))],
+    "jobs": [("ck_jobs_status", frozenset({"pending", "running", "succeeded", "failed"}))],
+    # Task 2.2.b: method is DNS-only for now (PROJECT_SPEC.md's Step 2.2
+    # breakdown, decision (b)) -- file/meta_tag are added back here once
+    # Step 2.3 lands, per the matching Open marker.
+    "verified_domains": [
+        ("ck_verified_domains_method", frozenset({"dns"})),
+        ("ck_verified_domains_status", frozenset({"pending", "verified", "revoked"})),
+    ],
 }
 
 # Composite unique indexes, keyed by table -- same (name, value) shape as

@@ -84,15 +84,21 @@ def test_every_tenant_scoped_table_indexes_its_tenant_id():
 
 
 def test_status_check_constraints_match_the_spec_vocabulary():
-    for table_name, (constraint_name, allowed_values) in EXPECTED_STATUS_CHECK_CONSTRAINTS.items():
+    # Task 2.2.b: EXPECTED_STATUS_CHECK_CONSTRAINTS's values are now a LIST
+    # of (constraint_name, allowed_values) pairs, not a single pair --
+    # verified_domains is the first table needing two (method, status).
+    for table_name, expected in EXPECTED_STATUS_CHECK_CONSTRAINTS.items():
         table = Base.metadata.tables[table_name]
-        check_constraints = [
-            c for c in table.constraints if c.__class__.__name__ == "CheckConstraint"
-        ]
-        assert len(check_constraints) == 1, f"{table_name} should have exactly one CHECK constraint"
-        assert check_constraints[0].name == constraint_name
-        for value in allowed_values:
-            assert value in str(check_constraints[0].sqltext)
+        check_constraints = {
+            c.name: c for c in table.constraints if c.__class__.__name__ == "CheckConstraint"
+        }
+        assert len(check_constraints) == len(expected), (
+            f"{table_name} should have exactly {len(expected)} CHECK constraint(s)"
+        )
+        for constraint_name, allowed_values in expected:
+            constraint = check_constraints[constraint_name]
+            for value in allowed_values:
+                assert value in str(constraint.sqltext)
 
 
 def test_visitor_secret_hash_unique_index_is_scoped_to_site_key():
@@ -128,26 +134,6 @@ def _check_constraints_by_name(table_name: str) -> dict[str, object]:
     return {
         c.name: c for c in table.constraints if c.__class__.__name__ == "CheckConstraint"
     }
-
-
-def test_verified_domains_has_two_separate_check_constraints():
-    # Task 2.2.a: verified_domains has TWO independent closed vocabularies
-    # (method, status) on one table -- the first table to need that.
-    # Written as its own dedicated test, not routed through
-    # EXPECTED_STATUS_CHECK_CONSTRAINTS/test_status_check_constraints_match_
-    # the_spec_vocabulary (which assumes exactly one CHECK constraint per
-    # table and is also shared with test_alembic.py's live-database check),
-    # so this task's own schema decision does not force a shape change on a
-    # fixture 2.2.b's not-yet-built migration also depends on.
-    constraints = _check_constraints_by_name("verified_domains")
-    assert len(constraints) == 2, "verified_domains should have exactly two CHECK constraints"
-
-    method_constraint = constraints["ck_verified_domains_method"]
-    assert "dns" in str(method_constraint.sqltext)
-
-    status_constraint = constraints["ck_verified_domains_status"]
-    for value in ("pending", "verified", "revoked"):
-        assert value in str(status_constraint.sqltext)
 
 
 def test_verified_domains_active_domain_unique_index_is_partial():

@@ -330,29 +330,19 @@ def test_upgrade_head_is_idempotent_and_never_prints_the_password(_test_engine):
     assert first.returncode == 0, first.stdout + first.stderr
 
     # Table list includes the real migration's 5 tables (Task 1.2.c), plus
-    # 2.1.b's own four ingestion tables -- was just ["alembic_version"]
-    # before any migration existed (1.1.h).
-    # Task 2.2.a added verified_domains/audit_log to EXPECTED_TABLES for
-    # test_models.py's own Python-metadata-only checks, but 2.2.a is
-    # schema-only (models, no migration yet) -- 2.2.b is the migration
-    # that actually creates them for real. Excluded here, narrowly and
-    # explicitly, until 2.2.b lands; remove this exclusion then (same
-    # lifecycle as 2.1.a's own identical exclusion, removed at 2.1.b).
-    not_yet_migrated = {"verified_domains", "audit_log"}
-    assert set(_table_names(engine)) == {"alembic_version", *(EXPECTED_TABLES - not_yet_migrated)}
+    # 2.1.b's own four ingestion tables and 2.2.b's own verified_domains/
+    # audit_log -- was just ["alembic_version"] before any migration
+    # existed (1.1.h).
+    assert set(_table_names(engine)) == {"alembic_version", *EXPECTED_TABLES}
 
     inspector = sa.inspect(engine)
 
     for table_name, pk_column in EXPECTED_PK_COLUMNS.items():
-        if table_name in not_yet_migrated:
-            continue
         assert inspector.get_pk_constraint(table_name)["constrained_columns"] == [pk_column], (
             f"{table_name}'s primary key column does not match the model"
         )
 
     for (table_name, column_name), referred_table in CASCADE_FK_COLUMNS.items():
-        if table_name in not_yet_migrated:
-            continue
         foreign_keys = inspector.get_foreign_keys(table_name)
         (fk,) = [fk for fk in foreign_keys if fk["constrained_columns"] == [column_name]]
         assert fk["referred_table"] == referred_table
@@ -360,11 +350,32 @@ def test_upgrade_head_is_idempotent_and_never_prints_the_password(_test_engine):
             f"{table_name}.{column_name} must cascade from {referred_table}"
         )
 
-    for table_name, (constraint_name, allowed_values) in EXPECTED_STATUS_CHECK_CONSTRAINTS.items():
-        check_constraints = inspector.get_check_constraints(table_name)
-        (status_check,) = [c for c in check_constraints if c["name"] == constraint_name]
-        for status_value in allowed_values:
-            assert status_value in status_check["sqltext"]
+    # Task 2.2.b: EXPECTED_STATUS_CHECK_CONSTRAINTS's values are now a LIST
+    # of (constraint_name, allowed_values) pairs, not a single pair --
+    # verified_domains is the first table needing two (method, status).
+    for table_name, expected in EXPECTED_STATUS_CHECK_CONSTRAINTS.items():
+        check_constraints = {c["name"]: c for c in inspector.get_check_constraints(table_name)}
+        assert len(check_constraints) == len(expected), (
+            f"{table_name} should have exactly {len(expected)} CHECK constraint(s)"
+        )
+        for constraint_name, allowed_values in expected:
+            status_check = check_constraints[constraint_name]
+            for status_value in allowed_values:
+                assert status_value in status_check["sqltext"]
+
+    # Task 2.2.b: verified_domains.ix_verified_domains_domain_active_unique
+    # is a PARTIAL unique index (postgresql_where), not a plain one like
+    # EXPECTED_UNIQUE_INDEXES models -- confirmed here that Postgres itself
+    # reports it as unique with the right column, and its own live
+    # BEHAVIOR (not just this metadata) is proven separately by
+    # test_verified_domains_partial_unique_index_rejects_an_active_
+    # duplicate_but_frees_the_domain_once_revoked below, a stronger proof
+    # than inspecting a where-clause string.
+    partial_index_name = "ix_verified_domains_domain_active_unique"
+    verified_domains_indexes = inspector.get_indexes("verified_domains")
+    (partial_index,) = [i for i in verified_domains_indexes if i["name"] == partial_index_name]
+    assert partial_index["unique"] is True
+    assert partial_index["column_names"] == ["domain"]
 
     for table_name, (index_name, columns) in EXPECTED_UNIQUE_INDEXES.items():
         indexes = inspector.get_indexes(table_name)
@@ -568,9 +579,20 @@ async def test_downgrade_from_head_removes_ingestion_tables_but_keeps_pgcrypto(
     # restores the schema. This is the genuine, deployment-level proof
     # that 2.1.a's own bug (encryption silently depending on whichever
     # test happened to run first) is fixed for real, not just in tests.
+    #
+    # Upgrades to ef16e0a4ce7c explicitly, not "head" -- found live at
+    # Task 2.2.b, the exact same class of bug the comment on the
+    # visitor-index/tenant-check downgrade test above already describes:
+    # this test originally upgraded to "head" and downgraded "-1",
+    # assuming head was always exactly this migration; 2.2.b's own new
+    # migration landed on top of it and broke that assumption (head's
+    # "-1" now lands one migration too early, inside ef16e0a4ce7c's own
+    # state, which still has the ingestion tables this test asserts are
+    # gone). Targeting the specific revision by name makes this test's
+    # own boundary independent of however many later migrations exist.
     engine = _test_engine
     _reset_public_schema(engine)
-    migrated = _run_alembic("upgrade", "head", engine=engine)
+    migrated = _run_alembic("upgrade", "ef16e0a4ce7c", engine=engine)
     assert migrated.returncode == 0, migrated.stdout + migrated.stderr
 
     downgraded = _run_alembic("downgrade", "-1", engine=engine)
@@ -610,3 +632,163 @@ async def test_downgrade_from_head_removes_ingestion_tables_but_keeps_pgcrypto(
     await db.get_engine().dispose()
     db.get_engine.cache_clear()
     db._session_factory.cache_clear()
+
+
+def test_downgrade_from_head_removes_verified_domains_and_audit_log(_test_engine):
+    # Task 2.2.b: the same C1 pattern as 1.4.d's/2.1.b's own downgrade
+    # tests above -- proves downgrade() actually removes both new tables
+    # from a real database, not just that upgrade() creates them (already
+    # proven by test_upgrade_head_is_idempotent_and_never_prints_the_
+    # password above). No explicit un-REVOKE to prove: dropping the table
+    # removes the privilege question entirely (this migration's own
+    # downgrade() comment explains why), so there is nothing extra here
+    # beyond the standard upgrade -> downgrade -> table-gone -> upgrade
+    # cycle every other migration's own downgrade test already follows.
+    engine = _test_engine
+    _reset_public_schema(engine)
+    migrated = _run_alembic("upgrade", "head", engine=engine)
+    assert migrated.returncode == 0, migrated.stdout + migrated.stderr
+
+    downgraded = _run_alembic("downgrade", "-1", engine=engine)
+    assert downgraded.returncode == 0, downgraded.stdout + downgraded.stderr
+
+    remaining_tables = set(sa.inspect(engine).get_table_names())
+    assert not remaining_tables & {"verified_domains", "audit_log"}
+
+    restored = _run_alembic("upgrade", "head", engine=engine)
+    assert restored.returncode == 0, restored.stdout + restored.stderr
+
+
+def test_verified_domains_partial_index_rejects_active_duplicate_frees_on_revoke(_test_engine):
+    # The real security property Task 2.2.b's partial unique index exists
+    # to protect (PROJECT_SPEC.md's Step 2.2 breakdown, decision (e)):
+    # global uniqueness across ALL tenants while a claim is pending/
+    # verified, but a revoked claim must free the domain for ANY tenant
+    # (including a different one) to claim again -- proving the index is
+    # genuinely PARTIAL, not merely that a unique violation happens once.
+    engine = _test_engine
+    _reset_public_schema(engine)
+    migrated = _run_alembic("upgrade", "head", engine=engine)
+    assert migrated.returncode == 0, migrated.stdout + migrated.stderr
+
+    with engine.connect() as connection:
+        connection.execute(
+            sa.text("INSERT INTO tenants (name, status) VALUES ('Tenant A', 'active')")
+        )
+        connection.execute(
+            sa.text("INSERT INTO tenants (name, status) VALUES ('Tenant B', 'active')")
+        )
+        connection.execute(
+            sa.text(
+                "INSERT INTO verified_domains "
+                "(tenant_id, domain, method, status, verification_token) "
+                "SELECT id, 'example.com', 'dns', 'pending', 'token-a' "
+                "FROM tenants WHERE name = 'Tenant A'"
+            )
+        )
+        connection.commit()
+
+    # (a) Tenant B attempts the SAME domain while A's claim is still
+    # pending -- rejected by the raw DB constraint. 2.2.c's own claim
+    # logic (not yet built) will wrap this in a clean application-level
+    # rejection; proving the constraint itself rejects a direct duplicate
+    # insert is this task's own scope.
+    with engine.connect() as connection, pytest.raises(IntegrityError):
+        connection.execute(
+            sa.text(
+                "INSERT INTO verified_domains "
+                "(tenant_id, domain, method, status, verification_token) "
+                "SELECT id, 'example.com', 'dns', 'pending', 'token-b' "
+                "FROM tenants WHERE name = 'Tenant B'"
+            )
+        )
+        connection.commit()
+
+    # (b) A's claim is revoked -> the domain is free again, for ANY
+    # tenant (here, a DIFFERENT one, B) to successfully claim.
+    with engine.connect() as connection:
+        connection.execute(
+            sa.text(
+                "UPDATE verified_domains SET status = 'revoked', revoked_at = now() "
+                "WHERE domain = 'example.com' AND verification_token = 'token-a'"
+            )
+        )
+        connection.execute(
+            sa.text(
+                "INSERT INTO verified_domains "
+                "(tenant_id, domain, method, status, verification_token) "
+                "SELECT id, 'example.com', 'dns', 'pending', 'token-b2' "
+                "FROM tenants WHERE name = 'Tenant B'"
+            )
+        )
+        connection.commit()
+
+    with engine.connect() as connection:
+        rows = connection.execute(
+            sa.text(
+                "SELECT status, verification_token FROM verified_domains "
+                "WHERE domain = 'example.com' ORDER BY created_at"
+            )
+        ).all()
+    assert [tuple(row) for row in rows] == [("revoked", "token-a"), ("pending", "token-b2")]
+
+
+def test_audit_log_update_delete_currently_succeeds_because_widgetplatform_is_a_superuser(
+    _test_engine,
+):
+    # Task 2.2.b: this is NOT a bug report -- it is the permanent, honest
+    # proof that the migration's own REVOKE UPDATE, DELETE ON audit_log is
+    # currently INERT, documented exactly as such in that migration's own
+    # comment and in PROJECT_SPEC.md's dated correction to the Step 2.2
+    # breakdown's decision (a). "widgetplatform" (DATABASE_URL's user) is
+    # a full Postgres superuser (confirmed live via `\du`/pg_roles before
+    # this migration was written) -- superusers bypass EVERY permission
+    # check, including a REVOKE naming them explicitly, by definition; no
+    # SQL-level trick changes that. This test exists so the suite itself
+    # encodes the honest current state, rather than silently never
+    # verifying something known not to work: it will start FAILING, loudly
+    # and correctly, the moment Phase 7's role split (PROJECT_SPEC.md,
+    # owned at 1.1.i) lands and api/worker connect as a non-superuser role
+    # instead -- at which point it must be rewritten to assert the
+    # opposite (a real PermissionError/insufficient-privilege rejection),
+    # not deleted outright, matching that marker's own instruction to
+    # re-verify this live rather than assume it now works.
+    engine = _test_engine
+    _reset_public_schema(engine)
+    migrated = _run_alembic("upgrade", "head", engine=engine)
+    assert migrated.returncode == 0, migrated.stdout + migrated.stderr
+
+    with engine.connect() as connection:
+        connection.execute(
+            sa.text(
+                "INSERT INTO audit_log (actor, action, target_type, target_id, details) "
+                "VALUES ('admin@example.com', 'revoke_domain', 'verified_domains', "
+                "gen_random_uuid(), '{}')"
+            )
+        )
+        connection.commit()
+
+        granted_privileges = {
+            row[0]
+            for row in connection.execute(
+                sa.text(
+                    "SELECT privilege_type FROM information_schema.table_privileges "
+                    "WHERE table_name = 'audit_log' AND grantee = 'widgetplatform'"
+                )
+            )
+        }
+    # The REVOKE did register at the privilege-catalog level (UPDATE/DELETE
+    # are genuinely absent from this role's own grants on this table) --
+    # it is the superuser bypass, not a no-op REVOKE statement, that lets
+    # the writes below through regardless.
+    assert "UPDATE" not in granted_privileges
+    assert "DELETE" not in granted_privileges
+
+    with engine.connect() as connection:
+        connection.execute(
+            sa.text("UPDATE audit_log SET action = 'tampered' WHERE action = 'revoke_domain'")
+        )
+        connection.execute(sa.text("DELETE FROM audit_log WHERE action = 'tampered'"))
+        connection.commit()
+        (remaining,) = connection.execute(sa.text("SELECT count(*) FROM audit_log")).one()
+    assert remaining == 0
