@@ -142,7 +142,11 @@ def called_name(node: ast.Call) -> str | None:
 
 
 def check_call_allowlist(
-    paths, target_name: str, allowlist: tuple[str, ...], self_file: Path | None = None
+    paths,
+    target_name: str,
+    allowlist: tuple[str, ...],
+    self_file: Path | None = None,
+    root: Path = BACKEND_DIR,
 ) -> list[str]:
     # Shared by test_config_guard.py and test_ingest_repository_guard.py
     # (duplication check after 2.1.a/b): both walked an AST, matched a
@@ -151,11 +155,18 @@ def check_call_allowlist(
     # that one shared shape, parameterized by which name and which list.
     # Each guard's own OTHER rules (test_config_guard.py's Settings()/
     # errors() checks) stay separate, since they differ.
+    #
+    # `root` (duplication check after 2.2.g/h): defaults to BACKEND_DIR,
+    # preserving every existing caller's exact prior behavior unchanged --
+    # added so test_audit_log_write_path_guard.py's own synthetic-tree
+    # unit tests could call this directly against a tmp_path root instead
+    # of maintaining a second, near-identical local scan function just to
+    # relativize paths against something other than the real backend tree.
     violations = []
     for path in paths:
         if path == self_file:
             continue
-        rel = path.relative_to(BACKEND_DIR).as_posix()
+        rel = path.relative_to(root).as_posix()
         tree = ast.parse(path.read_text(), filename=str(path))
         for node in ast.walk(tree):
             if isinstance(node, ast.Call) and called_name(node) == target_name:

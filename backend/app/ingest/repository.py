@@ -26,7 +26,6 @@
 import json
 import secrets
 import uuid
-from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
@@ -35,7 +34,7 @@ from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
-from app.db import violated_constraint_name
+from app.db import DateTimeClock, violated_constraint_name
 from app.ingest.domain_verification import check_dns_verification
 from app.ingest.models import AuditLog, DbConnection, Job, VerifiedDomain
 
@@ -110,7 +109,7 @@ async def revoke_domain(
     session: AsyncSession,
     domain_id: uuid.UUID,
     actor: str,
-    clock: Callable[[], datetime] = lambda: datetime.now(UTC),
+    clock: DateTimeClock = lambda: datetime.now(UTC),
 ) -> VerifiedDomain | None:
     # Task 2.2.g. Deliberately module-level, never an IngestRepository
     # method -- same structural reasoning as create_tenant()/
@@ -135,35 +134,45 @@ async def revoke_domain(
     if domain is None:
         return None
 
-    # Idempotent no-op, not an error -- matching confirm_verification()'s
-    # own "verified" case (the identical shape of problem: the row is
-    # already in the state the caller asked for). This is NOT the same
-    # situation as confirm_verification()'s "revoked" case, which raises
-    # DomainRevokedError: that case is a caller trying to move a revoked
-    # domain to "verified" (a conflicting transition to a DIFFERENT state),
-    # whereas this is a caller asking to revoke an already-revoked domain
-    # (the SAME state, requested twice) -- re-running an admin action that
-    # already succeeded should be safe, not a surprise exception. No
-    # audit_log row is written for this case: nothing actually happened,
-    # so there is nothing new to audit (writing one anyway would make every
-    # repeated call show up as a fresh "revoke_domain" event despite no
-    # state change, drowning a real audit trail in no-op noise).
-    if domain.status == "revoked":
-        return domain
+    # Idempotent for the DOMAIN's own state, not an error -- matching
+    # confirm_verification()'s own "verified" case (the identical shape of
+    # problem: the row is already in the state the caller asked for). This
+    # is NOT the same situation as confirm_verification()'s "revoked" case,
+    # which raises DomainRevokedError: that case is a caller trying to move
+    # a revoked domain to "verified" (a conflicting transition to a
+    # DIFFERENT state), whereas this is a caller asking to revoke an
+    # already-revoked domain (the SAME state, requested twice) --
+    # re-running an admin action that already succeeded should be safe,
+    # not a surprise exception. status/revoked_at never move again below.
+    #
+    # An audit_log row IS still written either way (design decision, 2.2.g/h
+    # duplication check, item B1): this table's own purpose is admin-action
+    # ACCOUNTABILITY, not only a record of state transitions that changed
+    # something. Two different admins racing to revoke the same domain
+    # (or one admin re-running the action, unsure whether it already took
+    # effect) is itself a real event worth a trace -- silently returning
+    # the existing row with no audit trace of the SECOND attempt would hide
+    # exactly the kind of "who touched this and when" question this table
+    # exists to answer. `already_revoked` in `details` below distinguishes
+    # a genuine first revocation from a repeat attempt that changed nothing.
+    already_revoked = domain.status == "revoked"
+    if not already_revoked:
+        domain.status = "revoked"
+        domain.revoked_at = clock()
 
-    domain.status = "revoked"
-    domain.revoked_at = clock()
-    # Both this update and the audit_log insert below are only flush()ed,
-    # never committed, here in the SAME call to session.flush() --
-    # matching every other method in this codebase (claim_domain(),
-    # confirm_verification(), etc.): the caller owns the transaction
-    # boundary, not this function. This is what makes the two writes
-    # succeed or fail together: a single flush() sends every pending
+    # The (conditional) domain update and the audit_log insert below are
+    # only flush()ed, never committed, here in the SAME call to
+    # session.flush() -- matching every other method in this codebase
+    # (claim_domain(), confirm_verification(), etc.): the caller owns the
+    # transaction boundary, not this function. This is what makes the two
+    # writes succeed or fail together: a single flush() sends every pending
     # change in the session as one unit of work, and a single caller-level
     # commit() (or rollback()) afterward applies to both rows at once --
     # there is no way for one to land without the other, by construction
     # of how AsyncSession/flush/commit works, not by anything extra this
-    # function needs to add.
+    # function needs to add. On the already-revoked path, the domain row
+    # has no pending change at all -- only the audit_log insert is new --
+    # so the same flush() call simply has one row to send instead of two.
     session.add(
         AuditLog(
             actor=actor,
@@ -176,7 +185,11 @@ async def revoke_domain(
             # know how to encode a UUID object -- confirmed live before
             # relying on this, not assumed; str(uuid.UUID) round-trips
             # back through uuid.UUID(...) if ever needed for a real query.
-            details={"domain": domain.domain, "tenant_id": str(domain.tenant_id)},
+            details={
+                "domain": domain.domain,
+                "tenant_id": str(domain.tenant_id),
+                "already_revoked": already_revoked,
+            },
         )
     )
     await session.flush()
@@ -383,7 +396,7 @@ class IngestRepository:
     async def confirm_verification(
         self,
         domain_id: uuid.UUID,
-        clock: Callable[[], datetime] = lambda: datetime.now(UTC),
+        clock: DateTimeClock = lambda: datetime.now(UTC),
     ) -> VerifiedDomain | None:
         # Task 2.2.e. Looks up through get_domain_by_id() -- reused, not
         # re-implemented -- so a domain_id belonging to a different tenant

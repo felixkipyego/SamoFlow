@@ -91,32 +91,11 @@ def test_exactly_one_legitimate_audit_log_construction_site_exists_today():
 # --- Guard unit tests on synthetic trees (no real backend/app file touched,
 # matching the Qdrant read-path guard's own convention) --------------------
 #
-# check_call_allowlist() (tests/conftest.py) hardcodes its own relative path
-# as path.relative_to(BACKEND_DIR) -- correct for scanning the real tree
-# above, but it cannot be pointed at a tmp_path synthetic tree (it raises
-# ValueError: tmp_path is not a subpath of BACKEND_DIR). Rather than modify
-# that shared helper for a need no other guard has yet (out of scope for
-# this task's own file list: a new test file, not tests/conftest.py), this
-# one small local scan -- the same Call-node/called_name() logic,
-# parameterized by `root` instead of hardcoded to BACKEND_DIR -- exists
-# purely to make the proof below possible, matching why
-# test_qdrant_read_path_guard.py's own scan_read_path_guard() takes a root
-# parameter in the first place.
-
-
-def _scan_for_violations(root: Path, allowlist: tuple[str, ...]) -> list[str]:
-    violations = []
-    for path in iter_python_files(root):
-        rel = path.relative_to(root).as_posix()
-        tree = ast.parse(path.read_text(), filename=str(path))
-        for node in ast.walk(tree):
-            if not isinstance(node, ast.Call) or called_name(node) != "AuditLog":
-                continue
-            if rel not in allowlist:
-                violations.append(
-                    f"{rel}:{node.lineno}: calls AuditLog() but is not in its allow-list"
-                )
-    return violations
+# Duplication check after 2.2.g/h: check_call_allowlist() (tests/conftest.py)
+# now takes an optional `root` parameter (defaulting to BACKEND_DIR, so
+# every other caller's behavior is unchanged) specifically so these
+# synthetic-tree tests can call it directly against a tmp_path root,
+# instead of maintaining a second, near-duplicate local scan function.
 
 
 def _write(tmp_path: Path, rel_path: str, content: str) -> None:
@@ -133,7 +112,9 @@ def test_fails_on_an_audit_log_construction_outside_the_allowlist(tmp_path):
         "def f():\n"
         "    return AuditLog(actor='x', action='y', target_type='z')\n",
     )
-    violations = _scan_for_violations(tmp_path, ALLOWED_AUDIT_LOG_CONSTRUCTORS)
+    violations = check_call_allowlist(
+        iter_python_files(tmp_path), "AuditLog", ALLOWED_AUDIT_LOG_CONSTRUCTORS, root=tmp_path
+    )
     assert len(violations) == 1
     assert "app/other.py" in violations[0]
     assert "AuditLog" in violations[0]
@@ -147,8 +128,35 @@ def test_passes_for_an_audit_log_construction_inside_the_allowlisted_file(tmp_pa
         "def f():\n"
         "    return AuditLog(actor='x', action='y', target_type='z')\n",
     )
-    violations = _scan_for_violations(tmp_path, ALLOWED_AUDIT_LOG_CONSTRUCTORS)
+    violations = check_call_allowlist(
+        iter_python_files(tmp_path), "AuditLog", ALLOWED_AUDIT_LOG_CONSTRUCTORS, root=tmp_path
+    )
     assert violations == []
+
+
+def test_fails_on_an_audit_log_construction_via_keyword_unpacking(tmp_path):
+    # Duplication check after 2.2.g/h, item C2: confirms, by actually
+    # running it, that AuditLog(**some_dict) is NOT a blind spot the way
+    # the import-alias case above is. called_name() only ever inspects
+    # node.func (the callable being invoked) -- never node.args/
+    # node.keywords -- so how the arguments are written (positional,
+    # keyword, or **unpacked) cannot change whether this guard sees the
+    # call at all. This test proves that directly rather than leaving it
+    # as an inference from reading called_name()'s own implementation.
+    _write(
+        tmp_path,
+        "app/other.py",
+        "from app.ingest.models import AuditLog\n\n\n"
+        "def f():\n"
+        "    fields = {'actor': 'x', 'action': 'y', 'target_type': 'z'}\n"
+        "    return AuditLog(**fields)\n",
+    )
+    violations = check_call_allowlist(
+        iter_python_files(tmp_path), "AuditLog", ALLOWED_AUDIT_LOG_CONSTRUCTORS, root=tmp_path
+    )
+    assert len(violations) == 1
+    assert "app/other.py" in violations[0]
+    assert "AuditLog" in violations[0]
 
 
 def test_fails_on_an_audit_log_construction_via_an_import_alias_evading_detection(tmp_path):
@@ -168,5 +176,7 @@ def test_fails_on_an_audit_log_construction_via_an_import_alias_evading_detectio
         "def f():\n"
         "    return AL(actor='x', action='y', target_type='z')\n",
     )
-    violations = _scan_for_violations(tmp_path, ALLOWED_AUDIT_LOG_CONSTRUCTORS)
+    violations = check_call_allowlist(
+        iter_python_files(tmp_path), "AuditLog", ALLOWED_AUDIT_LOG_CONSTRUCTORS, root=tmp_path
+    )
     assert violations == []

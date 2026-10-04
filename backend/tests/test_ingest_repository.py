@@ -639,6 +639,7 @@ async def test_revoke_domain_on_a_pending_domain_sets_status_and_writes_an_audit
     assert audit_row.details == {
         "domain": expected_domain_name,
         "tenant_id": str(expected_tenant_id),
+        "already_revoked": False,
     }
 
 
@@ -662,11 +663,15 @@ async def test_revoke_domain_on_a_nonexistent_domain_id_returns_none_with_no_aud
 
 
 async def test_revoke_domain_on_an_already_revoked_domain_is_a_safe_no_op(_seeded_tenants):
-    # Deliberately idempotent, not an error -- see revoke_domain()'s own
-    # comment for why this differs from confirm_verification()'s
-    # DomainRevokedError case. A second call must change nothing further:
-    # revoked_at must not move to a new timestamp, and no second audit_log
-    # row must appear for the same action.
+    # Idempotent for the DOMAIN's own state only -- see revoke_domain()'s
+    # own comment for why this differs from confirm_verification()'s
+    # DomainRevokedError case. A second call must change the domain row
+    # nothing further (revoked_at must not move to a new timestamp), but
+    # (design decision, 2.2.g/h duplication check, item B1 -- changed from
+    # this test's own original "no second audit_log row" assertion) IS now
+    # expected to write a SECOND audit_log row for the second attempt, with
+    # the second, different actor correctly recorded and a details marker
+    # distinguishing it from the real revocation.
     ids = _seeded_tenants
     async with db_session() as session:
         repo = IngestRepository(tenant_id=ids["tenant_a"], session=session)
@@ -695,13 +700,31 @@ async def test_revoke_domain_on_an_already_revoked_domain_is_a_safe_no_op(_seede
     assert second_result.revoked_at == first_now
 
     async with db_session() as session:
+        domain_row = (
+            await session.execute(sa.select(VerifiedDomain).where(VerifiedDomain.id == domain_id))
+        ).scalar_one()
         audit_rows = (
-            await session.execute(
-                sa.select(AuditLog).where(AuditLog.target_id == domain_id)
+            (
+                await session.execute(
+                    sa.select(AuditLog)
+                    .where(AuditLog.target_id == domain_id)
+                    .order_by(AuditLog.created_at)
+                )
             )
-        ).scalars().all()
-    assert len(audit_rows) == 1
+            .scalars()
+            .all()
+        )
+
+    # The domain row itself: still exactly the first revocation's values.
+    assert domain_row.status == "revoked"
+    assert domain_row.revoked_at == first_now
+
+    # Two audit_log rows now -- one per attempt, each with its own actor.
+    assert len(audit_rows) == 2
     assert audit_rows[0].actor == "test-admin"
+    assert audit_rows[0].details["already_revoked"] is False
+    assert audit_rows[1].actor == "a-different-admin"
+    assert audit_rows[1].details["already_revoked"] is True
 
 
 async def test_revoke_domain_is_deliberately_unscoped_and_can_revoke_any_tenants_domain(
@@ -740,8 +763,23 @@ async def test_revoke_domain_is_deliberately_unscoped_and_can_revoke_any_tenants
         row_b = (
             await session.execute(sa.select(VerifiedDomain).where(VerifiedDomain.id == domain_b_id))
         ).scalar_one()
+        audit_a = (
+            await session.execute(sa.select(AuditLog).where(AuditLog.target_id == domain_a_id))
+        ).scalar_one()
+        audit_b = (
+            await session.execute(sa.select(AuditLog).where(AuditLog.target_id == domain_b_id))
+        ).scalar_one()
     assert row_a.status == "revoked"
     assert row_b.status == "revoked"
+    # Duplication check after 2.2.g/h, item C1: the single-tenant test above
+    # already asserts the audit row's own tenant_id matches the domain's --
+    # but with only one tenant in play there, it can't rule out a bug that
+    # always records the SAME (or a hardcoded) tenant_id regardless of which
+    # domain was actually revoked. Only a test with two different, real
+    # tenants can catch a swap -- proving each domain's own audit row names
+    # ITS OWN owning tenant, not the other one's.
+    assert audit_a.details["tenant_id"] == str(ids["tenant_a"])
+    assert audit_b.details["tenant_id"] == str(ids["tenant_b"])
 
 
 async def test_revoke_domain_never_persists_the_status_change_alone_if_the_audit_write_fails(

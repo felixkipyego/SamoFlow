@@ -42,7 +42,6 @@
 # unplanned self-healing property of using a real transaction for this
 # rather than a hand-rolled "claimed_by" column.
 import uuid
-from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import select, update
@@ -50,6 +49,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.sql import func
 
 from app.config import get_settings
+from app.db import DateTimeClock
 from app.ingest.models import Job
 
 
@@ -85,7 +85,7 @@ async def mark_job_failed(
     session: AsyncSession,
     job_id: uuid.UUID,
     error: str,
-    clock: Callable[[], datetime] = lambda: datetime.now(UTC),
+    clock: DateTimeClock = lambda: datetime.now(UTC),
     permanent: bool = False,
 ) -> None:
     # Backoff formula (PROJECT_SPEC.md's Step 2.1.c decision entry):

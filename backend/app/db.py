@@ -16,7 +16,8 @@
 # and transparently resolves to PGDialectAsync_psycopg (confirmed by hand:
 # engine.dialect.is_async is True, engine.dialect.driver == "psycopg", with
 # no real connection attempted). No scheme change needed.
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
+from datetime import datetime
 from functools import lru_cache
 
 from sqlalchemy import text
@@ -31,6 +32,19 @@ from sqlalchemy.orm import DeclarativeBase
 from sqlalchemy.sql import func
 
 from app.config import get_settings
+
+# Duplication check after 2.2.g/h: the injectable-clock parameter shape
+# (a literal Python datetime.now(UTC) value, not func.now() -- avoids the
+# SQLAlchemy attribute-expiration/MissingGreenlet trap confirm_verification()'s
+# own decision log describes, for any caller that must read the value back
+# immediately) was repeated identically, inline, across mark_job_failed()
+# (app/ingest/queue.py), confirm_verification() and revoke_domain() (both
+# app/ingest/repository.py) -- three identical-shape call sites, crossing
+# this project's own "not worth a shared alias until a 3rd same-shape site
+# appears" threshold from the 2.2.d/e/f duplication check. StatusCache's and
+# RateLimiter's own `Callable[[], float] = time.monotonic` clocks are a
+# different return type and stay separate -- not this alias's job.
+DateTimeClock = Callable[[], datetime]
 
 
 def violated_constraint_name(exc: IntegrityError) -> str | None:
