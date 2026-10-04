@@ -26,7 +26,9 @@
 import json
 import secrets
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import UTC, datetime
 
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
@@ -34,6 +36,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
 from app.db import violated_constraint_name
+from app.ingest.domain_verification import check_dns_verification
 from app.ingest.models import DbConnection, Job, VerifiedDomain
 
 
@@ -66,6 +69,20 @@ class DomainAlreadyClaimedError(Exception):
     only the domain the caller just supplied (not a secret), so the
     original IntegrityError can stay chained via a normal "raise ... from
     exc" without leaking anything.
+    """
+
+
+class DomainRevokedError(Exception):
+    """Raised by confirm_verification() when the domain's own claim is
+    "revoked" -- a revoked claim is never re-verified in place: the
+    platform admin revoked it for a reason (2.2.g's own revoke_domain(),
+    not yet built), and silently letting a confirm call resurrect it
+    would undermine that action. The tenant must call claim_domain()
+    again, which generates a brand-new per-attempt token, never resuming
+    the old, revoked one. Matches DomainAlreadyClaimedError's own shape
+    directly: a plain chained `raise ... from None` is not even needed
+    here since there is no underlying exception to chain -- this is a
+    normal state-check, not a caught database error.
     """
 
 
@@ -285,3 +302,78 @@ class IngestRepository:
             )
         )
         return result.scalar_one_or_none()
+
+    async def confirm_verification(
+        self,
+        domain_id: uuid.UUID,
+        clock: Callable[[], datetime] = lambda: datetime.now(UTC),
+    ) -> VerifiedDomain | None:
+        # Task 2.2.e. Looks up through get_domain_by_id() -- reused, not
+        # re-implemented -- so a domain_id belonging to a different tenant
+        # returns None, the identical hostile-caller contract every other
+        # get_*_by_id method on this class/TenantScopedRepository already
+        # has, never distinguished from "doesn't exist at all." This also
+        # means a wrong-tenant call never reaches the DNS check or the
+        # state-machine logic below at all -- there is no row to check or
+        # mutate once get_domain_by_id() has already returned None.
+        domain = await self.get_domain_by_id(domain_id)
+        if domain is None:
+            return None
+
+        # "verified" is a safe no-op, not a re-check -- docs/SPEC.md
+        # §5.5's own "verified once... not re-checked" rule, literally:
+        # returns the SAME row completely unchanged. check_dns_verification()
+        # is never called for this case -- not merely "the result would be
+        # discarded," the DNS query itself never happens (proven live by
+        # 2.2.e's own tests via a monkeypatch that asserts zero calls, not
+        # just inferred from the unchanged timestamp).
+        if domain.status == "verified":
+            return domain
+
+        # "revoked" is rejected outright, not re-verified in place -- see
+        # DomainRevokedError's own docstring for why. No DNS check, no
+        # mutation.
+        if domain.status == "revoked":
+            raise DomainRevokedError(f"domain {domain_id} has been revoked")
+
+        # Only "pending" reaches here and triggers a real DNS check.
+        if await check_dns_verification(domain.domain, domain.verification_token):
+            # Deliberately a Python-side clock() value, NOT func.now() --
+            # found live, before committing to this, not assumed: unlike
+            # mark_job_succeeded()/mark_job_failed() (app/ingest/queue.py),
+            # which set their own timestamp columns to func.now() and then
+            # return None, THIS method must hand back the row with
+            # verified_at immediately readable by its own caller.
+            # Assigning func.now() marks the attribute expired after
+            # flush, and reading an expired attribute on an AsyncSession
+            # object outside of a greenlet context raises
+            # sqlalchemy.exc.MissingGreenlet -- reproduced live before
+            # switching to this. A literal Python datetime has no such
+            # problem: SQLAlchemy already knows its exact value, so
+            # nothing is marked expired. clock is injectable, matching
+            # mark_job_failed()'s own identical precedent, so a test can
+            # assert the exact resulting verified_at against a fixed,
+            # known value.
+            domain.status = "verified"
+            domain.verified_at = clock()
+            # flush() only -- never commit() here, matching every other
+            # method on this class/codebase without exception
+            # (claim_domain(), enqueue(), create_db_connection(), and
+            # queue.py's own mark_job_succeeded()/mark_job_failed()): the
+            # caller owns the transaction boundary, not the repository.
+            await self.session.flush()
+            return domain
+
+        # A clean "False" from check_dns_verification() -- whether DNS
+        # resolved fine but the token simply isn't there yet, or the
+        # lookup itself failed outright (NXDOMAIN, timeout, no reachable
+        # nameserver, etc., per 2.2.d's own fetch_txt_records() design) --
+        # is structurally INDISTINGUISHABLE from here, by construction:
+        # both collapse to the identical boolean False before this method
+        # ever sees them. That is deliberate, not a gap: neither case is
+        # an application error, both mean exactly "not verified yet" from
+        # the tenant's own perspective, and conflating them is what lets
+        # this branch stay a single, simple no-op -- the row is returned
+        # completely unchanged (still "pending", verified_at still null),
+        # never an exception.
+        return domain

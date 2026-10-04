@@ -16,16 +16,19 @@
 #     db_connection belonging to a different tenant, and a nonexistent id,
 #     must produce the identical outcome (both raise), never distinguished.
 import uuid
+from datetime import UTC, datetime
 
 import pytest
 import sqlalchemy as sa
 
 from app.config import get_settings
+from app.ingest import repository as repository_module
 from app.ingest.models import Job, VerifiedDomain
 from app.ingest.queue import claim_next_job
 from app.ingest.repository import (
     CredentialEncryptionError,
     DomainAlreadyClaimedError,
+    DomainRevokedError,
     IngestRepository,
 )
 from app.plans import models as plans_models  # noqa: F401 (registers "plans" on Base.metadata)
@@ -422,3 +425,144 @@ async def test_claim_domain_collision_exception_reveals_neither_the_other_tenant
     assert str(ids["tenant_a"]) not in rendered
     assert domain_a_token not in rendered
     assert domain_a_id not in rendered
+
+
+# --- Task 2.2.e: confirm_verification() wiring -----------------------------
+
+
+async def _never_call_check_dns_verification(*_args, **_kwargs):
+    raise AssertionError("check_dns_verification must not be called for this case")
+
+
+async def test_confirm_verification_on_an_already_verified_domain_is_a_safe_no_op(
+    _seeded_tenants, monkeypatch
+):
+    # docs/SPEC.md §5.5: "verified once... not re-checked" -- taken
+    # literally. Not just "the timestamp doesn't change": the DNS check
+    # itself must never run at all for this case.
+    ids = _seeded_tenants
+    fixed_verified_at = datetime(2026, 1, 1, tzinfo=UTC)
+    async with db_session() as session:
+        repo = IngestRepository(tenant_id=ids["tenant_a"], session=session)
+        domain = await repo.claim_domain("already-verified.example")
+        domain.status = "verified"
+        domain.verified_at = fixed_verified_at
+        await session.commit()
+        domain_id = domain.id
+
+    monkeypatch.setattr(
+        repository_module, "check_dns_verification", _never_call_check_dns_verification
+    )
+
+    async with db_session() as session:
+        repo = IngestRepository(tenant_id=ids["tenant_a"], session=session)
+        result = await repo.confirm_verification(domain_id)
+
+    assert result.status == "verified"
+    assert result.verified_at == fixed_verified_at
+
+
+async def test_confirm_verification_on_a_revoked_domain_is_rejected(_seeded_tenants):
+    # A revoked claim is never re-verified in place -- the tenant must
+    # claim_domain() again (a fresh token), not resume the revoked one.
+    ids = _seeded_tenants
+    async with db_session() as session:
+        repo = IngestRepository(tenant_id=ids["tenant_a"], session=session)
+        domain = await repo.claim_domain("revoked.example")
+        domain.status = "revoked"
+        domain.revoked_at = datetime.now(UTC)
+        await session.commit()
+        domain_id = domain.id
+
+    async with db_session() as session:
+        repo = IngestRepository(tenant_id=ids["tenant_a"], session=session)
+        with pytest.raises(DomainRevokedError):
+            await repo.confirm_verification(domain_id)
+
+
+async def test_confirm_verification_on_a_pending_domain_with_a_positive_dns_match(
+    _seeded_tenants, monkeypatch
+):
+    ids = _seeded_tenants
+    async with db_session() as session:
+        repo = IngestRepository(tenant_id=ids["tenant_a"], session=session)
+        domain = await repo.claim_domain("pending-positive.example")
+        await session.commit()
+        domain_id = domain.id
+
+    async def _fake_true(_domain, _token):
+        return True
+
+    monkeypatch.setattr(repository_module, "check_dns_verification", _fake_true)
+
+    fixed_now = datetime(2026, 6, 15, 12, 0, 0, tzinfo=UTC)
+    async with db_session() as session:
+        repo = IngestRepository(tenant_id=ids["tenant_a"], session=session)
+        result = await repo.confirm_verification(domain_id, clock=lambda: fixed_now)
+        await session.commit()
+
+    assert result.status == "verified"
+    assert result.verified_at == fixed_now
+
+
+async def test_confirm_verification_on_a_pending_domain_with_a_negative_dns_match(
+    _seeded_tenants, monkeypatch
+):
+    # A negative match -- whether DNS resolved cleanly with no matching
+    # token, or failed outright (NXDOMAIN/timeout/etc.) -- is the same
+    # plain `False` by the time it reaches confirm_verification() (2.2.d's
+    # own design); either way, this must be a silent, unchanged no-op, not
+    # an exception.
+    ids = _seeded_tenants
+    async with db_session() as session:
+        repo = IngestRepository(tenant_id=ids["tenant_a"], session=session)
+        domain = await repo.claim_domain("pending-negative.example")
+        await session.commit()
+        domain_id = domain.id
+
+    async def _fake_false(_domain, _token):
+        return False
+
+    monkeypatch.setattr(repository_module, "check_dns_verification", _fake_false)
+
+    async with db_session() as session:
+        repo = IngestRepository(tenant_id=ids["tenant_a"], session=session)
+        result = await repo.confirm_verification(domain_id)
+
+    assert result.status == "pending"
+    assert result.verified_at is None
+
+
+async def test_confirm_verification_rejects_another_tenants_domain_with_no_side_effects(
+    _seeded_tenants, monkeypatch
+):
+    # The hostile-caller case: tenant B calling confirm_verification() on
+    # tenant A's own real, valid domain_id must return None (the identical
+    # get_domain_by_id() contract) and must have NO side effects at
+    # all -- no DNS check, and the row itself verified unchanged directly
+    # against the database, not just inferred from the return value.
+    ids = _seeded_tenants
+    async with db_session() as session:
+        repo_a = IngestRepository(tenant_id=ids["tenant_a"], session=session)
+        domain = await repo_a.claim_domain("hostile-confirm.example")
+        await session.commit()
+        domain_id = domain.id
+        original_token = domain.verification_token
+
+    monkeypatch.setattr(
+        repository_module, "check_dns_verification", _never_call_check_dns_verification
+    )
+
+    async with db_session() as session:
+        repo_b = IngestRepository(tenant_id=ids["tenant_b"], session=session)
+        result = await repo_b.confirm_verification(domain_id)
+
+    assert result is None
+
+    async with db_session() as session:
+        row = (
+            await session.execute(sa.select(VerifiedDomain).where(VerifiedDomain.id == domain_id))
+        ).scalar_one()
+    assert row.status == "pending"
+    assert row.verification_token == original_token
+    assert row.verified_at is None
