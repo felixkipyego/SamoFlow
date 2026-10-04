@@ -934,6 +934,22 @@ A production-ready, multi-tenant, embeddable AI widget platform: one website is 
 
   Verified: `make lint` clean. Affected guard/accessor tests re-run standalone first (`test_audit_log_write_path_guard.py`, `test_config_guard.py`, `test_ingest_repository_guard.py`, `test_db.py`): 8 + 3 passed (2 skipped, no live database). The 11 `revoke_domain`/`audit_log` tests in `test_ingest_repository.py` + the guard file run standalone against the real test database: 11 passed. Full `test_ingest_repository.py` standalone: **25 passed** (unchanged count — no test added or removed in this file, only bodies strengthened). Full `backend/tests` without a test database: **370 passed, 149 skipped** (up from 369 passed, 149 skipped — exactly the one new C2 test, fully offline, 0 new skips). `make test-all` against the real test-db/test-qdrant: **519 passed** (370 + 149, all for real, zero failures), both services confirmed cleaned up afterward. Test-name diff (`git diff` restricted to `^[+-](async )?def test_`): exactly one line added (`test_fails_on_an_audit_log_construction_via_keyword_unpacking`), zero removed or renamed — every other changed test kept its exact name, only its body strengthened. `git status --short` named and cross-checked file by file: `PROJECT_SPEC.md`, `backend/app/db.py`, `backend/app/ingest/queue.py`, `backend/app/ingest/repository.py`, `backend/tests/conftest.py`, `backend/tests/test_audit_log_write_path_guard.py`, `backend/tests/test_ingest_repository.py` — exactly the expected seven, all modified, `.env` correctly absent. No new dependency.
 
+- 2026-10-04: Step 2.3 breakdown approved (docs-only, no code) — five subtasks 2.3.a–2.3.e (see the Step 2.3 task list below), based on docs/SPEC.md §5.5 (the core SSRF requirement: http/https only, DNS resolved, private/loopback/link-local/cloud-metadata addresses rejected, re-checked after every redirect, connection pinned to the validated IP) and §16's own acceptance wording ("URLs resolving to `127.0.0.1`, `10.x` or `169.254.169.254` are blocked, including through redirects and DNS rebinding"). Six decisions confirmed, researched and reported separately before this approval:
+
+  (a) **IP classification covers both IPv4 and IPv6, with one fail-closed function**: `not ip.is_global or ip.is_multicast or ip.is_reserved or ip.is_unspecified`, built on the stdlib `ipaddress` module. Verified live against the installed module (Python 3.12), not assumed: this correctly rejects RFC 1918, loopback, link-local, the metadata IP (`169.254.169.254`, a link-local instance), IPv6 unique-local/loopback/link-local — and, found live rather than copied from docs/SPEC.md's own wording, two ranges a naive `ip.is_private` check alone would miss: CGNAT (`100.64.0.0/10`, `is_private=False`) and multicast (`is_private=False`). docs/SPEC.md never mentions IPv6 (confirmed by grep, zero hits); checking both families anyway closes what would otherwise be a silent IPv6 bypass of an IPv4-only guard on any network with IPv6 connectivity.
+
+  (b) **"Pin to the validated IP" — the mechanism, confirmed by reading the installed `httpcore==1.0.9` source directly, not from documentation or memory**: httpx has no built-in "connect to this IP" option, but the standard pattern needs no custom transport — build the request URL with the validated IP literal as the host, set the `Host` header to the original hostname, and pass `extensions={"sni_hostname": original_hostname}`. Confirmed in `httpcore/_async/connection.py`'s `_connect()`: the TLS handshake's `server_hostname` — used for **both** the SNI ClientHello field and certificate hostname verification — comes from the `sni_hostname` extension when present, falling back to the origin host otherwise. This means certificate verification correctly checks the real hostname, not the raw IP, with no further code needed.
+
+  (c) **DNS rebinding — closed completely by IP-literal connection, not just mitigated, with one narrow named exception**: confirmed empirically, not assumed, that `socket.getaddrinfo()` on an IP literal returns in ~12ms with zero network traffic (vs. 1.9s+ for a real DNS lookup) — the OS short-circuits resolution entirely for address literals. Since httpcore's connection layer calls `connect_tcp(host=<whatever is passed>, ...)`, passing the already-validated IP (never the hostname) means **no second DNS lookup ever happens** at connect time — there is no window left for an attacker's DNS server to flip the answer between validation and connection, because connection never asks DNS again. This closes the classic TOCTOU rebinding gap completely, not partially. The one thing it does not address, named plainly rather than silently ignored: IP address *reassignment* at the network-ownership level between validate and connect — a different, far narrower, largely theoretical concern unrelated to DNS, with no known practical SSRF mitigation addressing it either.
+
+  (d) **2.3 owns all three fetch-limit numbers** (5MB size cap, 15s timeout, 3 redirect max) as configurable parameters of the safe-fetch primitive, defaults matching docs/SPEC.md §5.5 exactly — not deferred to 2.6, since redirect-count and size-cap are inseparable from this guard's own redirect-recheck and streaming-size-check logic. 2.6 may override its own instance's values later for crawl-specific needs; "2 concurrent requests per host with a delay" and robots.txt/User-Agent/HTML-cleanup stay 2.6's own job, not built here (they are crawl-level, not single-fetch, concerns).
+
+  (e) **A reusable, generic primitive only, no real caller wired here** — matching `confirm_verification()`/`revoke_domain()`'s own precedent exactly. The first real caller is file/meta-tag domain verification (resolved at 2.3.e), not 2.6, which is several steps away.
+
+  (f) **`httpx` promoted from dev-only to a direct runtime dependency at 2.3.c** (the first subtask that actually needs it — 2.3.a/b need neither). Re-verified live on PyPI at this breakdown's own research stage, not assumed from the existing dev pin: `httpx==0.28.1` is still current, and `httpcore==1.0.9` (the transitive dependency implementing the `sni_hostname` mechanism decision (b) depends on) is also current.
+
+  Current task set to 2.3.a, next to 2.3.b. Counter left at n=0 (this breakdown is planning/documentation only, no files outside PROJECT_SPEC.md changed, matching the precedent set at every prior Step breakdown).
+
 ### Estimates to measure
 
 - The default limits in §9 and the budgets in §17 are starting points.
@@ -957,8 +973,8 @@ A production-ready, multi-tenant, embeddable AI widget platform: one website is 
 
 ## 7. Current task and next task
 
-Current: Step 2.3.
-Next: Step 2.3 breakdown.
+Current: Step 2.3.a.
+Next: Step 2.3.b.
 Do not modify (completed tasks): 1.1.a, 1.1.b, 1.1.c, 1.1.d, 1.1.e, 1.1.f, 1.1.g, 1.1.h, 1.1.i, 1.1.j, 1.1.k, 1.1.l, 1.1.m, 1.1.n, 1.1.o.a, 1.1.o.b, 1.1.o.c, 1.1.o.d, 1.1.o.e, 1.1.o.f, 1.1.o.g, 1.1.o.h, 1.1b, 1.1c, 1.2.a, 1.2.b, 1.2.c, 1.2.d, 1.2.e, 1.2.f, 1.3.a1, 1.3.a2, 1.3.b, 1.3.c, 1.3.d, 1.3.e, 1.3.f, 1.4.a, 1.4.b, 1.4.c, 1.4.d, 1.4.e, 1.4.f, 1.4.g, 1.4.h, 1.4.i, 1.4.j, 1.4.k, 1.4.l, 1.5.a, 1.5.b, 1.5.c, 1.5.d, 1.5.e, 1.5.f, 1.6.a, 1.6.b, 1.6.c, 1.6.d, 1.6.e, 2.1.a, 2.1.b, 2.1.c, 2.1.d, 2.1.e, 2.1.f, 2.1.g, 2.1.h, 2.2.a, 2.2.b, 2.2.c, 2.2.d, 2.2.e, 2.2.f, 2.2.g, 2.2.h, 2.2.i.
 
 ### Step 1.1 task list (approved)
@@ -1303,6 +1319,21 @@ mismatch, caught by this very close-out process before Step 2.2 could
 close with its own stated sole enforcement unbuilt.
 
 See Open markers below for what remains outstanding, not repeated here.
+
+### Step 2.3 task list (approved)
+
+Five subtasks, 2.3.a–2.3.e, in build order. A reusable, generic primitive
+only — no real caller wired here, matching `confirm_verification()`/
+`revoke_domain()`'s own precedent; the first real caller is file/meta-tag
+domain verification (2.3.e resolves that Open marker), not 2.6.
+
+| ID | Goal | Status |
+|----|------|--------|
+| 2.3.a | IP-classification primitive (pure, offline, no network): a fail-closed function over both IPv4 and IPv6 (`not ip.is_global or ip.is_multicast or ip.is_reserved or ip.is_unspecified`) rejecting RFC 1918, loopback, link-local, the cloud-metadata address, IPv6 unique-local/loopback/link-local, CGNAT (`100.64.0.0/10`) and multicast. Table-driven offline tests, the metadata IP as its own named case | Not started |
+| 2.3.b | DNS-resolve-and-validate: resolves a hostname to every returned IP (both families), validates ALL of them via 2.3.a, rejects the whole hostname if any is unsafe (fail closed — never connects via an unvalidated IP from the same answer). Hostile-proof tests: NXDOMAIN (matching 2.2.d's own convention); a monkeypatched resolver simulating DNS rebinding (an otherwise-innocuous hostname resolving to a private/metadata IP) | Not started |
+| 2.3.c | The single-fetch primitive (no redirect following yet): scheme check (http/https only); `httpx` promoted from dev-only to a direct runtime dependency here (`httpx==0.28.1`, re-verified current on PyPI at the research stage, not assumed); connects to the validated IP literal (never the hostname), `Host` header and `extensions={"sni_hostname": ...}` set to the original hostname for correct TLS SNI/cert verification; size cap enforced via streaming (never buffers an oversized body first); configurable timeout. Defaults match docs/SPEC.md §5.5 exactly: 5MB, 15s, max 3 redirects (all three owned here, not deferred to 2.6, since redirect-count and size-cap are inseparable from this guard's own logic — 2.6 may override its own instance's values later). Hostile-proof test: a literal private/loopback/metadata URL rejected before any connection attempt | Not started |
+| 2.3.d | Redirect-chain handling: wraps 2.3.c in a loop — each 3xx response re-runs the ENTIRE 2.3.a→2.3.b→2.3.c validation cycle on the new `Location` target from scratch, never carrying a prior hop's validation forward. Hard cap at the configured redirect count (default 3), failing closed past it. Hostile-proof test: a chain starting at a validated-safe address that redirects to an unsafe one at hop 2 (not hop 1), caught at that exact hop; an excessive-redirect-count chain rejected | Not started |
+| 2.3.e | Close-out: restore `file`/`meta_tag` to `verified_domains.method`'s `CheckConstraint` (new migration), resolving the one Step-2.2-owned Open marker naming this step; confirm docs/SPEC.md §16's acceptance line ("blocked, including through redirects and DNS rebinding") is covered end-to-end by 2.3.b–d's own live tests; update PROJECT_SPEC.md | Not started |
 
 ## 8. Task counter since the last duplication check
 
