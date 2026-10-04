@@ -29,6 +29,9 @@ x-app-env: &app-env
   # Required (Task 2.1.a): pgcrypto passphrase for db_connections'
   # encrypted credentials.
   DB_CONNECTION_ENCRYPTION_KEY: ${DB_CONNECTION_ENCRYPTION_KEY:?DB_CONNECTION_ENCRYPTION_KEY must be set in .env}
+  # Required (Task 2.2.f): the temporary admin-key mechanism, superseded
+  # outright by Step 6.1's real platform_admin role.
+  ADMIN_API_KEY: ${ADMIN_API_KEY:?ADMIN_API_KEY must be set in .env}
   API_HOST: ${API_HOST:?API_HOST must be set in .env}
   API_PORT: ${API_PORT:?API_PORT must be set in .env}
 

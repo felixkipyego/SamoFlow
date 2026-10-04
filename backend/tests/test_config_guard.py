@@ -6,13 +6,17 @@
 # app/auth/tokens.py; Task 2.1.a extends it to
 # db_connection_encryption_key_str(), starting
 # ALLOWED_DB_CONNECTION_ENCRYPTION_KEY_CALLERS with its one real caller,
-# app/ingest/repository.py; duplication check after 2.1.a/b moves the
+# app/ingest/repository.py; Task 2.2.f extends it to admin_api_key_str(),
+# starting ALLOWED_ADMIN_API_KEY_CALLERS with its one real caller,
+# app/admin/dependencies.py; duplication check after 2.1.a/b moves the
 # secret-accessor allow-list check itself into a shared
 # check_call_allowlist() helper, tests/conftest.py, reused by
 # test_ingest_repository_guard.py -- the Settings()/errors() checks below
 # stay this file's own, since they differ): parses every .py file under backend/app and
 # backend/alembic with ast (not text search, so comments/strings never
-# trigger it) and enforces five rules from PROJECT_SPEC.md's decisions log:
+# trigger it) and enforces seven rules from PROJECT_SPEC.md's decisions log
+# (corrected from a stale "five" here -- there were already six distinct
+# rules below before this task added the seventh, not five):
 #   - only app/config.py may construct Settings() directly;
 #   - nothing calls a method named errors() (that leaks raw input, see
 #     config.py's model_config comment);
@@ -24,7 +28,9 @@
 #     jwt_signing_key_str()/jwt_signing_key_previous_str() outside
 #     app/config.py;
 #   - only files listed in ALLOWED_DB_CONNECTION_ENCRYPTION_KEY_CALLERS may
-#     call db_connection_encryption_key_str() outside app/config.py.
+#     call db_connection_encryption_key_str() outside app/config.py;
+#   - only files listed in ALLOWED_ADMIN_API_KEY_CALLERS may call
+#     admin_api_key_str() outside app/config.py.
 import ast
 
 from tests.conftest import BACKEND_DIR, called_name, check_call_allowlist, iter_python_files
@@ -50,6 +56,10 @@ ALLOWED_JWT_KEY_CALLERS: tuple[str, ...] = ("app/auth/tokens.py",)
 # Review it by hand.
 ALLOWED_DB_CONNECTION_ENCRYPTION_KEY_CALLERS: tuple[str, ...] = ("app/ingest/repository.py",)
 
+# NOTE: adding a file here is a deliberate decision: it means that file
+# receives the real temporary admin key (Task 2.2.f). Review it by hand.
+ALLOWED_ADMIN_API_KEY_CALLERS: tuple[str, ...] = ("app/admin/dependencies.py",)
+
 # Duplication check after 1.3.a1/a2/b: both secret accessors are checked by
 # the same single branch below instead of one copy-pasted elif per accessor
 # -- a third one later needs one entry here, not a third branch. Task 1.4.a
@@ -61,6 +71,7 @@ _SECRET_ACCESSOR_ALLOW_LISTS: dict[str, tuple[str, ...]] = {
     "jwt_signing_key_str": ALLOWED_JWT_KEY_CALLERS,
     "jwt_signing_key_previous_str": ALLOWED_JWT_KEY_CALLERS,
     "db_connection_encryption_key_str": ALLOWED_DB_CONNECTION_ENCRYPTION_KEY_CALLERS,
+    "admin_api_key_str": ALLOWED_ADMIN_API_KEY_CALLERS,
 }
 
 

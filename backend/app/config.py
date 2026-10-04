@@ -100,6 +100,16 @@ class Settings(BaseSettings):
     # explicitly.
     job_retry_base_seconds: float = Field(default=60, gt=0)
     job_max_attempts: int = Field(default=5, gt=0)
+    # Task 2.2.f: the temporary admin-key mechanism (docs/SPEC.md §12:
+    # "during Phases 2 to 5 the admin endpoints... are protected by a
+    # single secret from the environment"). Required, same discipline as
+    # every other secret here -- an unauthenticated admin surface would
+    # silently work today and silently stay wrong on a real deployment if
+    # this were optional. Explicitly temporary: superseded outright by
+    # Step 6.1's real `platform_admin` role, never extended between now
+    # and then (see PROJECT_SPEC.md's own Open marker and
+    # app/admin/dependencies.py's header comment).
+    admin_api_key: SecretStr = Field(min_length=32)
     # Task 2.1.d: how long worker.py's run() waits between poll attempts
     # when claim_next_job() finds nothing ready -- never a tight spin
     # loop. Same treatment as the fields directly above (plain
@@ -172,6 +182,16 @@ class Settings(BaseSettings):
         )
         return value
 
+    @field_validator("admin_api_key")
+    @classmethod
+    def _require_a_clean_admin_api_key(cls, value: SecretStr) -> SecretStr:
+        _require_no_whitespace_or_control_chars(
+            value.get_secret_value(),
+            "ADMIN_API_KEY",
+            "it is sent as an HTTP header value; a newline would allow header injection",
+        )
+        return value
+
     @field_validator("jwt_signing_key_previous", mode="before")
     @classmethod
     def _empty_previous_signing_key_means_none(cls, value: object) -> object:
@@ -232,6 +252,10 @@ class Settings(BaseSettings):
     def db_connection_encryption_key_str(self) -> str:
         # The one explicit call that unwraps the secret. Never log this.
         return self.db_connection_encryption_key.get_secret_value()
+
+    def admin_api_key_str(self) -> str:
+        # The one explicit call that unwraps the secret. Never log this.
+        return self.admin_api_key.get_secret_value()
 
 
 class SettingsError(Exception):

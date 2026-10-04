@@ -24,6 +24,7 @@ def test_valid_environment_loads_with_correct_types_and_values(monkeypatch):
     assert settings.qdrant_api_key_str() == VALID_ENV["QDRANT_API_KEY"]
     assert settings.jwt_signing_key_str() == VALID_ENV["JWT_SIGNING_KEY"]
     assert settings.jwt_signing_key_previous_str() is None
+    assert settings.admin_api_key_str() == VALID_ENV["ADMIN_API_KEY"]
     assert settings.api_host == "127.0.0.1"
     assert settings.api_port == 8000
     assert isinstance(settings.api_port, int)
@@ -70,6 +71,12 @@ def test_missing_required_variable_raises_and_names_field(monkeypatch, missing):
         {"DB_CONNECTION_ENCRYPTION_KEY": "a" * 20 + " " + "a" * 20},
         {"DB_CONNECTION_ENCRYPTION_KEY": "a" * 20 + "\t" + "a" * 20},
         {"DB_CONNECTION_ENCRYPTION_KEY": "a" * 20 + "\n" + "a" * 20},
+        {"ADMIN_API_KEY": ""},
+        {"ADMIN_API_KEY": "short"},
+        {"ADMIN_API_KEY": "a" * 31},  # one character short of the minimum
+        {"ADMIN_API_KEY": "a" * 20 + " " + "a" * 20},
+        {"ADMIN_API_KEY": "a" * 20 + "\t" + "a" * 20},
+        {"ADMIN_API_KEY": "a" * 20 + "\n" + "a" * 20},
         {"API_PORT": "abc"},
         {"API_PORT": "0"},
         {"API_PORT": "70000"},
@@ -242,6 +249,40 @@ def test_settings_error_chain_never_carries_the_db_connection_encryption_key(
     monkeypatch, value, distinctive_substring
 ):
     set_valid_env(monkeypatch, VALID_ENV, DB_CONNECTION_ENCRYPTION_KEY=value)
+    with pytest.raises(SettingsError) as exc_info:
+        get_settings()
+    err = exc_info.value
+    assert_secret_not_in_exception_chain(err, distinctive_substring)
+    assert err.__cause__ is None
+    assert err.__context__ is None
+
+
+@pytest.mark.parametrize(
+    ("value", "distinctive_substring"),
+    [
+        ("distinctive-adminkey 123", "distinctive-adminkey"),
+        ("distinctive-short", "distinctive-short"),
+    ],
+)
+def test_get_settings_raises_settings_error_on_malformed_admin_api_key(
+    monkeypatch, value, distinctive_substring
+):
+    set_valid_env(monkeypatch, VALID_ENV, ADMIN_API_KEY=value)
+    with pytest.raises(SettingsError):
+        get_settings()
+
+
+@pytest.mark.parametrize(
+    ("value", "distinctive_substring"),
+    [
+        ("distinctive-adminkey 123", "distinctive-adminkey"),
+        ("distinctive-short", "distinctive-short"),
+    ],
+)
+def test_settings_error_chain_never_carries_the_admin_api_key(
+    monkeypatch, value, distinctive_substring
+):
+    set_valid_env(monkeypatch, VALID_ENV, ADMIN_API_KEY=value)
     with pytest.raises(SettingsError) as exc_info:
         get_settings()
     err = exc_info.value
