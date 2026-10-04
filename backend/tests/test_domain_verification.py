@@ -93,9 +93,20 @@ async def test_fetch_txt_records_against_a_real_domain_returns_a_nonempty_list()
     # The one real "success path" proof, deliberately content-agnostic:
     # asserts only that SOME TXT record came back, never which one or what
     # it says, so this stays correct even if the specific record set this
-    # domain carries changes over time. google.com's own outbound-mail SPF
-    # record alone makes a fully TXT-record-free future implausible.
-    records = await fetch_txt_records("google.com")
+    # domain carries changes over time. example.com (IANA's own reserved,
+    # deliberately small and stable documentation domain, RFC 2606) --
+    # NOT google.com, used here originally: google.com's own TXT record
+    # set is large (17 records, confirmed live), and a real-world local
+    # router was found live to mishandle that specific large response
+    # (an EDNS0/large-UDP-response limitation, confirmed by querying the
+    # identical record through a public resolver instead, which returned
+    # it instantly) -- a genuinely fragile choice of domain regardless of
+    # any one network's own quirks, not just a problem on that one
+    # machine. example.com's own TXT set is small (an SPF record,
+    # "v=spf1 -all", confirmed live via both a local and a public
+    # resolver) and, as IANA's own maintained example domain, about as
+    # stable a "this will keep resolving" bet as a live DNS test can make.
+    records = await fetch_txt_records("example.com")
     assert records != []
 
 
