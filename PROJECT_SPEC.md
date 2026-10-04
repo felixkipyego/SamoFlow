@@ -950,6 +950,18 @@ A production-ready, multi-tenant, embeddable AI widget platform: one website is 
 
   Current task set to 2.3.a, next to 2.3.b. Counter left at n=0 (this breakdown is planning/documentation only, no files outside PROJECT_SPEC.md changed, matching the precedent set at every prior Step breakdown).
 
+- 2026-10-04: Step 2.3.a [SECURITY] — the IP-classification primitive (new `backend/app/ingest/ip_safety.py`: `is_unsafe_destination_ip()`); 22 new offline tests (new `backend/tests/test_ip_safety.py`).
+
+  **Placement deviation from the task's own suggested filename, flagged before building, not silently decided**: built in a new `app/ingest/ip_safety.py`, not inside `safe_fetch.py` as the task text suggested. Reasoning: this function must stay reusable by Step 2.8's database-sync adapter (docs/SPEC.md §5.6's "same host checks as the crawler") with zero HTTP-specific coupling. `safe_fetch.py` (starting at 2.3.c) will `import httpx`; had the classifier lived there too, importing it from 2.8 would transitively pull in an `httpx` import 2.8 never needs — exactly the accidental coupling the task's own design point 2 warned against. `safe_fetch.py` will import `is_unsafe_destination_ip` from this module once it exists, not the other way around.
+
+  **The exact boolean expression re-confirmed live, not trusted from the research phase**: `not ip.is_global or ip.is_multicast or ip.is_reserved or ip.is_unspecified`, run directly against the installed Python 3.12's `ipaddress` module across every required category before writing the real module — RFC 1918 (`10/8`, `172.16/12`, `192.168/16`), loopback (both families), link-local (both families, with the metadata IP `169.254.169.254` checked as its own case), IPv6 unique-local, CGNAT (`100.64.0.0/10`), multicast (both families), and three public addresses (`8.8.8.8`, `1.1.1.1`, a public IPv6) correctly returning `False`. All matched the researched expectation exactly — no surprises, no correction needed.
+
+  **The fail-closed/unknown-range proof uses `240.0.0.1`** (IANA "reserved for future use", `240.0.0.0/4`) — verified live to be caught by *both* `not is_global` and `is_reserved` independently, and confirmed it belongs to none of the other named categories (not RFC 1918, not loopback, not link-local, not CGNAT, not multicast) — a genuine proof that the function rejects an unnamed, unallocated range by construction (it never asks "is this one of the ranges I decided were bad"), not a second instance of an already-covered category relabeled. `192.0.2.1` (TEST-NET-1) and `2001:db8::1` (the IPv6 documentation range) were also checked live during research as alternate candidates — both also correctly rejected, but `240.0.0.1` was chosen for the actual test since it is caught by a different mechanism (`is_reserved`, not merely `is_global`'s own TEST-NET handling), the clearer proof of the two.
+
+  ASSUMPTION: none needed — every category was verified live against the installed `ipaddress` module, not assumed from the research phase. UNCERTAIN: none. TODO: none new. Current task set to 2.3.b, next to 2.3.c. **Counter reaches n=1.**
+
+  Verified: `make lint` clean. New test file run standalone: **22 passed** in 0.07s, confirming fully offline (no `docker info` needed for this subtask, per its own explicit scope). Full `backend/tests` without a test database: **392 passed, 149 skipped** (up from 370 passed, 149 skipped — exactly the 22 new tests, 0 new skips, matching that this task is pure/offline with no live-database-dependent test). `git status --short` showed exactly the two expected new files (`backend/app/ingest/ip_safety.py`, `backend/tests/test_ip_safety.py`), `.env` correctly absent. No new dependency — `ipaddress` is stdlib.
+
 ### Estimates to measure
 
 - The default limits in §9 and the budgets in §17 are starting points.
@@ -973,9 +985,9 @@ A production-ready, multi-tenant, embeddable AI widget platform: one website is 
 
 ## 7. Current task and next task
 
-Current: Step 2.3.a.
-Next: Step 2.3.b.
-Do not modify (completed tasks): 1.1.a, 1.1.b, 1.1.c, 1.1.d, 1.1.e, 1.1.f, 1.1.g, 1.1.h, 1.1.i, 1.1.j, 1.1.k, 1.1.l, 1.1.m, 1.1.n, 1.1.o.a, 1.1.o.b, 1.1.o.c, 1.1.o.d, 1.1.o.e, 1.1.o.f, 1.1.o.g, 1.1.o.h, 1.1b, 1.1c, 1.2.a, 1.2.b, 1.2.c, 1.2.d, 1.2.e, 1.2.f, 1.3.a1, 1.3.a2, 1.3.b, 1.3.c, 1.3.d, 1.3.e, 1.3.f, 1.4.a, 1.4.b, 1.4.c, 1.4.d, 1.4.e, 1.4.f, 1.4.g, 1.4.h, 1.4.i, 1.4.j, 1.4.k, 1.4.l, 1.5.a, 1.5.b, 1.5.c, 1.5.d, 1.5.e, 1.5.f, 1.6.a, 1.6.b, 1.6.c, 1.6.d, 1.6.e, 2.1.a, 2.1.b, 2.1.c, 2.1.d, 2.1.e, 2.1.f, 2.1.g, 2.1.h, 2.2.a, 2.2.b, 2.2.c, 2.2.d, 2.2.e, 2.2.f, 2.2.g, 2.2.h, 2.2.i.
+Current: Step 2.3.b.
+Next: Step 2.3.c.
+Do not modify (completed tasks): 1.1.a, 1.1.b, 1.1.c, 1.1.d, 1.1.e, 1.1.f, 1.1.g, 1.1.h, 1.1.i, 1.1.j, 1.1.k, 1.1.l, 1.1.m, 1.1.n, 1.1.o.a, 1.1.o.b, 1.1.o.c, 1.1.o.d, 1.1.o.e, 1.1.o.f, 1.1.o.g, 1.1.o.h, 1.1b, 1.1c, 1.2.a, 1.2.b, 1.2.c, 1.2.d, 1.2.e, 1.2.f, 1.3.a1, 1.3.a2, 1.3.b, 1.3.c, 1.3.d, 1.3.e, 1.3.f, 1.4.a, 1.4.b, 1.4.c, 1.4.d, 1.4.e, 1.4.f, 1.4.g, 1.4.h, 1.4.i, 1.4.j, 1.4.k, 1.4.l, 1.5.a, 1.5.b, 1.5.c, 1.5.d, 1.5.e, 1.5.f, 1.6.a, 1.6.b, 1.6.c, 1.6.d, 1.6.e, 2.1.a, 2.1.b, 2.1.c, 2.1.d, 2.1.e, 2.1.f, 2.1.g, 2.1.h, 2.2.a, 2.2.b, 2.2.c, 2.2.d, 2.2.e, 2.2.f, 2.2.g, 2.2.h, 2.2.i, 2.3.a.
 
 ### Step 1.1 task list (approved)
 
@@ -1329,7 +1341,7 @@ domain verification (2.3.e resolves that Open marker), not 2.6.
 
 | ID | Goal | Status |
 |----|------|--------|
-| 2.3.a | IP-classification primitive (pure, offline, no network): a fail-closed function over both IPv4 and IPv6 (`not ip.is_global or ip.is_multicast or ip.is_reserved or ip.is_unspecified`) rejecting RFC 1918, loopback, link-local, the cloud-metadata address, IPv6 unique-local/loopback/link-local, CGNAT (`100.64.0.0/10`) and multicast. Table-driven offline tests, the metadata IP as its own named case | Not started |
+| 2.3.a | IP-classification primitive (pure, offline, no network): a fail-closed function over both IPv4 and IPv6 (`not ip.is_global or ip.is_multicast or ip.is_reserved or ip.is_unspecified`) rejecting RFC 1918, loopback, link-local, the cloud-metadata address, IPv6 unique-local/loopback/link-local, CGNAT (`100.64.0.0/10`) and multicast. Table-driven offline tests, the metadata IP as its own named case. **Built in `app/ingest/ip_safety.py`, not `safe_fetch.py`** — see this task's own decision-log entry for why | Done |
 | 2.3.b | DNS-resolve-and-validate: resolves a hostname to every returned IP (both families), validates ALL of them via 2.3.a, rejects the whole hostname if any is unsafe (fail closed — never connects via an unvalidated IP from the same answer). Hostile-proof tests: NXDOMAIN (matching 2.2.d's own convention); a monkeypatched resolver simulating DNS rebinding (an otherwise-innocuous hostname resolving to a private/metadata IP) | Not started |
 | 2.3.c | The single-fetch primitive (no redirect following yet): scheme check (http/https only); `httpx` promoted from dev-only to a direct runtime dependency here (`httpx==0.28.1`, re-verified current on PyPI at the research stage, not assumed); connects to the validated IP literal (never the hostname), `Host` header and `extensions={"sni_hostname": ...}` set to the original hostname for correct TLS SNI/cert verification; size cap enforced via streaming (never buffers an oversized body first); configurable timeout. Defaults match docs/SPEC.md §5.5 exactly: 5MB, 15s, max 3 redirects (all three owned here, not deferred to 2.6, since redirect-count and size-cap are inseparable from this guard's own logic — 2.6 may override its own instance's values later). Hostile-proof test: a literal private/loopback/metadata URL rejected before any connection attempt | Not started |
 | 2.3.d | Redirect-chain handling: wraps 2.3.c in a loop — each 3xx response re-runs the ENTIRE 2.3.a→2.3.b→2.3.c validation cycle on the new `Location` target from scratch, never carrying a prior hop's validation forward. Hard cap at the configured redirect count (default 3), failing closed past it. Hostile-proof test: a chain starting at a validated-safe address that redirects to an unsafe one at hop 2 (not hop 1), caught at that exact hop; an excessive-redirect-count chain rejected | Not started |
@@ -1337,7 +1349,7 @@ domain verification (2.3.e resolves that Open marker), not 2.6.
 
 ## 8. Task counter since the last duplication check
 
-n = 0 — the duplication check after 2.2.g/h ran and its accepted fixes landed (see the decision log entry below). Reset per rule 9.
+n = 1 — 2.3.a counted (see its decision log entry above).
 
 ## 9. Open markers
 
