@@ -24,15 +24,16 @@
 # (app/tenancy/repository.py): one shared discipline for every
 # tenant-scoped repository in this codebase, not a second scheme.
 import json
+import secrets
 import uuid
 from dataclasses import dataclass
 
 from sqlalchemy import func, select
-from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
-from app.ingest.models import DbConnection, Job
+from app.ingest.models import DbConnection, Job, VerifiedDomain
 
 
 class CredentialEncryptionError(Exception):
@@ -47,6 +48,44 @@ class CredentialEncryptionError(Exception):
     2.1.a/b, item C1 -- found live: a wrong-key pgp_sym_decrypt() failure's
     own str(exc) contained the literal key value).
     """
+
+
+class DomainAlreadyClaimedError(Exception):
+    """Raised by claim_domain() when the domain is already actively claimed
+    (status pending or verified, PROJECT_SPEC.md's Step 2.2 breakdown
+    decision (e)) by any tenant -- including this same one; see that
+    method's own comment for why a same-tenant re-claim is treated
+    identically to a cross-tenant one, not specially allowed through. The
+    application-level translation of verified_domains' own partial unique
+    index (ix_verified_domains_domain_active_unique, Task 2.2.b) rejecting
+    the insert.
+
+    Unlike CredentialEncryptionError above, this needs none of that
+    class's own deferred-raise/from-None discipline: the message names
+    only the domain the caller just supplied (not a secret), so the
+    original IntegrityError can stay chained via a normal "raise ... from
+    exc" without leaking anything.
+    """
+
+
+def _generate_verification_token() -> str:
+    # Task 2.2.c. A fresh, unguessable value per claim attempt -- never
+    # reused across attempts or tenants (PROJECT_SPEC.md's Step 2.2
+    # breakdown, decision (b)) -- that the tenant publishes in DNS (2.2.d)
+    # to prove control of the domain. Deliberately NOT
+    # app.auth.secrets.generate_visitor_secret(), despite using the
+    # identical underlying mechanism: a visitor secret is stored only as a
+    # SHA-256 hash and never meant to leave the visitor's own browser,
+    # whereas this token is stored in PLAINTEXT
+    # (verified_domains.verification_token) and is meant to be published
+    # publicly, in a DNS TXT record -- reusing that function's name would
+    # conflate two different threat models that happen to share a
+    # CSPRNG-backed generator underneath (secrets.token_urlsafe, rule 11 --
+    # a well-known library mechanism, not a hand-rolled one). 32 bytes
+    # (256 bits) matches generate_visitor_secret()'s own strength for
+    # consistency, not because this value defends against the same kind of
+    # online-guessing attack a visitor secret does.
+    return secrets.token_urlsafe(32)
 
 
 @dataclass(frozen=True)
@@ -159,3 +198,74 @@ class IngestRepository:
         self.session.add(job)
         await self.session.flush()
         return job
+
+    async def claim_domain(self, domain: str) -> VerifiedDomain:
+        # Task 2.2.c. A method here, not a standalone function, for the
+        # identical reason enqueue() above is one: claiming always happens
+        # on behalf of an already-known tenant. Always starts "pending"
+        # with a fresh token -- this method never verifies anything itself
+        # (2.2.e's own job) and never returns an existing row.
+        #
+        # Same-tenant double-claim is deliberately NOT special-cased into
+        # an idempotent "return the existing row" -- PROJECT_SPEC.md's
+        # Step 2.2 breakdown decision (e). ix_verified_domains_domain_
+        # active_unique (Task 2.2.b) is scoped to `domain` alone, not
+        # `(tenant_id, domain)`, so it cannot distinguish "this tenant's
+        # own earlier pending claim" from "a different tenant's" -- and
+        # this method doesn't try to either, matching this project's own
+        # enumeration-oracle discipline elsewhere (never revealing to a
+        # caller whether a collision is their own or someone else's).
+        # Returning the old row silently would also contradict decision
+        # (b)'s own "a fresh token per attempt, never reused" rule: a
+        # caller asking to claim again is asking for a new attempt, not a
+        # cache hit. A genuine "regenerate my own pending claim's token"
+        # feature, if ever needed, is a different operation (an UPDATE on
+        # the existing row, not a second INSERT) and is not this method's
+        # job to build speculatively.
+        verified_domain = VerifiedDomain(
+            tenant_id=self.tenant_id,
+            domain=domain,
+            method="dns",
+            status="pending",
+            verification_token=_generate_verification_token(),
+        )
+        self.session.add(verified_domain)
+        try:
+            await self.session.flush()
+        except IntegrityError as exc:
+            # Rolled back explicitly, not left for the caller to discover:
+            # Postgres aborts the whole transaction on a constraint
+            # violation until rollback, so without this, any later query
+            # on this same session (even one unrelated to domains) would
+            # fail with "current transaction is aborted" -- confirmed live
+            # against the real test database before relying on it, not
+            # assumed from general Postgres knowledge. This makes the
+            # method safe to call from any caller's own session lifecycle,
+            # not reliant on it discarding the session afterward.
+            await self.session.rollback()
+            raise DomainAlreadyClaimedError(
+                f"domain {domain!r} is already actively claimed"
+            ) from exc
+        return verified_domain
+
+    async def list_domains(self) -> list[VerifiedDomain]:
+        # No arguments beyond self: tenant scoping is automatic, matching
+        # TenantScopedRepository.list_site_keys()'s own shape exactly.
+        result = await self.session.execute(
+            select(VerifiedDomain).where(VerifiedDomain.tenant_id == self.tenant_id)
+        )
+        return list(result.scalars().all())
+
+    async def get_domain_by_id(self, domain_id: uuid.UUID) -> VerifiedDomain | None:
+        # Same automatic-filter pattern as get_visitor_by_id/
+        # get_conversation_by_id (app/tenancy/repository.py): a domain_id
+        # belonging to a different tenant matches no row and returns
+        # None, exactly like a domain_id that doesn't exist at all --
+        # never distinguished, never raises.
+        result = await self.session.execute(
+            select(VerifiedDomain).where(
+                VerifiedDomain.id == domain_id,
+                VerifiedDomain.tenant_id == self.tenant_id,
+            )
+        )
+        return result.scalar_one_or_none()
