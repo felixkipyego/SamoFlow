@@ -33,6 +33,7 @@ from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
+from app.db import violated_constraint_name
 from app.ingest.models import DbConnection, Job, VerifiedDomain
 
 
@@ -233,6 +234,21 @@ class IngestRepository:
         try:
             await self.session.flush()
         except IntegrityError as exc:
+            # Narrowed to the specific constraint, not a blanket catch
+            # (duplication check after 2.2.a/b/c, item B1): method/status
+            # are hardcoded above and tenant_id is this repository's own
+            # trusted identity, so today only the partial unique index is
+            # reachable through this method's own inputs -- but a bare
+            # `except IntegrityError` doesn't know that, and would
+            # silently mis-report any future violation (e.g. a new
+            # caller-reachable constraint added later) as "already
+            # claimed." Anything else re-raises completely unchanged, no
+            # rollback performed for it either -- that path is not this
+            # method's own expected case to handle, matching how every
+            # other method in this codebase already leaves an unexpected
+            # constraint violation for its own caller to deal with.
+            if violated_constraint_name(exc) != "ix_verified_domains_domain_active_unique":
+                raise
             # Rolled back explicitly, not left for the caller to discover:
             # Postgres aborts the whole transaction on a constraint
             # violation until rollback, so without this, any later query

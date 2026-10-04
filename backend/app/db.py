@@ -20,6 +20,7 @@ from collections.abc import AsyncIterator
 from functools import lru_cache
 
 from sqlalchemy import text
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
@@ -30,6 +31,23 @@ from sqlalchemy.orm import DeclarativeBase
 from sqlalchemy.sql import func
 
 from app.config import get_settings
+
+
+def violated_constraint_name(exc: IntegrityError) -> str | None:
+    # Duplication check after 2.2.a/b/c: shared by app.tenancy.repository's
+    # create_site_key() and app.ingest.repository's claim_domain() -- both
+    # catch an IntegrityError from an insert that could plausibly violate
+    # more than one constraint on its own table, and must check WHICH one
+    # actually fired before translating it to a specific application-level
+    # exception, rather than assuming any IntegrityError on that table is
+    # the one collision each method is designed to handle (duplication
+    # check's own B1 finding: a broad `except IntegrityError` silently
+    # mis-reports an unrelated future violation as the wrong error).
+    # psycopg's own diagnostics (confirmed live against the installed
+    # psycopg==3.3.6: psycopg.Error.diag.constraint_name) is the standard,
+    # well-known inspection point for this (rule 11), not a hand-rolled
+    # string-match on the exception's own message.
+    return exc.orig.diag.constraint_name
 
 
 class Base(DeclarativeBase):

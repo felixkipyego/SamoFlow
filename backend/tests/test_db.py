@@ -74,3 +74,39 @@ def test_importing_db_module_has_no_side_effects():
     )
     assert result.returncode == 0, result.stderr
     assert result.stderr == ""
+
+
+class _FakeDiag:
+    def __init__(self, constraint_name):
+        self.constraint_name = constraint_name
+
+
+class _FakeOrig:
+    def __init__(self, constraint_name):
+        self.diag = _FakeDiag(constraint_name)
+
+
+class _FakeIntegrityError:
+    # Duck-typed stand-in for a real sqlalchemy.exc.IntegrityError -- Task
+    # 2.2.a/b/c's own duplication check, item B1: violated_constraint_name()
+    # only ever reads exc.orig.diag.constraint_name, so a real IntegrityError
+    # (which itself requires a live DBAPI error to construct meaningfully)
+    # isn't needed to exercise this pure function in isolation, matching the
+    # "offline/unit-level test of just the constraint-name-checking logic"
+    # the duplication check asked for in place of a live test -- no
+    # constraint on verified_domains or site_keys other than the one each
+    # caller already checks for is actually reachable through their own
+    # inputs, so there is no real path to trigger a genuinely different
+    # violation live to test against.
+    def __init__(self, constraint_name):
+        self.orig = _FakeOrig(constraint_name)
+
+
+def test_violated_constraint_name_reads_the_real_diagnostics_path():
+    exc = _FakeIntegrityError("ix_verified_domains_domain_active_unique")
+    assert db.violated_constraint_name(exc) == "ix_verified_domains_domain_active_unique"
+
+
+def test_violated_constraint_name_distinguishes_a_different_constraint():
+    exc = _FakeIntegrityError("ix_site_keys_key")
+    assert db.violated_constraint_name(exc) != "ix_verified_domains_domain_active_unique"

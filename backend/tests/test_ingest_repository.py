@@ -387,3 +387,38 @@ async def test_claim_domain_rejects_the_same_tenants_own_active_claim_too(_seede
 
         with pytest.raises(DomainAlreadyClaimedError):
             await repo.claim_domain("self-collision.example")
+
+
+async def test_claim_domain_collision_exception_reveals_neither_the_other_tenant_nor_its_token(
+    _seeded_tenants,
+):
+    # Duplication check after 2.2.a/b/c, item C1: a no-oracle proof
+    # matching this project's established leak-test discipline
+    # (assert_secret_not_in_exception_chain and friends) -- a tenant
+    # probing for a domain's own availability must learn nothing about
+    # WHO holds a conflicting active claim, or what their verification
+    # token is, from the rejection itself.
+    ids = _seeded_tenants
+    async with db_session() as session:
+        repo_a = IngestRepository(tenant_id=ids["tenant_a"], session=session)
+        repo_b = IngestRepository(tenant_id=ids["tenant_b"], session=session)
+        domain_a = await repo_a.claim_domain("oracle-probe.example")
+        await session.commit()
+        # Captured before repo_b's own collision triggers claim_domain()'s
+        # internal rollback(): SQLAlchemy's Session.rollback() expires
+        # every object in the session's identity map, including domain_a
+        # (already committed, in an earlier transaction) -- reading its
+        # attributes after that rollback, or after this block closes the
+        # session, would need to re-fetch them and raise
+        # DetachedInstanceError once the session is gone. Found live
+        # while running this exact test, not assumed.
+        domain_a_id = str(domain_a.id)
+        domain_a_token = domain_a.verification_token
+
+        with pytest.raises(DomainAlreadyClaimedError) as exc_info:
+            await repo_b.claim_domain("oracle-probe.example")
+
+    rendered = str(exc_info.value)
+    assert str(ids["tenant_a"]) not in rendered
+    assert domain_a_token not in rendered
+    assert domain_a_id not in rendered

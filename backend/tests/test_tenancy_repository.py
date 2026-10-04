@@ -29,7 +29,12 @@ import sqlalchemy as sa
 from app.auth.secrets import generate_visitor_secret, hash_visitor_secret
 from app.plans import models as plans_models  # noqa: F401 (registers "plans" on Base.metadata)
 from app.tenancy.models import Conversation, SiteKey, Tenant, Visitor
-from app.tenancy.repository import TenantScopedRepository, create_tenant, get_site_key_by_key
+from app.tenancy.repository import (
+    SiteKeyAlreadyExistsError,
+    TenantScopedRepository,
+    create_tenant,
+    get_site_key_by_key,
+)
 from tests.conftest import db_session
 
 
@@ -228,6 +233,46 @@ async def test_create_site_key_sets_tenant_id_automatically(_seeded_tenants):
 
     assert site_key.tenant_id == ids["tenant_a"]
     assert site_key.status == "draft"
+
+
+async def test_create_site_key_rejects_a_duplicate_key_and_leaves_the_session_usable(
+    _seeded_tenants,
+):
+    # Duplication check after 2.2.a/b/c, item D1: the same rollback-after-
+    # IntegrityError gap claim_domain() originally had, found here too --
+    # mirrors that fix's own proof shape exactly (test_claim_domain_
+    # rejects_a_different_tenants_active_claim_..., test_ingest_
+    # repository.py): a duplicate key must raise a clean application-level
+    # exception, not an unhandled IntegrityError, and the session must
+    # remain usable for more real queries immediately afterward, proving
+    # the internal rollback() actually worked rather than leaving the
+    # transaction aborted.
+    ids = _seeded_tenants
+    async with db_session() as session:
+        repo = TenantScopedRepository(tenant_id=ids["tenant_a"], session=session)
+        await repo.create_site_key(
+            key="pk_live_duplicate_probe",
+            allowed_origins=["https://a.example"],
+            environment="production",
+        )
+        await session.commit()
+
+        with pytest.raises(SiteKeyAlreadyExistsError):
+            await repo.create_site_key(
+                key="pk_live_duplicate_probe",
+                allowed_origins=["https://b.example"],
+                environment="production",
+            )
+
+        # Same session, immediately after catching the collision: proves
+        # the internal rollback() left it usable, not poisoned by the
+        # aborted transaction. Filtered to this test's own key rather than
+        # asserting the full list: _seeded_tenants already seeds tenant_a
+        # with its own site_key ("pk_live_tenant_a"), unrelated to this
+        # test's own probe.
+        still_usable = await repo.list_site_keys()
+    matching = [k for k in still_usable if k.key == "pk_live_duplicate_probe"]
+    assert len(matching) == 1
 
 
 async def test_create_visitor_sets_tenant_id_automatically(_seeded_tenants):

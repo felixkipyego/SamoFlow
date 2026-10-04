@@ -47,12 +47,28 @@ import uuid
 from dataclasses import dataclass
 
 from sqlalchemy import select, update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import InstrumentedAttribute
 from sqlalchemy.sql import func
 
 from app.auth.secrets import hash_visitor_secret
+from app.db import violated_constraint_name
 from app.tenancy.models import Conversation, SiteKey, Tenant, Visitor
+
+
+class SiteKeyAlreadyExistsError(Exception):
+    """Raised by create_site_key() when `key` collides with an existing
+    site_keys.key row -- the application-level translation of that
+    column's own unique index (ix_site_keys_key, app/tenancy/models.py's
+    SiteKey.key) rejecting the insert. Matches
+    app.ingest.repository.DomainAlreadyClaimedError's own shape
+    (duplication check after 2.2.a/b/c): a plain chained
+    "raise ... from exc", since `key` is not a secret (it is the value
+    the caller just supplied) -- no reason to suppress the original
+    IntegrityError the way CredentialEncryptionError must for an actual
+    secret.
+    """
 
 
 async def create_tenant(session: AsyncSession, name: str, status: str) -> Tenant:
@@ -135,7 +151,26 @@ class TenantScopedRepository:
             status="draft",
         )
         self.session.add(site_key)
-        await self.session.flush()
+        try:
+            await self.session.flush()
+        except IntegrityError as exc:
+            # Duplication check after 2.2.a/b/c, item D1: the same
+            # rollback-after-IntegrityError gap claim_domain() originally
+            # had, found here too -- `key` is caller-supplied with no
+            # pre-check (unlike create_visitor's/create_conversation's own
+            # _verify_owned() guard, which checks a different, unrelated
+            # FK column, not this table's own unique column), and
+            # ix_site_keys_key is a real, caller-reachable unique index. A
+            # duplicate key must not leave the session's transaction
+            # aborted for whatever the caller does next -- confirmed live
+            # at 2.2.c that Postgres requires an explicit rollback() for
+            # this, not assumed. Narrowed to the specific constraint, not
+            # a blanket catch (matching claim_domain's own post-B1 shape):
+            # anything else re-raises unchanged.
+            if violated_constraint_name(exc) != "ix_site_keys_key":
+                raise
+            await self.session.rollback()
+            raise SiteKeyAlreadyExistsError(f"site key {key!r} already exists") from exc
         return site_key
 
     async def get_visitor_by_id(self, vid: uuid.UUID) -> Visitor | None:
