@@ -37,7 +37,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import get_settings
 from app.db import violated_constraint_name
 from app.ingest.domain_verification import check_dns_verification
-from app.ingest.models import DbConnection, Job, VerifiedDomain
+from app.ingest.models import AuditLog, DbConnection, Job, VerifiedDomain
 
 
 class CredentialEncryptionError(Exception):
@@ -104,6 +104,83 @@ def _generate_verification_token() -> str:
     # consistency, not because this value defends against the same kind of
     # online-guessing attack a visitor secret does.
     return secrets.token_urlsafe(32)
+
+
+async def revoke_domain(
+    session: AsyncSession,
+    domain_id: uuid.UUID,
+    actor: str,
+    clock: Callable[[], datetime] = lambda: datetime.now(UTC),
+) -> VerifiedDomain | None:
+    # Task 2.2.g. Deliberately module-level, never an IngestRepository
+    # method -- same structural reasoning as create_tenant()/
+    # get_site_key_by_key() (app/tenancy/repository.py): a platform admin
+    # revoking a domain has no tenant_id of their own to construct
+    # IngestRepository(tenant_id=..., session=...) with, and the whole
+    # point of this function is that it is NOT scoped to any one tenant --
+    # it must be able to reach every tenant's own domains. Looks up
+    # directly (no tenant filter at all, unlike get_domain_by_id()), across
+    # every tenant.
+    #
+    # `actor` is a required parameter, not hardcoded: this function has no
+    # opinion on identity, and shouldn't -- the temporary admin-key
+    # mechanism (2.2.f) carries none (AdminKeyVerified is deliberately
+    # empty), so whatever calls this today passes a generic placeholder
+    # string (e.g. "admin"); once Step 6.1's real platform_admin role
+    # exists, its caller passes a real identity instead, with zero change
+    # needed here. Hardcoding a value inside this function would bake
+    # today's identity-less stopgap into the one place meant to outlive it.
+    result = await session.execute(select(VerifiedDomain).where(VerifiedDomain.id == domain_id))
+    domain = result.scalar_one_or_none()
+    if domain is None:
+        return None
+
+    # Idempotent no-op, not an error -- matching confirm_verification()'s
+    # own "verified" case (the identical shape of problem: the row is
+    # already in the state the caller asked for). This is NOT the same
+    # situation as confirm_verification()'s "revoked" case, which raises
+    # DomainRevokedError: that case is a caller trying to move a revoked
+    # domain to "verified" (a conflicting transition to a DIFFERENT state),
+    # whereas this is a caller asking to revoke an already-revoked domain
+    # (the SAME state, requested twice) -- re-running an admin action that
+    # already succeeded should be safe, not a surprise exception. No
+    # audit_log row is written for this case: nothing actually happened,
+    # so there is nothing new to audit (writing one anyway would make every
+    # repeated call show up as a fresh "revoke_domain" event despite no
+    # state change, drowning a real audit trail in no-op noise).
+    if domain.status == "revoked":
+        return domain
+
+    domain.status = "revoked"
+    domain.revoked_at = clock()
+    # Both this update and the audit_log insert below are only flush()ed,
+    # never committed, here in the SAME call to session.flush() --
+    # matching every other method in this codebase (claim_domain(),
+    # confirm_verification(), etc.): the caller owns the transaction
+    # boundary, not this function. This is what makes the two writes
+    # succeed or fail together: a single flush() sends every pending
+    # change in the session as one unit of work, and a single caller-level
+    # commit() (or rollback()) afterward applies to both rows at once --
+    # there is no way for one to land without the other, by construction
+    # of how AsyncSession/flush/commit works, not by anything extra this
+    # function needs to add.
+    session.add(
+        AuditLog(
+            actor=actor,
+            action="revoke_domain",
+            target_type="verified_domains",
+            target_id=domain.id,
+            # tenant_id stored as str, not the raw uuid.UUID: this project's
+            # JSON serialization (the default json.dumps, no custom
+            # engine-level serializer configured in app/db.py) does not
+            # know how to encode a UUID object -- confirmed live before
+            # relying on this, not assumed; str(uuid.UUID) round-trips
+            # back through uuid.UUID(...) if ever needed for a real query.
+            details={"domain": domain.domain, "tenant_id": str(domain.tenant_id)},
+        )
+    )
+    await session.flush()
+    return domain
 
 
 @dataclass(frozen=True)

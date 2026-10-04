@@ -20,16 +20,18 @@ from datetime import UTC, datetime
 
 import pytest
 import sqlalchemy as sa
+from sqlalchemy.exc import IntegrityError
 
 from app.config import get_settings
 from app.ingest import repository as repository_module
-from app.ingest.models import Job, VerifiedDomain
+from app.ingest.models import AuditLog, Job, VerifiedDomain
 from app.ingest.queue import claim_next_job
 from app.ingest.repository import (
     CredentialEncryptionError,
     DomainAlreadyClaimedError,
     DomainRevokedError,
     IngestRepository,
+    revoke_domain,
 )
 from app.plans import models as plans_models  # noqa: F401 (registers "plans" on Base.metadata)
 from app.tenancy.models import Tenant
@@ -588,3 +590,199 @@ async def test_confirm_verification_rejects_another_tenants_domain_with_no_side_
     assert row.status == "pending"
     assert row.verification_token == original_token
     assert row.verified_at is None
+
+
+# --- Task 2.2.g: revoke_domain() ---------------------------------------------
+
+
+async def test_revoke_domain_on_a_pending_domain_sets_status_and_writes_an_audit_row(
+    _seeded_tenants,
+):
+    # Reads everything back from the database directly, not just the
+    # return value -- proves the writes are real, not just reflected on
+    # the in-memory object revoke_domain() happens to hand back.
+    ids = _seeded_tenants
+    async with db_session() as session:
+        repo = IngestRepository(tenant_id=ids["tenant_a"], session=session)
+        domain = await repo.claim_domain("revoke-me.example")
+        await session.commit()
+        domain_id = domain.id
+        expected_tenant_id = domain.tenant_id
+        expected_domain_name = domain.domain
+
+    fixed_now = datetime(2026, 6, 15, 12, 0, 0, tzinfo=UTC)
+    async with db_session() as session:
+        result = await revoke_domain(
+            session, domain_id, actor="test-admin", clock=lambda: fixed_now
+        )
+        await session.commit()
+
+    assert result.status == "revoked"
+    assert result.revoked_at == fixed_now
+
+    async with db_session() as session:
+        domain_row = (
+            await session.execute(sa.select(VerifiedDomain).where(VerifiedDomain.id == domain_id))
+        ).scalar_one()
+        audit_row = (
+            await session.execute(
+                sa.select(AuditLog).where(AuditLog.target_id == domain_id)
+            )
+        ).scalar_one()
+
+    assert domain_row.status == "revoked"
+    assert domain_row.revoked_at == fixed_now
+    assert audit_row.actor == "test-admin"
+    assert audit_row.action == "revoke_domain"
+    assert audit_row.target_type == "verified_domains"
+    assert audit_row.target_id == domain_id
+    assert audit_row.details == {
+        "domain": expected_domain_name,
+        "tenant_id": str(expected_tenant_id),
+    }
+
+
+async def test_revoke_domain_on_a_nonexistent_domain_id_returns_none_with_no_audit_row(
+    _seeded_tenants,
+):
+    bogus_domain_id = uuid.uuid4()
+    async with db_session() as session:
+        result = await revoke_domain(session, bogus_domain_id, actor="test-admin")
+        await session.commit()
+
+    assert result is None
+
+    async with db_session() as session:
+        rows = (
+            await session.execute(
+                sa.select(AuditLog).where(AuditLog.target_id == bogus_domain_id)
+            )
+        ).scalars().all()
+    assert rows == []
+
+
+async def test_revoke_domain_on_an_already_revoked_domain_is_a_safe_no_op(_seeded_tenants):
+    # Deliberately idempotent, not an error -- see revoke_domain()'s own
+    # comment for why this differs from confirm_verification()'s
+    # DomainRevokedError case. A second call must change nothing further:
+    # revoked_at must not move to a new timestamp, and no second audit_log
+    # row must appear for the same action.
+    ids = _seeded_tenants
+    async with db_session() as session:
+        repo = IngestRepository(tenant_id=ids["tenant_a"], session=session)
+        domain = await repo.claim_domain("revoke-twice.example")
+        await session.commit()
+        domain_id = domain.id
+
+    first_now = datetime(2026, 6, 15, 12, 0, 0, tzinfo=UTC)
+    async with db_session() as session:
+        first_result = await revoke_domain(
+            session, domain_id, actor="test-admin", clock=lambda: first_now
+        )
+        await session.commit()
+    assert first_result.status == "revoked"
+    assert first_result.revoked_at == first_now
+
+    second_now = datetime(2026, 6, 15, 13, 0, 0, tzinfo=UTC)
+    async with db_session() as session:
+        second_result = await revoke_domain(
+            session, domain_id, actor="a-different-admin", clock=lambda: second_now
+        )
+        await session.commit()
+
+    assert second_result.status == "revoked"
+    # Unchanged -- still the FIRST call's timestamp, not the second's.
+    assert second_result.revoked_at == first_now
+
+    async with db_session() as session:
+        audit_rows = (
+            await session.execute(
+                sa.select(AuditLog).where(AuditLog.target_id == domain_id)
+            )
+        ).scalars().all()
+    assert len(audit_rows) == 1
+    assert audit_rows[0].actor == "test-admin"
+
+
+async def test_revoke_domain_is_deliberately_unscoped_and_can_revoke_any_tenants_domain(
+    _seeded_tenants,
+):
+    # The opposite of every other hostile-caller test in this file (which
+    # prove tenant isolation) -- intentionally so, not a regression.
+    # revoke_domain() is a platform-admin primitive with no tenant identity
+    # of its own; it must be able to reach every tenant's own domains
+    # through the exact same unscoped call. Seeds one real domain under
+    # EACH of two different tenants and revokes both through the same
+    # function, proving neither a tenant_id filter nor a same-tenant
+    # requirement exists anywhere in revoke_domain()'s own lookup.
+    ids = _seeded_tenants
+    async with db_session() as session:
+        repo_a = IngestRepository(tenant_id=ids["tenant_a"], session=session)
+        repo_b = IngestRepository(tenant_id=ids["tenant_b"], session=session)
+        domain_a = await repo_a.claim_domain("tenant-a-cross.example")
+        domain_b = await repo_b.claim_domain("tenant-b-cross.example")
+        await session.commit()
+        domain_a_id = domain_a.id
+        domain_b_id = domain_b.id
+
+    async with db_session() as session:
+        result_a = await revoke_domain(session, domain_a_id, actor="test-admin")
+        result_b = await revoke_domain(session, domain_b_id, actor="test-admin")
+        await session.commit()
+
+    assert result_a.status == "revoked"
+    assert result_b.status == "revoked"
+
+    async with db_session() as session:
+        row_a = (
+            await session.execute(sa.select(VerifiedDomain).where(VerifiedDomain.id == domain_a_id))
+        ).scalar_one()
+        row_b = (
+            await session.execute(sa.select(VerifiedDomain).where(VerifiedDomain.id == domain_b_id))
+        ).scalar_one()
+    assert row_a.status == "revoked"
+    assert row_b.status == "revoked"
+
+
+async def test_revoke_domain_never_persists_the_status_change_alone_if_the_audit_write_fails(
+    _seeded_tenants,
+):
+    # Transaction-atomicity proof for point 2: rather than mocking
+    # SQLAlchemy internals, this injects a REAL failure through
+    # audit_log.actor's own existing NOT NULL constraint (actor=None) --
+    # the audit_log insert fails at flush() exactly where it would for any
+    # other reason, exercising revoke_domain()'s own real code path, not a
+    # synthetic stand-in for it. If the domain's status update and the
+    # audit_log insert were not part of the same flush, this would be able
+    # to leave the domain silently "revoked" with no corresponding audit
+    # row; this test proves that never happens.
+    ids = _seeded_tenants
+    async with db_session() as session:
+        repo = IngestRepository(tenant_id=ids["tenant_a"], session=session)
+        domain = await repo.claim_domain("atomicity-proof.example")
+        await session.commit()
+        domain_id = domain.id
+
+    async with db_session() as session:
+        with pytest.raises(IntegrityError):
+            await revoke_domain(session, domain_id, actor=None)
+        # Not relied upon for correctness (session.close() at this
+        # "async with" block's own exit rolls back any uncommitted,
+        # failed transaction regardless) -- made explicit here so this
+        # test's own proof doesn't depend on that implicit behavior being
+        # read correctly from elsewhere.
+        await session.rollback()
+
+    async with db_session() as session:
+        domain_row = (
+            await session.execute(sa.select(VerifiedDomain).where(VerifiedDomain.id == domain_id))
+        ).scalar_one()
+        audit_rows = (
+            await session.execute(
+                sa.select(AuditLog).where(AuditLog.target_id == domain_id)
+            )
+        ).scalars().all()
+
+    assert domain_row.status == "pending"
+    assert domain_row.revoked_at is None
+    assert audit_rows == []
