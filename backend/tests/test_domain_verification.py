@@ -74,7 +74,7 @@ async def test_fetch_txt_records_returns_empty_list_on_timeout_not_hang(monkeypa
     # (app/health.py's own /ready tests). The resolver's own nameserver
     # list is monkeypatched directly, not the host's real resolv.conf, so
     # this test cannot affect or depend on the real system's DNS config;
-    # DNS_QUERY_TIMEOUT_SECONDS is shortened too, so this test proves the
+    # _DNS_QUERY_TIMEOUT_SECONDS is shortened too, so this test proves the
     # timeout path fires without actually waiting out the real 5-second
     # production value.
     class _UnroutableResolver(dns.asyncresolver.Resolver):
@@ -83,7 +83,7 @@ async def test_fetch_txt_records_returns_empty_list_on_timeout_not_hang(monkeypa
             self.nameservers = ["203.0.113.1"]
 
     monkeypatch.setattr(dns.asyncresolver, "Resolver", _UnroutableResolver)
-    monkeypatch.setattr(domain_verification, "DNS_QUERY_TIMEOUT_SECONDS", 0.5)
+    monkeypatch.setattr(domain_verification, "_DNS_QUERY_TIMEOUT_SECONDS", 0.5)
 
     records = await fetch_txt_records("example.com")
     assert records == []

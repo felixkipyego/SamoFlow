@@ -489,8 +489,19 @@ async def test_confirm_verification_on_a_pending_domain_with_a_positive_dns_matc
         domain = await repo.claim_domain("pending-positive.example")
         await session.commit()
         domain_id = domain.id
+        expected_domain = domain.domain
+        expected_token = domain.verification_token
 
-    async def _fake_true(_domain, _token):
+    # Duplication check after 2.2.d/e/f: captures the actual (domain, token)
+    # it was called with, rather than ignoring both arguments -- proving
+    # confirm_verification() drives the DNS check with the row's OWN
+    # domain/verification_token, not merely that some call happened with
+    # whatever arguments. A bug passing the wrong domain or a stale/wrong
+    # token would previously have passed this test unnoticed.
+    captured_calls = []
+
+    async def _fake_true(domain_arg, token_arg):
+        captured_calls.append((domain_arg, token_arg))
         return True
 
     monkeypatch.setattr(repository_module, "check_dns_verification", _fake_true)
@@ -503,6 +514,7 @@ async def test_confirm_verification_on_a_pending_domain_with_a_positive_dns_matc
 
     assert result.status == "verified"
     assert result.verified_at == fixed_now
+    assert captured_calls == [(expected_domain, expected_token)]
 
 
 async def test_confirm_verification_on_a_pending_domain_with_a_negative_dns_match(
@@ -519,8 +531,17 @@ async def test_confirm_verification_on_a_pending_domain_with_a_negative_dns_matc
         domain = await repo.claim_domain("pending-negative.example")
         await session.commit()
         domain_id = domain.id
+        expected_domain = domain.domain
+        expected_token = domain.verification_token
 
-    async def _fake_false(_domain, _token):
+    # Duplication check after 2.2.d/e/f: same strengthening as the positive
+    # case above -- captures the actual (domain, token) call, proving the
+    # negative path checks the row's own data too, not just that a call
+    # happened.
+    captured_calls = []
+
+    async def _fake_false(domain_arg, token_arg):
+        captured_calls.append((domain_arg, token_arg))
         return False
 
     monkeypatch.setattr(repository_module, "check_dns_verification", _fake_false)
@@ -531,6 +552,7 @@ async def test_confirm_verification_on_a_pending_domain_with_a_negative_dns_matc
 
     assert result.status == "pending"
     assert result.verified_at is None
+    assert captured_calls == [(expected_domain, expected_token)]
 
 
 async def test_confirm_verification_rejects_another_tenants_domain_with_no_side_effects(

@@ -40,7 +40,7 @@ TXT_RECORD_PREFIX = "samoflow-verify="
 # indefinitely, while still being short in absolute terms -- a domain that
 # cannot resolve within this window is treated as not verified, not as a
 # crash (see fetch_txt_records() below).
-DNS_QUERY_TIMEOUT_SECONDS = 5.0
+_DNS_QUERY_TIMEOUT_SECONDS = 5.0
 
 
 def domain_is_verified_by_dns(expected_token: str, txt_records: list[str]) -> bool:
@@ -72,7 +72,7 @@ async def fetch_txt_records(domain: str) -> list[str]:
     real domain and inspecting the returned shape before relying on it.
     """
     resolver = dns.asyncresolver.Resolver()
-    resolver.lifetime = DNS_QUERY_TIMEOUT_SECONDS
+    resolver.lifetime = _DNS_QUERY_TIMEOUT_SECONDS
     try:
         answer = await resolver.resolve(domain, "TXT")
     except dns.exception.DNSException:

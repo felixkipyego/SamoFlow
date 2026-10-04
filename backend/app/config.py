@@ -31,12 +31,15 @@ POSTGRES_SCHEME = "postgresql+psycopg"
 
 
 def _require_no_whitespace_or_control_chars(raw: str, field_name: str, reason: str) -> None:
-    # Shared by qdrant_api_key, jwt_signing_key and jwt_signing_key_previous
-    # (duplication check after 1.4.a/b): all three reject stray whitespace or
-    # control characters (e.g. from a copy-paste error), each for its own
-    # reason -- `reason` keeps the message truthful per field instead of one
-    # field borrowing another's rationale. Message names only the
-    # requirement, never the value under validation.
+    # Shared by every secret field that needs this (duplication check after
+    # 1.4.a/b; re-confirmed still accurate at the 2.2.d/e/f duplication
+    # check, which deliberately rewords this away from naming call sites by
+    # count/name -- that phrasing had already gone stale once by then):
+    # rejects stray whitespace or control characters (e.g. from a
+    # copy-paste error), each caller for its own reason -- `reason` keeps
+    # the message truthful per field instead of one field borrowing
+    # another's rationale. Message names only the requirement, never the
+    # value under validation.
     if any(ch.isspace() or not ch.isprintable() for ch in raw):
         raise ValueError(
             f"{field_name} must not contain whitespace or control characters ({reason})."
