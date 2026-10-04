@@ -416,6 +416,8 @@ EXPECTED_TABLES = {
     "documents",
     "db_connections",
     "jobs",
+    "verified_domains",
+    "audit_log",
 }
 
 EXPECTED_PK_COLUMNS = {
@@ -428,6 +430,8 @@ EXPECTED_PK_COLUMNS = {
     "documents": "id",
     "db_connections": "id",
     "jobs": "id",
+    "verified_domains": "id",
+    "audit_log": "id",
 }
 
 # tenant_id columns cascade from tenants (PROJECT_SPEC.md decision: DB-level
@@ -446,6 +450,10 @@ CASCADE_FK_COLUMNS = {
     ("jobs", "tenant_id"): "tenants",
     ("documents", "source_id"): "sources",
     ("jobs", "source_id"): "sources",
+    # Task 2.2.a: audit_log has no tenant_id column at all (deliberately
+    # not tenant-scoped -- see app/ingest/models.py's AuditLog class), so
+    # it adds no entry here.
+    ("verified_domains", "tenant_id"): "tenants",
 }
 
 # site_key_id (visitors) and vid (conversations) are a separate edge the

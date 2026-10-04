@@ -123,6 +123,67 @@ def test_jobs_next_run_at_is_indexed():
     assert column.index, "jobs.next_run_at has no index"
 
 
+def _check_constraints_by_name(table_name: str) -> dict[str, object]:
+    table = Base.metadata.tables[table_name]
+    return {
+        c.name: c for c in table.constraints if c.__class__.__name__ == "CheckConstraint"
+    }
+
+
+def test_verified_domains_has_two_separate_check_constraints():
+    # Task 2.2.a: verified_domains has TWO independent closed vocabularies
+    # (method, status) on one table -- the first table to need that.
+    # Written as its own dedicated test, not routed through
+    # EXPECTED_STATUS_CHECK_CONSTRAINTS/test_status_check_constraints_match_
+    # the_spec_vocabulary (which assumes exactly one CHECK constraint per
+    # table and is also shared with test_alembic.py's live-database check),
+    # so this task's own schema decision does not force a shape change on a
+    # fixture 2.2.b's not-yet-built migration also depends on.
+    constraints = _check_constraints_by_name("verified_domains")
+    assert len(constraints) == 2, "verified_domains should have exactly two CHECK constraints"
+
+    method_constraint = constraints["ck_verified_domains_method"]
+    assert "dns" in str(method_constraint.sqltext)
+
+    status_constraint = constraints["ck_verified_domains_status"]
+    for value in ("pending", "verified", "revoked"):
+        assert value in str(status_constraint.sqltext)
+
+
+def test_verified_domains_active_domain_unique_index_is_partial():
+    # Task 2.2.a, PROJECT_SPEC.md's Step 2.2 breakdown decision (e): global
+    # uniqueness across ALL tenants, but only while a claim is active
+    # (pending/verified) -- a revoked domain must become claimable again.
+    # Must genuinely be PARTIAL (postgresql_where), not a full unique
+    # constraint wearing a different name; checked directly on the Index
+    # object's own dialect kwargs (SQLAlchemy Python metadata, no database
+    # needed). The live proof that Postgres itself honors this is 2.2.b's
+    # job, against a real migration.
+    table = Base.metadata.tables["verified_domains"]
+    (index,) = [i for i in table.indexes if i.name == "ix_verified_domains_domain_active_unique"]
+    assert index.unique is True
+    assert [c.name for c in index.columns] == ["domain"]
+    where_clause = index.dialect_options["postgresql"]["where"]
+    assert where_clause is not None, "index has no postgresql_where -- it is not partial"
+    assert "revoked" in str(where_clause)
+
+
+def test_audit_log_has_no_tenant_id_column():
+    # Task 2.2.a: deliberately a platform-level log, not tenant-scoped --
+    # confirmed, not merely absent by oversight (see app/ingest/models.py's
+    # AuditLog class for the full reasoning).
+    table = Base.metadata.tables["audit_log"]
+    assert "tenant_id" not in table.columns
+
+
+def test_audit_log_has_no_action_check_constraint():
+    # Task 2.2.a: future actions (threshold overrides, plan changes,
+    # docs/SPEC.md §15) are not enumerable yet -- deliberately an open
+    # string, unlike every other closed-vocabulary status/type column in
+    # this project.
+    assert _check_constraints_by_name("audit_log") == {}
+
+
 def test_db_connections_model_has_no_custom_repr_that_would_dump_columns():
     # Task 2.1.a: confirms the premise the credential-column design relies
     # on -- unlike pydantic's BaseModel (which dumps every field in its
