@@ -36,6 +36,7 @@
 # test_ratelimit.py, test_dependencies.py and test_session.py -- the same
 # ~10-line injectable-clock test double, three times).
 import ast
+import asyncio
 import importlib
 import os
 import sys
@@ -164,6 +165,33 @@ def check_call_allowlist(
                         "is not in its allow-list"
                     )
     return violations
+
+
+@asynccontextmanager
+async def spawn_module_subprocess(
+    module: str, env: dict[str, str]
+) -> AsyncIterator[asyncio.subprocess.Process]:
+    # Scoped duplication check after 2.1.g: shared by test_worker.py's
+    # `python -m app.worker` tests and test_qdrant.py's `python -m app.qdrant`
+    # tests -- both spawned a real subprocess to exercise a CLI entrypoint's
+    # own main(), with an identical asyncio.create_subprocess_exec(...) call
+    # (differing only in which app.<module> to run) and an identical
+    # kill-if-still-running cleanup block repeated at every call site.
+    process = await asyncio.create_subprocess_exec(
+        sys.executable,
+        "-m",
+        f"app.{module}",
+        cwd=BACKEND_DIR,
+        env=env,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    try:
+        yield process
+    finally:
+        if process.returncode is None:
+            process.kill()
+            await process.wait()
 
 
 def minimal_subprocess_env() -> dict[str, str]:

@@ -38,7 +38,9 @@ from tests.conftest import (
     minimal_subprocess_env,
     require_test_qdrant,
     set_valid_env,
+    spawn_module_subprocess,
 )
+from tests.test_qdrant_collection import _create_bare_collection
 
 
 def test_importing_qdrant_module_has_no_side_effects():
@@ -193,32 +195,20 @@ def test_client_library_version_is_compatible_with_the_pinned_server():
 
 # --- Task 2.1.g: the `python -m app.qdrant` CLI entrypoint ------------------
 # ensure_collection() itself is already fully covered (offline and live) by
-# test_qdrant_collection.py (Task 1.3.c) -- these two tests cover only the
-# CLI wiring main() adds: a clean failure with no traceback on a
-# misconfigured environment (matching test_worker.py's own precedent for
-# app/worker.py's main()), and that a real run against the real test-qdrant
-# exits 0 having set up the actual default collection, not just some
-# function called correctly in isolation.
-async def _spawn_qdrant_cli(env):
-    return await asyncio.create_subprocess_exec(
-        sys.executable,
-        "-m",
-        "app.qdrant",
-        cwd=BACKEND_DIR,
-        env=env,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-    )
-
-
+# test_qdrant_collection.py (Task 1.3.c) -- these tests cover only the CLI
+# wiring main() adds: a clean failure with no traceback on a misconfigured
+# environment (matching test_worker.py's own precedent for app/worker.py's
+# main()), that a real run against the real test-qdrant exits 0 having set
+# up the actual default collection (not just some function called correctly
+# in isolation), and -- added at the scoped duplication check after 2.1.g,
+# item C1 -- that a real CollectionSchemaMismatch is also surfaced as a
+# clean nonzero exit, not just SettingsError's own path. Subprocess spawning
+# is shared with test_worker.py's own CLI tests via
+# tests.conftest.spawn_module_subprocess (that same duplication check,
+# items A1/A2).
 async def test_cli_with_empty_environment_exits_nonzero_without_traceback():
-    process = await _spawn_qdrant_cli(minimal_subprocess_env())
-    try:
+    async with spawn_module_subprocess("qdrant", minimal_subprocess_env()) as process:
         _, stderr = await asyncio.wait_for(process.communicate(), timeout=10)
-    finally:
-        if process.returncode is None:
-            process.kill()
-            await process.wait()
     assert process.returncode != 0
     assert b"Traceback" not in stderr
 
@@ -229,14 +219,9 @@ async def test_cli_ensures_the_real_default_collection_against_the_test_qdrant()
     env.update(VALID_ENV)
     env["QDRANT_URL"] = url
     env["QDRANT_API_KEY"] = key
-    process = await _spawn_qdrant_cli(env)
-    try:
+    async with spawn_module_subprocess("qdrant", env) as process:
         _, stderr = await asyncio.wait_for(process.communicate(), timeout=10)
         assert process.returncode == 0, stderr
-    finally:
-        if process.returncode is None:
-            process.kill()
-            await process.wait()
 
     client = qdrant.build_qdrant_client(url, key)
     try:
@@ -245,9 +230,42 @@ async def test_cli_ensures_the_real_default_collection_against_the_test_qdrant()
         # just ensure_collection() in isolation (already proven by
         # test_qdrant_collection.py's test_ensure_collection_called_twice_is_
         # a_no_op).
-        second = await _spawn_qdrant_cli(env)
-        _, second_stderr = await asyncio.wait_for(second.communicate(), timeout=10)
-        assert second.returncode == 0, second_stderr
+        async with spawn_module_subprocess("qdrant", env) as second:
+            _, second_stderr = await asyncio.wait_for(second.communicate(), timeout=10)
+            assert second.returncode == 0, second_stderr
+    finally:
+        if await client.collection_exists(qdrant.COLLECTION_NAME):
+            await client.delete_collection(qdrant.COLLECTION_NAME)
+        await client.close()
+
+
+async def test_cli_exits_nonzero_with_the_mismatch_description_on_a_real_schema_mismatch():
+    # The one gap the scoped duplication check after 2.1.g found (item C1):
+    # app/qdrant.py's `except (SettingsError, CollectionSchemaMismatch)`
+    # branch had only ever been exercised for SettingsError, via the
+    # empty-environment test above -- never for a real schema mismatch, so a
+    # bug in that branch (wrong type caught, swallowed without exiting)
+    # could make a broken `migrate` step silently "succeed" instead of
+    # failing loudly. Pre-creates the mismatch directly under the CLI's own
+    # real default name (main() always targets COLLECTION_NAME, with no
+    # name parameter to point at a random probe name instead), reusing
+    # test_qdrant_collection.py's own _create_bare_collection() helper
+    # rather than duplicating it.
+    url, key = require_test_qdrant()
+    client = qdrant.build_qdrant_client(url, key)
+    try:
+        await _create_bare_collection(client, qdrant.COLLECTION_NAME, dense_size=768)
+        env = minimal_subprocess_env()
+        env.update(VALID_ENV)
+        env["QDRANT_URL"] = url
+        env["QDRANT_API_KEY"] = key
+        async with spawn_module_subprocess("qdrant", env) as process:
+            _, stderr = await asyncio.wait_for(process.communicate(), timeout=10)
+        assert process.returncode != 0
+        assert b"Traceback" not in stderr
+        assert b"768" in stderr
+        assert b"1536" in stderr
+        assert key.encode() not in stderr
     finally:
         if await client.collection_exists(qdrant.COLLECTION_NAME):
             await client.delete_collection(qdrant.COLLECTION_NAME)

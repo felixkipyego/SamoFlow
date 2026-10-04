@@ -7,16 +7,16 @@
 # process-level graceful-shutdown proof (a SIGTERM sent while a handler
 # is actively running), using the exact same _spawn_worker()/
 # _worker_subprocess_env() machinery 1.1.f's own SIGTERM test already
-# established.
+# established. Scoped duplication check after 2.1.g: _spawn_worker() itself
+# is now spawn_module_subprocess("worker", env) (tests/conftest.py), shared
+# with test_qdrant.py's own `python -m app.qdrant` CLI tests.
 import asyncio
 import logging
 import os
 import signal
-import sys
 import time
 import uuid
 from datetime import UTC, datetime
-from pathlib import Path
 
 import pytest
 import sqlalchemy as sa
@@ -33,9 +33,8 @@ from tests.conftest import (
     _fetch_job,
     db_session,
     set_valid_env,
+    spawn_module_subprocess,
 )
-
-BACKEND_DIR = Path(__file__).resolve().parent.parent
 
 
 async def test_run_returns_promptly_when_stop_is_already_set(monkeypatch, caplog):
@@ -105,18 +104,6 @@ def _worker_subprocess_env(**overrides):
     return env
 
 
-async def _spawn_worker(env):
-    return await asyncio.create_subprocess_exec(
-        sys.executable,
-        "-m",
-        "app.worker",
-        cwd=BACKEND_DIR,
-        env=env,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-    )
-
-
 async def _wait_for_line_containing(stream, needle, timeout):
     async def _read():
         while True:
@@ -131,8 +118,7 @@ async def _wait_for_line_containing(stream, needle, timeout):
 
 
 async def test_sigterm_shuts_down_the_real_process_cleanly():
-    process = await _spawn_worker(_worker_subprocess_env(**VALID_ENV))
-    try:
+    async with spawn_module_subprocess("worker", _worker_subprocess_env(**VALID_ENV)) as process:
         startup_line = await _wait_for_line_containing(
             process.stderr, "app_env=development", timeout=10
         )
@@ -140,20 +126,11 @@ async def test_sigterm_shuts_down_the_real_process_cleanly():
         process.send_signal(signal.SIGTERM)
         exit_code = await asyncio.wait_for(process.wait(), timeout=10)
         assert exit_code == 0
-    finally:
-        if process.returncode is None:
-            process.kill()
-            await process.wait()
 
 
 async def test_worker_with_empty_environment_exits_nonzero_without_traceback():
-    process = await _spawn_worker(_worker_subprocess_env())
-    try:
+    async with spawn_module_subprocess("worker", _worker_subprocess_env()) as process:
         _, stderr = await asyncio.wait_for(process.communicate(), timeout=10)
-    finally:
-        if process.returncode is None:
-            process.kill()
-            await process.wait()
     assert process.returncode != 0
     assert b"Traceback" not in stderr
 
@@ -325,10 +302,8 @@ async def test_sigterm_mid_handler_finishes_the_current_job_and_claims_no_other(
         await session.commit()
         slow_job_id, other_job_id = slow_job.id, other_job.id
 
-    process = await _spawn_worker(
-        _worker_subprocess_env(**{**VALID_ENV, "DATABASE_URL": database_url})
-    )
-    try:
+    env = _worker_subprocess_env(**{**VALID_ENV, "DATABASE_URL": database_url})
+    async with spawn_module_subprocess("worker", env) as process:
         startup_line = await _wait_for_line_containing(
             process.stderr, "app_env=development", timeout=10
         )
@@ -340,10 +315,6 @@ async def test_sigterm_mid_handler_finishes_the_current_job_and_claims_no_other(
         process.send_signal(signal.SIGTERM)
         exit_code = await asyncio.wait_for(process.wait(), timeout=10)
         assert exit_code == 0
-    finally:
-        if process.returncode is None:
-            process.kill()
-            await process.wait()
 
     slow_job_row = await _fetch_job(slow_job_id)
     other_job_row = await _fetch_job(other_job_id)
