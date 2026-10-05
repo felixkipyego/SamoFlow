@@ -215,14 +215,15 @@ class VerifiedDomain(Base):
     # drifting apart over two different normalization behaviors for what
     # is structurally the same problem (a tenant-typed hostname/origin).
     domain: Mapped[str] = mapped_column(String, nullable=False)
-    # DNS only for now (PROJECT_SPEC.md's Step 2.2 breakdown, decision (b)):
-    # file and meta-tag verification both need an outbound HTTP fetch to a
-    # tenant-supplied host, carrying the identical SSRF surface Step 2.3's
-    # own guard exists to close -- deferred until immediately after 2.3
-    # lands, so this allow-list grows to include them then, reusing that
-    # real guard from day one instead of 2.2 building a scoped-down
-    # duplicate of logic 2.3 will also need. See PROJECT_SPEC.md's Open
-    # markers.
+    # Task 2.3.e: `file`/`meta_tag` restored alongside `dns` -- the schema
+    # side of the deferral PROJECT_SPEC.md's Step 2.2 breakdown (decision
+    # (b)) recorded: both need an outbound HTTP fetch to a tenant-supplied
+    # host, carrying the identical SSRF surface Step 2.3's own guard
+    # exists to close, so this allow-list stayed DNS-only until that guard
+    # existed to reuse. Schema only: the actual file/meta-tag verification
+    # LOGIC (the fetch itself, well-known-path/meta-tag parsing) is NOT
+    # built by this change -- see PROJECT_SPEC.md's Open markers for that
+    # still-unowned future work.
     method: Mapped[str] = mapped_column(String, nullable=False)
     # pending (claimed, token generated, not yet checked) / verified
     # (check succeeded) / revoked (platform admin action, 2.2.g) -- a
@@ -240,7 +241,9 @@ class VerifiedDomain(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), **TIMESTAMP_NOW)
 
     __table_args__ = (
-        CheckConstraint("method IN ('dns')", name="ck_verified_domains_method"),
+        CheckConstraint(
+            "method IN ('dns', 'file', 'meta_tag')", name="ck_verified_domains_method"
+        ),
         CheckConstraint(
             "status IN ('pending', 'verified', 'revoked')", name="ck_verified_domains_status"
         ),

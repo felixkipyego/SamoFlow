@@ -646,9 +646,19 @@ def test_downgrade_from_head_removes_verified_domains_and_audit_log(_test_engine
     # downgrade() comment explains why), so there is nothing extra here
     # beyond the standard upgrade -> downgrade -> table-gone -> upgrade
     # cycle every other migration's own downgrade test already follows.
+    #
+    # Upgrades to 610897dd7071 explicitly, not "head", and downgrades
+    # "-1" from there -- the identical stale-head bug class 1.4.d's/
+    # 2.1.b's own fixes already describe: 2.3.e's own later migration
+    # (77707a3b5369) landed on top of head and only touches a
+    # CheckConstraint, not these tables, so a bare "head"/"−1" pair would
+    # now downgrade PAST that migration instead of past this one,
+    # leaving both tables still present and silently passing for the
+    # wrong reason (or failing this assertion outright) -- caught before
+    # it could, not after.
     engine = _test_engine
     _reset_public_schema(engine)
-    migrated = _run_alembic("upgrade", "head", engine=engine)
+    migrated = _run_alembic("upgrade", "610897dd7071", engine=engine)
     assert migrated.returncode == 0, migrated.stdout + migrated.stderr
 
     downgraded = _run_alembic("downgrade", "-1", engine=engine)

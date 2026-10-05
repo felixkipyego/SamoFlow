@@ -506,11 +506,11 @@ EXPECTED_STATUS_CHECK_CONSTRAINTS = {
     # or "cancelled" state).
     "sources": [("ck_sources_type", frozenset({"urls", "crawl", "upload", "database"}))],
     "jobs": [("ck_jobs_status", frozenset({"pending", "running", "succeeded", "failed"}))],
-    # Task 2.2.b: method is DNS-only for now (PROJECT_SPEC.md's Step 2.2
-    # breakdown, decision (b)) -- file/meta_tag are added back here once
-    # Step 2.3 lands, per the matching Open marker.
+    # Task 2.3.e: file/meta_tag restored alongside dns, now that Step 2.3's
+    # own SSRF guard exists for them to reuse (schema only -- the
+    # verification LOGIC for either method is still unbuilt).
     "verified_domains": [
-        ("ck_verified_domains_method", frozenset({"dns"})),
+        ("ck_verified_domains_method", frozenset({"dns", "file", "meta_tag"})),
         ("ck_verified_domains_status", frozenset({"pending", "verified", "revoked"})),
     ],
 }
