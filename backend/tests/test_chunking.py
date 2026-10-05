@@ -12,7 +12,6 @@
 # (the point of that test IS the byte-level contrast between them, best
 # read directly rather than diffing two opaque fixture files).
 import hashlib
-from pathlib import Path
 
 from app.ingest.chunking import (
     CHUNK_OVERLAP_TOKENS,
@@ -22,12 +21,12 @@ from app.ingest.chunking import (
     compute_content_hash,
 )
 from app.ingest.extract_html import ContentBlock, ExtractedContent, extract_html
-
-FIXTURES_DIR = Path(__file__).resolve().parent / "fixtures" / "html"
+from app.ingest.extract_pdf import extract_pdf
+from tests.conftest import read_html_fixture, read_pdf_fixture
 
 
 def _extract(name: str) -> ExtractedContent:
-    return extract_html((FIXTURES_DIR / name).read_text())
+    return extract_html(read_html_fixture(name))
 
 
 def test_chunking_the_same_real_input_twice_is_byte_identical():
@@ -79,6 +78,32 @@ def test_multiple_blocks_never_merge_across_a_heading_boundary():
     for chunk, block in zip(chunks, content.blocks, strict=True):
         assert chunk.heading_path == block.heading_path
         assert chunk.text == block.text
+
+
+def test_chunks_real_pdf_extracted_content_end_to_end():
+    # Duplication check after 2.4.b/c/d: chunk_text() had zero regression
+    # coverage against PDF's own extraction shape (always exactly one
+    # block, always-empty heading_path, always-None title) -- every
+    # other test here only ever exercises extract_html()'s own richer
+    # shape. Confirmed live before this test existed that chunk_text()
+    # already handles it correctly; this closes the coverage gap, not a
+    # bug fix. 2.4.d's own real multi_page.pdf fixture (80 words, 2
+    # pages flattened into 1 block) is short enough to stay a single
+    # chunk here -- proving the empty-heading_path/chunk_index shape is
+    # what matters, not the multi-chunk/overlap mechanics already proven
+    # against HTML in test_overlap_is_genuinely_the_same_64_tokens_not_
+    # merely_two_adjacent_chunks above (chunk_text() has no format-
+    # specific branching at all, so one already-tested long-input case
+    # is enough to cover the sliding-window mechanics).
+    content = extract_pdf(read_pdf_fixture("multi_page.pdf"))
+    assert len(content.blocks) == 1
+
+    chunks = chunk_text(content)
+    assert len(chunks) == 1
+    assert chunks[0].chunk_index == 0
+    assert chunks[0].heading_path == ()
+    assert "first page" in chunks[0].text
+    assert "second page" in chunks[0].text
 
 
 def test_chunk_index_increments_sequentially_from_zero_across_the_whole_document():

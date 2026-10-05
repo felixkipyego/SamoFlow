@@ -79,6 +79,20 @@ from app.tenancy.models import Tenant
 REPO_ROOT = Path(__file__).resolve().parents[2]
 BACKEND_DIR = Path(__file__).resolve().parent.parent
 
+# Duplication check after 2.4.b/c/d: test_extract_html.py, test_extract_pdf.py
+# and test_chunking.py each independently defined the identical "FIXTURES_DIR
+# + a one-line read helper" pattern -- the 3rd occurrence (test_chunking.py's
+# own _extract()) crossed this project's own extraction threshold.
+_FIXTURES_DIR = Path(__file__).resolve().parent / "fixtures"
+
+
+def read_html_fixture(name: str) -> str:
+    return (_FIXTURES_DIR / "html" / name).read_text()
+
+
+def read_pdf_fixture(name: str) -> bytes:
+    return (_FIXTURES_DIR / "pdf" / name).read_bytes()
+
 # Task 1.4.a: jwt_signing_key_previous is the first Settings field with a
 # default (optional), so REQUIRED_VARS must now actually filter rather than
 # list every field -- field.is_required() is pydantic's own built-in

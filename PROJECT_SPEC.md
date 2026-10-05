@@ -31,6 +31,7 @@ A production-ready, multi-tenant, embeddable AI widget platform: one website is 
 - Nothing hard-coded that should be configuration (limits, thresholds, paths, URLs).
 - Any deviation from the spec is recorded in the decisions log (see SPEC section 3) in the same change.
 - After each phase, run the acceptance checks and summarize deviations before starting the next.
+- Convention (written down at the duplication check after 2.4.b/c/d, previously applied ad hoc): when a task adds a new test file, run it standalone and re-run it 3 times before trusting the result, to catch any ordering-dependent or flaky behavior a single pass wouldn't surface.
 
 ## 4. Components and status
 
@@ -1150,6 +1151,8 @@ A production-ready, multi-tenant, embeddable AI widget platform: one website is 
 
   Verified: `make lint` clean. New test file run standalone, re-run 3 times for stability: **5 passed** every time, ~0.2s each run. Full `backend/tests` without a test database: **436 passed, 151 skipped** (up from 431 passed, 151 skipped — exactly the 5 new tests, 0 new skips). `make lock-check` clean. `make audit`: no known vulnerabilities. `git status --short` named and cross-checked file by file: `backend/pyproject.toml`, `backend/requirements.lock`, `backend/requirements-dev.lock` (modified) plus `backend/app/ingest/extract_pdf.py`, `backend/tests/test_extract_pdf.py`, `backend/tests/fixtures/pdf/` (new) — exactly the expected six, `.env` correctly absent.
 
+- 2026-10-05: Duplication check after 2.4.b/c/d: confirmed `ExtractedContent`/`ContentBlock` genuinely fits both HTML and PDF without forcing (typed for absence/variable-cardinality from the start, before PDF existed); extracted shared fixture-loading helpers; documented the standalone-rerun-3x verification convention; committed the PDF fixture generator script for future reuse; closed a real zero-regression-coverage gap by proving `chunk_text()` against real PDF-extracted content end-to-end; A2/B2 declined as premature/already-confirmed-safe.
+
 ### Estimates to measure
 
 - The default limits in §9 and the budgets in §17 are starting points.
@@ -1575,7 +1578,7 @@ new Qdrant/job-queue wiring here, matching 2.3's own precedent.
 
 ## 8. Task counter since the last duplication check
 
-n = 3 — 2.4.b, 2.4.c and 2.4.d counted (see their decision log entries below).
+n = 0 — reset after the duplication check following 2.4.b/c/d.
 
 ## 9. Open markers
 

@@ -9,22 +9,15 @@
 # project, and adding one solely to generate a test fixture would be
 # disproportionate -- a small script computed the exact byte offsets a
 # correct xref table needs, rather than hand-counting them).
-from pathlib import Path
-
 import pytest
 from pypdf.errors import PyPdfError
 
 from app.ingest.extract_pdf import extract_pdf
-
-FIXTURES_DIR = Path(__file__).resolve().parent / "fixtures" / "pdf"
-
-
-def _load(name: str) -> bytes:
-    return (FIXTURES_DIR / name).read_bytes()
+from tests.conftest import read_pdf_fixture
 
 
 def test_extracts_known_text_content_correctly():
-    content = extract_pdf(_load("multi_page.pdf"))
+    content = extract_pdf(read_pdf_fixture("multi_page.pdf"))
     assert len(content.blocks) == 1
     assert content.blocks[0].heading_path == ()
     assert "This is the first page of the fixture document." in content.blocks[0].text
@@ -33,11 +26,11 @@ def test_extracts_known_text_content_correctly():
 
 
 def test_word_count_and_is_nearly_empty_work_against_real_extracted_text():
-    substantial = extract_pdf(_load("multi_page.pdf"))
+    substantial = extract_pdf(read_pdf_fixture("multi_page.pdf"))
     assert substantial.word_count == 80
     assert substantial.is_nearly_empty is False
 
-    empty = extract_pdf(_load("no_text.pdf"))
+    empty = extract_pdf(read_pdf_fixture("no_text.pdf"))
     assert empty.word_count == 0
     assert empty.is_nearly_empty is True
 
@@ -50,7 +43,7 @@ def test_multiple_pages_are_flattened_into_a_single_block():
     # font size. Confirms content from BOTH pages is present in that one
     # block, correctly joined (no word from the end of page one running
     # into the first word of page two with no separating whitespace).
-    content = extract_pdf(_load("multi_page.pdf"))
+    content = extract_pdf(read_pdf_fixture("multi_page.pdf"))
     assert len(content.blocks) == 1
     text = content.blocks[0].text
     assert "document. It contains" in text  # end of page 1, intact
@@ -67,7 +60,7 @@ def test_malformed_pdf_fails_cleanly_with_a_specific_exception():
     # never an unhandled low-level crash (IndexError, UnicodeDecodeError,
     # etc.). extract_pdf() deliberately does not catch or re-wrap this --
     # see extract_pdf.py's own header comment for why.
-    valid_bytes = _load("multi_page.pdf")
+    valid_bytes = read_pdf_fixture("multi_page.pdf")
     truncated = valid_bytes[: len(valid_bytes) // 2]
     with pytest.raises(PyPdfError):
         extract_pdf(truncated)
@@ -80,7 +73,7 @@ def test_pdf_with_no_extractable_text_is_handled_gracefully_not_an_exception():
     # image-only page, without needing to embed real raster image data
     # (impractical to construct reliably by hand; this is the smallest
     # adequate proxy with an identical observable outcome).
-    content = extract_pdf(_load("no_text.pdf"))
+    content = extract_pdf(read_pdf_fixture("no_text.pdf"))
     assert content.blocks == ()
     assert content.word_count == 0
     assert content.is_nearly_empty is True
