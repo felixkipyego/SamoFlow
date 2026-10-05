@@ -962,6 +962,20 @@ A production-ready, multi-tenant, embeddable AI widget platform: one website is 
 
   Verified: `make lint` clean. New test file run standalone: **22 passed** in 0.07s, confirming fully offline (no `docker info` needed for this subtask, per its own explicit scope). Full `backend/tests` without a test database: **392 passed, 149 skipped** (up from 370 passed, 149 skipped — exactly the 22 new tests, 0 new skips, matching that this task is pure/offline with no live-database-dependent test). `git status --short` showed exactly the two expected new files (`backend/app/ingest/ip_safety.py`, `backend/tests/test_ip_safety.py`), `.env` correctly absent. No new dependency — `ipaddress` is stdlib.
 
+- 2026-10-04: Step 2.3.b [SECURITY] — DNS-resolve-and-validate (new `backend/app/ingest/host_safety.py`: `resolve_and_validate()`); 8 new offline tests (new `backend/tests/test_host_safety.py`).
+
+  **Module placement: a new sibling file, not an extension of `ip_safety.py`** — same reasoning `ip_safety.py`'s own header comment already gives for staying out of `safe_fetch.py`, applied one layer further: this function needs `dnspython`, which the pure IP classifier has no reason to require. Keeping that dependency confined to `host_safety.py` means a future caller that only needs to classify an IP it already has in hand (Step 2.8's own database-sync adapter is the named candidate) can import `ip_safety.py` alone, with no DNS-resolution dependency pulled in for no reason — `host_safety.py` imports `is_unsafe_destination_ip` from `ip_safety.py`, not the reverse.
+
+  **Return contract: an empty list on any failure, matching `fetch_txt_records()`'s own established shape (2.2.d), not a new one** — `resolve_and_validate()` never raises for an ordinary DNS failure (NXDOMAIN, timeout, no records of a given type, no records at all) or for an unsafe resolved IP; both collapse to the identical empty-list return, deliberately indistinguishable from the caller's own side, matching this project's own no-oracle discipline elsewhere. A plain boolean (matching `check_dns_verification()`'s own shape instead) was considered and rejected: the caller (2.3.c) needs the actual validated IP(s) to connect to, not just a yes/no.
+
+  **Timeout: a new, independently-named `_DNS_QUERY_TIMEOUT_SECONDS = 5.0`, not an import of `domain_verification.py`'s own same-named private constant** — reaching across a module boundary for a name a leading underscore marks "private to this file" would undercut that convention, not reuse it (matching `health.py`'s own established precedent for a private module-level timeout). The VALUE is deliberately identical (same latency class: a real DNS query over the internet, same reasoning for 5s), but this is only the SECOND occurrence of this exact value, not a third — per this project's own established threshold from the 2.2.d/e/f duplication check ("not worth a shared alias until a 3rd occurrence of the identical shape appears"), extracting a shared constant now would be premature, not proportionate.
+
+  **Both A and AAAA genuinely checked, not just one with the other assumed** — confirmed by a dedicated test (`test_a_safe_a_record_and_an_unsafe_aaaa_record_still_rejects`) where the A record alone is perfectly safe but the AAAA record is the IPv6 loopback, and the combined result is still rejected; a second test (`test_a_missing_record_type_alone_is_not_a_failure`) confirms a hostname with only A records (no AAAA at all, the common real-world case) is NOT treated as a failure on its own — only the combined result across both queries decides pass/fail, each record type's own `DNSException` caught independently.
+
+  ASSUMPTION: none needed — dnspython's A/AAAA rdata shape (`.address`) was verified live against the installed `dnspython==2.8.0`, not assumed, before writing the real module. UNCERTAIN: none. TODO: none new. Current task set to 2.3.c, next to 2.3.d. **Counter reaches n=2.**
+
+  Verified: `make lint` clean. New test file run standalone: **8 passed** in 0.05s, confirming fully offline/mocked (the resolver itself is monkeypatched with a fake, canned-answer stand-in — no real network, no `docker info` needed). Full `backend/tests` without a test database: **400 passed, 149 skipped** (up from 392 passed, 149 skipped — exactly the 8 new tests, 0 new skips). `git status --short` showed exactly the two expected new files (`backend/app/ingest/host_safety.py`, `backend/tests/test_host_safety.py`), `.env` correctly absent. No new dependency — `dnspython` was already approved at 2.2.d.
+
 ### Estimates to measure
 
 - The default limits in §9 and the budgets in §17 are starting points.
@@ -985,9 +999,9 @@ A production-ready, multi-tenant, embeddable AI widget platform: one website is 
 
 ## 7. Current task and next task
 
-Current: Step 2.3.b.
-Next: Step 2.3.c.
-Do not modify (completed tasks): 1.1.a, 1.1.b, 1.1.c, 1.1.d, 1.1.e, 1.1.f, 1.1.g, 1.1.h, 1.1.i, 1.1.j, 1.1.k, 1.1.l, 1.1.m, 1.1.n, 1.1.o.a, 1.1.o.b, 1.1.o.c, 1.1.o.d, 1.1.o.e, 1.1.o.f, 1.1.o.g, 1.1.o.h, 1.1b, 1.1c, 1.2.a, 1.2.b, 1.2.c, 1.2.d, 1.2.e, 1.2.f, 1.3.a1, 1.3.a2, 1.3.b, 1.3.c, 1.3.d, 1.3.e, 1.3.f, 1.4.a, 1.4.b, 1.4.c, 1.4.d, 1.4.e, 1.4.f, 1.4.g, 1.4.h, 1.4.i, 1.4.j, 1.4.k, 1.4.l, 1.5.a, 1.5.b, 1.5.c, 1.5.d, 1.5.e, 1.5.f, 1.6.a, 1.6.b, 1.6.c, 1.6.d, 1.6.e, 2.1.a, 2.1.b, 2.1.c, 2.1.d, 2.1.e, 2.1.f, 2.1.g, 2.1.h, 2.2.a, 2.2.b, 2.2.c, 2.2.d, 2.2.e, 2.2.f, 2.2.g, 2.2.h, 2.2.i, 2.3.a.
+Current: Step 2.3.c.
+Next: Step 2.3.d.
+Do not modify (completed tasks): 1.1.a, 1.1.b, 1.1.c, 1.1.d, 1.1.e, 1.1.f, 1.1.g, 1.1.h, 1.1.i, 1.1.j, 1.1.k, 1.1.l, 1.1.m, 1.1.n, 1.1.o.a, 1.1.o.b, 1.1.o.c, 1.1.o.d, 1.1.o.e, 1.1.o.f, 1.1.o.g, 1.1.o.h, 1.1b, 1.1c, 1.2.a, 1.2.b, 1.2.c, 1.2.d, 1.2.e, 1.2.f, 1.3.a1, 1.3.a2, 1.3.b, 1.3.c, 1.3.d, 1.3.e, 1.3.f, 1.4.a, 1.4.b, 1.4.c, 1.4.d, 1.4.e, 1.4.f, 1.4.g, 1.4.h, 1.4.i, 1.4.j, 1.4.k, 1.4.l, 1.5.a, 1.5.b, 1.5.c, 1.5.d, 1.5.e, 1.5.f, 1.6.a, 1.6.b, 1.6.c, 1.6.d, 1.6.e, 2.1.a, 2.1.b, 2.1.c, 2.1.d, 2.1.e, 2.1.f, 2.1.g, 2.1.h, 2.2.a, 2.2.b, 2.2.c, 2.2.d, 2.2.e, 2.2.f, 2.2.g, 2.2.h, 2.2.i, 2.3.a, 2.3.b.
 
 ### Step 1.1 task list (approved)
 
@@ -1342,14 +1356,14 @@ domain verification (2.3.e resolves that Open marker), not 2.6.
 | ID | Goal | Status |
 |----|------|--------|
 | 2.3.a | IP-classification primitive (pure, offline, no network): a fail-closed function over both IPv4 and IPv6 (`not ip.is_global or ip.is_multicast or ip.is_reserved or ip.is_unspecified`) rejecting RFC 1918, loopback, link-local, the cloud-metadata address, IPv6 unique-local/loopback/link-local, CGNAT (`100.64.0.0/10`) and multicast. Table-driven offline tests, the metadata IP as its own named case. **Built in `app/ingest/ip_safety.py`, not `safe_fetch.py`** — see this task's own decision-log entry for why | Done |
-| 2.3.b | DNS-resolve-and-validate: resolves a hostname to every returned IP (both families), validates ALL of them via 2.3.a, rejects the whole hostname if any is unsafe (fail closed — never connects via an unvalidated IP from the same answer). Hostile-proof tests: NXDOMAIN (matching 2.2.d's own convention); a monkeypatched resolver simulating DNS rebinding (an otherwise-innocuous hostname resolving to a private/metadata IP) | Not started |
+| 2.3.b | DNS-resolve-and-validate: resolves a hostname to every returned IP (both families), validates ALL of them via 2.3.a, rejects the whole hostname if any is unsafe (fail closed — never connects via an unvalidated IP from the same answer). Hostile-proof tests: NXDOMAIN (matching 2.2.d's own convention); a monkeypatched resolver simulating DNS rebinding (an otherwise-innocuous hostname resolving to a private/metadata IP). **Built in a new `app/ingest/host_safety.py`, not `ip_safety.py`** — see this task's own decision-log entry for why | Done |
 | 2.3.c | The single-fetch primitive (no redirect following yet): scheme check (http/https only); `httpx` promoted from dev-only to a direct runtime dependency here (`httpx==0.28.1`, re-verified current on PyPI at the research stage, not assumed); connects to the validated IP literal (never the hostname), `Host` header and `extensions={"sni_hostname": ...}` set to the original hostname for correct TLS SNI/cert verification; size cap enforced via streaming (never buffers an oversized body first); configurable timeout. Defaults match docs/SPEC.md §5.5 exactly: 5MB, 15s, max 3 redirects (all three owned here, not deferred to 2.6, since redirect-count and size-cap are inseparable from this guard's own logic — 2.6 may override its own instance's values later). Hostile-proof test: a literal private/loopback/metadata URL rejected before any connection attempt | Not started |
 | 2.3.d | Redirect-chain handling: wraps 2.3.c in a loop — each 3xx response re-runs the ENTIRE 2.3.a→2.3.b→2.3.c validation cycle on the new `Location` target from scratch, never carrying a prior hop's validation forward. Hard cap at the configured redirect count (default 3), failing closed past it. Hostile-proof test: a chain starting at a validated-safe address that redirects to an unsafe one at hop 2 (not hop 1), caught at that exact hop; an excessive-redirect-count chain rejected | Not started |
 | 2.3.e | Close-out: restore `file`/`meta_tag` to `verified_domains.method`'s `CheckConstraint` (new migration), resolving the one Step-2.2-owned Open marker naming this step; confirm docs/SPEC.md §16's acceptance line ("blocked, including through redirects and DNS rebinding") is covered end-to-end by 2.3.b–d's own live tests; update PROJECT_SPEC.md | Not started |
 
 ## 8. Task counter since the last duplication check
 
-n = 1 — 2.3.a counted (see its decision log entry above).
+n = 2 — 2.3.a and 2.3.b counted (see their decision log entries above).
 
 ## 9. Open markers
 
