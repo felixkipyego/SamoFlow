@@ -92,14 +92,50 @@ class Document(Base):
     content_hash: Mapped[str | None] = mapped_column(String, nullable=True)
     etag: Mapped[str | None] = mapped_column(String, nullable=True)
     last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), **TIMESTAMP_NOW)
+    # pending (fetched, not yet extracted) / extracted (text/chunks exist) /
+    # failed (extraction raised) -- a closed vocabulary matching sources.
+    # type's/jobs.status's own CheckConstraint precedent.
     status: Mapped[str] = mapped_column(String, nullable=False)
 
-    # TODO(2.4): no uniqueness constraint on (source_id, url) / (source_id,
-    # file_name) yet. The "find this document's existing row to update in
-    # place, not duplicate" lookup is 2.4's own logic to design (a partial
-    # unique index would need deciding once that lookup shape is real,
-    # since url and file_name are mutually exclusive) -- not invented
-    # speculatively here.
+    # Task 2.4.a: url and file_name are mutually exclusive per row -- a web
+    # source (urls/crawl) sets url, an upload sets file_name -- but NEITHER
+    # is set for a `database` source's own documents (docs/SPEC.md §5.1's
+    # fourth adapter type: a row/table extraction has no URL and no
+    # filename at all). The class comment above only named two of the
+    # three real cases; a document with both columns NULL is therefore a
+    # genuinely valid state, not a gap to close here, so no "at least one
+    # of url/file_name must be set" CheckConstraint is added.
+    #
+    # TWO separate partial unique indexes, not one combined index: the
+    # mutual exclusivity means a (source_id, url) collision and a
+    # (source_id, file_name) collision are two independent uniqueness
+    # rules with no row ever needing to be compared on both at once.
+    # postgresql_where="... IS NOT NULL" is NOT functionally required to
+    # stop two NULL rows from colliding -- confirmed live (Postgres never
+    # considers two NULLs equal under a plain unique index, so unmatched
+    # NULL rows already coexist with no guard at all) -- it is added
+    # anyway purely for explicitness, matching verified_domains's own
+    # partial-index precedent of stating the intended scope rather than
+    # relying on an incidental side effect of NULL semantics.
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('pending', 'extracted', 'failed')", name="ck_documents_status"
+        ),
+        Index(
+            "ix_documents_source_id_url_unique",
+            "source_id",
+            "url",
+            unique=True,
+            postgresql_where=text("url IS NOT NULL"),
+        ),
+        Index(
+            "ix_documents_source_id_file_name_unique",
+            "source_id",
+            "file_name",
+            unique=True,
+            postgresql_where=text("file_name IS NOT NULL"),
+        ),
+    )
 
 
 class DbConnection(Base):

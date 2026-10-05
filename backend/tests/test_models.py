@@ -154,6 +154,38 @@ def test_verified_domains_active_domain_unique_index_is_partial():
     assert "revoked" in str(where_clause)
 
 
+def test_documents_url_unique_index_is_partial_and_scoped_to_source():
+    # Task 2.4.a: url/file_name are mutually exclusive per row, so each
+    # gets its OWN partial unique index rather than one combined index --
+    # see app/ingest/models.py's Document class for the full reasoning.
+    # Must genuinely be PARTIAL (postgresql_where), not a full unique
+    # constraint wearing a different name; checked directly on the Index
+    # object's own dialect kwargs, matching
+    # test_verified_domains_active_domain_unique_index_is_partial's own
+    # pattern above. The live proof that Postgres itself honors this is
+    # test_alembic.py's job, against a real migration.
+    table = Base.metadata.tables["documents"]
+    (index,) = [i for i in table.indexes if i.name == "ix_documents_source_id_url_unique"]
+    assert index.unique is True
+    assert [c.name for c in index.columns] == ["source_id", "url"]
+    where_clause = index.dialect_options["postgresql"]["where"]
+    assert where_clause is not None, "index has no postgresql_where -- it is not partial"
+    assert "url IS NOT NULL" in str(where_clause)
+
+
+def test_documents_file_name_unique_index_is_partial_and_scoped_to_source():
+    # Task 2.4.a: the file_name-side twin of the url partial index above.
+    table = Base.metadata.tables["documents"]
+    (index,) = [
+        i for i in table.indexes if i.name == "ix_documents_source_id_file_name_unique"
+    ]
+    assert index.unique is True
+    assert [c.name for c in index.columns] == ["source_id", "file_name"]
+    where_clause = index.dialect_options["postgresql"]["where"]
+    assert where_clause is not None, "index has no postgresql_where -- it is not partial"
+    assert "file_name IS NOT NULL" in str(where_clause)
+
+
 def test_audit_log_has_no_tenant_id_column():
     # Task 2.2.a: deliberately a platform-level log, not tenant-scoped --
     # confirmed, not merely absent by oversight (see app/ingest/models.py's

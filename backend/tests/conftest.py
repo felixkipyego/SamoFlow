@@ -513,6 +513,10 @@ EXPECTED_STATUS_CHECK_CONSTRAINTS = {
         ("ck_verified_domains_method", frozenset({"dns", "file", "meta_tag"})),
         ("ck_verified_domains_status", frozenset({"pending", "verified", "revoked"})),
     ],
+    # Task 2.4.a: pending (fetched, not yet extracted) / extracted (text/
+    # chunks exist) / failed (extraction raised) -- see app/ingest/
+    # models.py's Document class for the full vocabulary reasoning.
+    "documents": [("ck_documents_status", frozenset({"pending", "extracted", "failed"}))],
 }
 
 # Composite unique indexes, keyed by table -- same (name, value) shape as

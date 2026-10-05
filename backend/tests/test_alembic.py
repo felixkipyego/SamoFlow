@@ -385,6 +385,23 @@ def test_upgrade_head_is_idempotent_and_never_prints_the_password(_test_engine):
         assert index["unique"] is True
         assert index["column_names"] == columns
 
+    # Task 2.4.a: documents' own two partial unique indexes -- same
+    # pattern as verified_domains's own partial-index check above, one
+    # dedicated assertion per index since each is scoped to a different
+    # column (url vs. file_name), not something EXPECTED_UNIQUE_INDEXES'
+    # generic loop (plain, non-partial indexes only) can express.
+    documents_indexes = inspector.get_indexes("documents")
+    (documents_url_index,) = [
+        i for i in documents_indexes if i["name"] == "ix_documents_source_id_url_unique"
+    ]
+    assert documents_url_index["unique"] is True
+    assert documents_url_index["column_names"] == ["source_id", "url"]
+    (documents_file_name_index,) = [
+        i for i in documents_indexes if i["name"] == "ix_documents_source_id_file_name_unique"
+    ]
+    assert documents_file_name_index["unique"] is True
+    assert documents_file_name_index["column_names"] == ["source_id", "file_name"]
+
     # Task 2.1.b: db_connections.encrypted_credentials needs pgcrypto --
     # the real migration (not just the test fixture's own workaround,
     # 2.1.a's own bug) must be the thing that enables it.
@@ -669,6 +686,156 @@ def test_downgrade_from_head_removes_verified_domains_and_audit_log(_test_engine
 
     restored = _run_alembic("upgrade", "head", engine=engine)
     assert restored.returncode == 0, restored.stdout + restored.stderr
+
+
+def test_downgrade_from_head_removes_documents_status_check_and_partial_indexes(_test_engine):
+    # Task 2.4.a: the same C1 pattern as the three downgrade tests above
+    # -- proves downgrade() actually removes ck_documents_status and both
+    # partial indexes from a real database.
+    #
+    # Investigated per this task's own point 4 whether a durable, GENERAL
+    # fix exists for the stale-head bug that hit this project three times
+    # (the visitor-index/tenant-status-check test above, found live at
+    # Task 2.1.b; the ingestion-tables test above, found live at Task
+    # 2.2.b; the verified_domains/audit_log test above, found live at
+    # Task 2.3.e) -- each originally wrote upgrade "head" + downgrade
+    # "-1", which broke the moment a later migration landed on top and
+    # moved what "head" meant -- rather than hardcoding a 4th time.
+    # Finding: the fix already applied to all three prior tests --
+    # upgrade to THIS migration's own specific, immutable revision ID
+    # (never the word "head"), then downgrade "-1" (one relative step)
+    # from there -- IS already the durable, general fix, not a stopgap
+    # waiting to be replaced. A revision ID never changes meaning once
+    # committed (this project's own rule 2: completed tasks, including
+    # past migrations, are never modified), so pinning to one can never
+    # go stale no matter how many later migrations land on top. The
+    # alternative this task's own wording raises -- deriving "the
+    # previous head" dynamically via Alembic's ScriptDirectory/revision-
+    # walking API -- would be WORSE, not more durable: these tests
+    # deliberately target a SPECIFIC historical migration, not "whatever
+    # head happens to be today"; a helper that resolves "current head"
+    # dynamically is the exact same fragile assumption the original bug
+    # made, just relocated into a helper function instead of the literal
+    # word "head". No retroactive change was needed to the three prior
+    # tests -- they already use this pattern correctly. This new test
+    # applies the identical pattern from the start: upgrade to
+    # 3f3fbac167b7 explicitly (this migration's own revision ID, which by
+    # definition cannot drift), downgrade "-1" from there.
+    engine = _test_engine
+    _reset_public_schema(engine)
+    migrated = _run_alembic("upgrade", "3f3fbac167b7", engine=engine)
+    assert migrated.returncode == 0, migrated.stdout + migrated.stderr
+
+    downgraded = _run_alembic("downgrade", "-1", engine=engine)
+    assert downgraded.returncode == 0, downgraded.stdout + downgraded.stderr
+
+    inspector = sa.inspect(engine)
+    document_check_names = {c["name"] for c in inspector.get_check_constraints("documents")}
+    assert "ck_documents_status" not in document_check_names
+
+    document_index_names = {i["name"] for i in inspector.get_indexes("documents")}
+    assert "ix_documents_source_id_url_unique" not in document_index_names
+    assert "ix_documents_source_id_file_name_unique" not in document_index_names
+
+    restored = _run_alembic("upgrade", "head", engine=engine)
+    assert restored.returncode == 0, restored.stdout + restored.stderr
+
+
+def test_documents_url_and_file_name_constraints_enforced_by_the_database(_test_engine):
+    # Task 2.4.a: the real security/data-integrity property the status
+    # CheckConstraint and the two partial unique indexes exist to protect
+    # -- proves Postgres itself enforces each one, not just that they're
+    # declared in the model/migration (test_models.py's own backstop).
+    engine = _test_engine
+    _reset_public_schema(engine)
+    migrated = _run_alembic("upgrade", "head", engine=engine)
+    assert migrated.returncode == 0, migrated.stdout + migrated.stderr
+
+    with engine.connect() as connection:
+        connection.execute(
+            sa.text("INSERT INTO tenants (name, status) VALUES ('Tenant Docs', 'active')")
+        )
+        connection.execute(
+            sa.text(
+                "INSERT INTO sources (tenant_id, type, refresh_interval, status) "
+                "SELECT id, 'urls', 'daily', 'active' FROM tenants WHERE name = 'Tenant Docs'"
+            )
+        )
+        connection.commit()
+
+    insert_document = (
+        "INSERT INTO documents (tenant_id, source_id, url, file_name, status, last_seen_at) "
+        "SELECT t.id, s.id, :url, :file_name, :status, now() "
+        "FROM tenants t JOIN sources s ON s.tenant_id = t.id WHERE t.name = 'Tenant Docs'"
+    )
+
+    with engine.connect() as connection:
+        # Two different urls, same source_id: both succeed.
+        connection.execute(
+            sa.text(insert_document),
+            {"url": "https://example.com/a", "file_name": None, "status": "pending"},
+        )
+        connection.execute(
+            sa.text(insert_document),
+            {"url": "https://example.com/b", "file_name": None, "status": "pending"},
+        )
+        connection.commit()
+
+    # Duplicate (source_id, url): rejected.
+    with engine.connect() as connection, pytest.raises(IntegrityError):
+        connection.execute(
+            sa.text(insert_document),
+            {"url": "https://example.com/a", "file_name": None, "status": "pending"},
+        )
+        connection.commit()
+
+    with engine.connect() as connection:
+        connection.execute(
+            sa.text(insert_document),
+            {"url": None, "file_name": "report.pdf", "status": "pending"},
+        )
+        connection.commit()
+
+    # Duplicate (source_id, file_name): rejected.
+    with engine.connect() as connection, pytest.raises(IntegrityError):
+        connection.execute(
+            sa.text(insert_document),
+            {"url": None, "file_name": "report.pdf", "status": "pending"},
+        )
+        connection.commit()
+
+    # Neither url nor file_name set: allowed -- a `database`-source
+    # document has neither (see app/ingest/models.py's Document class).
+    with engine.connect() as connection:
+        connection.execute(
+            sa.text(insert_document),
+            {"url": None, "file_name": None, "status": "pending"},
+        )
+        connection.commit()
+
+    # Invalid status: rejected.
+    with engine.connect() as connection, pytest.raises(IntegrityError):
+        connection.execute(
+            sa.text(insert_document),
+            {"url": None, "file_name": "bad-status.txt", "status": "bogus"},
+        )
+        connection.commit()
+
+    # All three valid statuses: succeed.
+    with engine.connect() as connection:
+        connection.execute(
+            sa.text(insert_document),
+            {"url": None, "file_name": "a-extracted.txt", "status": "extracted"},
+        )
+        connection.execute(
+            sa.text(insert_document),
+            {"url": None, "file_name": "b-failed.txt", "status": "failed"},
+        )
+        connection.commit()
+
+    with engine.connect() as connection:
+        (count,) = connection.execute(sa.text("SELECT count(*) FROM documents")).one()
+    assert count == 6
 
 
 def test_verified_domains_partial_index_rejects_active_duplicate_frees_on_revoke(_test_engine):
