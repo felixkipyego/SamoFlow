@@ -1153,6 +1153,28 @@ A production-ready, multi-tenant, embeddable AI widget platform: one website is 
 
 - 2026-10-05: Duplication check after 2.4.b/c/d: confirmed `ExtractedContent`/`ContentBlock` genuinely fits both HTML and PDF without forcing (typed for absence/variable-cardinality from the start, before PDF existed); extracted shared fixture-loading helpers; documented the standalone-rerun-3x verification convention; committed the PDF fixture generator script for future reuse; closed a real zero-regression-coverage gap by proving `chunk_text()` against real PDF-extracted content end-to-end; A2/B2 declined as premature/already-confirmed-safe.
 
+- 2026-10-05: Step 2.4.e — DOCX extraction primitive (new `backend/app/ingest/extract_docx.py`: `extract_docx()`, reusing 2.4.b's own `ExtractedContent`/`ContentBlock` unchanged; new dependency `python-docx==1.2.0`; new `backend/tests/test_extract_docx.py` plus two new real fixture `.docx` files and their committed generator, `backend/tests/fixtures/docx/generate_fixtures.py`; `read_docx_fixture()` added to `conftest.py`, matching the HTML/PDF helper convention from the prior duplication check).
+
+  **`python-docx==1.2.0`, re-verified live on PyPI at this task's own build time**: requires `>=3.9`; pure Python (`py3-none-any` wheel only). Its own two declared dependencies (`lxml>=3.1.0`, `typing_extensions>=4.9.0`) were both already satisfied by existing pins (`lxml==6.1.3` from Task 2.4.b) — confirmed live: `make lock` (using 2.4.c's own `-c`-constrained mechanism) gained exactly ONE new entry in both lockfiles, `python-docx==1.2.0` (2 hashes, wheel + sdist, no sdist-only surprise), no removals, no version bumps elsewhere, no repeat of the cross-lockfile conflict class. `make lock-check`/`make audit` both clean.
+
+  **Multi-block shape confirmed correct, not PDF's flattened one**: unlike PDF's plain text, a DOCX genuinely carries semantic heading structure via Word's own built-in paragraph styles — `extract_docx()` produces HTML's richer multi-`ContentBlock` shape, each with a real, non-empty `heading_path` where applicable, matching the user's own expectation exactly.
+
+  **Heading-level detection, confirmed live, not assumed**: `paragraph.style.name` for Word's built-in heading styles is exactly `"Heading 1"` through `"Heading 9"` — confirmed by building and re-reading a real probe document. Word's own level-0 `add_heading(level=0)` call maps to the SEPARATE `"Title"` style, confirmed not to collide with `"Heading N"` parsing. Detection is scoped to levels 1–6 only via `^Heading ([1-6])$`, matching HTML's own h1–h6 scope exactly (a symmetric design choice, not arbitrary) — `"Heading 7/8/9"` are real built-in styles but deliberately out of scope, the same way HTML has no h7/h8/h9. Confirmed live that the auto-generated `"TOC Heading"` style does NOT collide (it ends with, not starts with, "Heading"). Non-English Word templates (e.g. `"Titre 1"`) are not handled — already covered by this project's own existing "English only for v1" constraint (docs/SPEC.md §3), not a new gap needing its own marker.
+
+  **heading_path algorithm: the SAME document-order stack algorithm as `extract_html.py`'s own, confirmed to apply directly, not a divergent one.** The difference is that DOCX needs none of HTML's own "an h3 is a DOM SIBLING of h2, never its child" workaround — `document.paragraphs` is already a flat, ordered sequence with no nesting concept at all, so the identical stack-based breadcrumb algorithm applies even more directly here. Verified against a real 4-block, 3-level fixture (`nested_headings.docx`): identical path shape to HTML's own `nested_headings.html` fixture, including a later sibling Heading 2 correctly ending both the prior Heading 2 and Heading 3.
+
+  **`title`: `core_properties.title`, confirmed live to need normalization.** python-docx returns an empty STRING (`""`), not `None`, when no title is set — confirmed by building and re-reading a real probe document with no title property set. Normalized to `None` here so `ExtractedContent`'s own "no title" contract stays consistent with `extract_html.py`'s behavior. Same honest caveat as PDF's `/Info /Title`: may be empty or unreliable depending on how the document was authored — but structurally more meaningful than PDF's when populated, a real Word "File > Properties > Title" field, not a loosely-defined producer convention.
+
+  **Fixture construction: python-docx's own document-writing API, considerably simpler than the PDF fixtures' hand-rolled byte-offset construction** — `doc.add_heading()`/`doc.add_paragraph()` directly, no manual object/xref assembly needed at all, since python-docx (unlike pypdf) has a real writing API. Generator committed at `backend/tests/fixtures/docx/generate_fixtures.py`, matching the discipline just established for PDF — confirmed live it reproduces both fixtures and all tests still pass after a fresh run. Confirmed via `--collect-only` that pytest's own default `python_files` pattern never picks it up.
+
+  **Malformed input: confirmed live, same precedent as `extract_pdf.py` (left uncaught, not wrapped).** A DOCX is a ZIP archive — truncating a real fixture's own bytes raises `zipfile.BadZipFile` (a standard-library exception, not python-docx-specific), already clear and specific. python-docx also exposes its own `docx.opc.exceptions.PackageNotFoundError` for certain other package-level failures; neither is caught or re-wrapped here, for the same "no existing caller-facing contract needs a different shape" reasoning as PDF.
+
+  **`chunk_text()`/`compute_content_hash()` proven against real DOCX-extracted content from the start** — per the duplication check after 2.4.b/c/d's own finding that this coverage gap must not recur for a third format. Confirmed live and in a committed test: zero code changes needed in `chunking.py` for either function to handle DOCX's shape correctly, confirming the shared `ExtractedContent` abstraction really does eliminate format-specific branching downstream, exactly as intended.
+
+  ASSUMPTION: none needed — the style-name format, the Title-vs-Heading-0 distinction, the TOC Heading non-collision, the empty-string title behavior, and the malformed-input exception type were all verified live. UNCERTAIN: none. TODO: none new. Current task set to 2.4.f, next to 2.4.g. **Counter reaches n=1.**
+
+  Verified: `make lint` clean. New test file run standalone, re-run 3 times for stability: **7 passed** every time, ~0.5s each run. Full `backend/tests` without a test database: **444 passed, 151 skipped** (up from 437 passed, 151 skipped — exactly the 7 new tests, 0 new skips). `make lock-check` clean. `make audit`: no known vulnerabilities. `git status --short` named and cross-checked file by file: `backend/pyproject.toml`, `backend/requirements.lock`, `backend/requirements-dev.lock`, `backend/tests/conftest.py` (modified, purely additive — confirmed via `git diff --stat`, 5 insertions only) plus `backend/app/ingest/extract_docx.py`, `backend/tests/test_extract_docx.py`, `backend/tests/fixtures/docx/` (new) — exactly the expected seven, `.env` correctly absent.
+
 ### Estimates to measure
 
 - The default limits in §9 and the budgets in §17 are starting points.
@@ -1176,9 +1198,9 @@ A production-ready, multi-tenant, embeddable AI widget platform: one website is 
 
 ## 7. Current task and next task
 
-Current: Step 2.4.e.
-Next: Step 2.4.f.
-Do not modify (completed tasks): 1.1.a, 1.1.b, 1.1.c, 1.1.d, 1.1.e, 1.1.f, 1.1.g, 1.1.h, 1.1.i, 1.1.j, 1.1.k, 1.1.l, 1.1.m, 1.1.n, 1.1.o.a, 1.1.o.b, 1.1.o.c, 1.1.o.d, 1.1.o.e, 1.1.o.f, 1.1.o.g, 1.1.o.h, 1.1b, 1.1c, 1.2.a, 1.2.b, 1.2.c, 1.2.d, 1.2.e, 1.2.f, 1.3.a1, 1.3.a2, 1.3.b, 1.3.c, 1.3.d, 1.3.e, 1.3.f, 1.4.a, 1.4.b, 1.4.c, 1.4.d, 1.4.e, 1.4.f, 1.4.g, 1.4.h, 1.4.i, 1.4.j, 1.4.k, 1.4.l, 1.5.a, 1.5.b, 1.5.c, 1.5.d, 1.5.e, 1.5.f, 1.6.a, 1.6.b, 1.6.c, 1.6.d, 1.6.e, 2.1.a, 2.1.b, 2.1.c, 2.1.d, 2.1.e, 2.1.f, 2.1.g, 2.1.h, 2.2.a, 2.2.b, 2.2.c, 2.2.d, 2.2.e, 2.2.f, 2.2.g, 2.2.h, 2.2.i, 2.3.a, 2.3.b, 2.3.c, 2.3.d, 2.3.e, 2.4.a, 2.4.b, 2.4.c, 2.4.d.
+Current: Step 2.4.f.
+Next: Step 2.4.g.
+Do not modify (completed tasks): 1.1.a, 1.1.b, 1.1.c, 1.1.d, 1.1.e, 1.1.f, 1.1.g, 1.1.h, 1.1.i, 1.1.j, 1.1.k, 1.1.l, 1.1.m, 1.1.n, 1.1.o.a, 1.1.o.b, 1.1.o.c, 1.1.o.d, 1.1.o.e, 1.1.o.f, 1.1.o.g, 1.1.o.h, 1.1b, 1.1c, 1.2.a, 1.2.b, 1.2.c, 1.2.d, 1.2.e, 1.2.f, 1.3.a1, 1.3.a2, 1.3.b, 1.3.c, 1.3.d, 1.3.e, 1.3.f, 1.4.a, 1.4.b, 1.4.c, 1.4.d, 1.4.e, 1.4.f, 1.4.g, 1.4.h, 1.4.i, 1.4.j, 1.4.k, 1.4.l, 1.5.a, 1.5.b, 1.5.c, 1.5.d, 1.5.e, 1.5.f, 1.6.a, 1.6.b, 1.6.c, 1.6.d, 1.6.e, 2.1.a, 2.1.b, 2.1.c, 2.1.d, 2.1.e, 2.1.f, 2.1.g, 2.1.h, 2.2.a, 2.2.b, 2.2.c, 2.2.d, 2.2.e, 2.2.f, 2.2.g, 2.2.h, 2.2.i, 2.3.a, 2.3.b, 2.3.c, 2.3.d, 2.3.e, 2.4.a, 2.4.b, 2.4.c, 2.4.d, 2.4.e.
 
 ### Step 1.1 task list (approved)
 
@@ -1572,13 +1594,13 @@ new Qdrant/job-queue wiring here, matching 2.3's own precedent.
 | 2.4.b | HTML extraction primitive: strips scripts/styles/hidden elements (shared logic, called by 2.6 — not duplicated there), extracts `<title>`, derives `heading_path` from `h1`–`h6`, flags "nearly empty" pages (under 50 words of extracted text, a module constant). New dependency: `beautifulsoup4` + `lxml` | Done |
 | 2.4.c | Chunking primitive: 512 tokens/64 overlap (module constants, matching `DENSE_VECTOR_SIZE`'s own precedent — not `Settings` fields), heading-path-aware, deterministic (same input → byte-identical chunks every time — load-bearing for §5.3's "a re-run overwrites instead of duplicating"); computes `content_hash` over the normalized/extracted text, not raw fetched bytes (shared here, not duplicated per adapter). Tested against 2.4.b's own real extracted output, not only synthetic text. New dependency: `tiktoken` | Done |
 | 2.4.d | PDF extraction primitive: text only, flat/empty `heading_path` (no font-size/layout heuristic — rule 11). New dependency: `pypdf` | Done |
-| 2.4.e | DOCX extraction primitive: heading PARAGRAPH STYLES (Heading 1/2/etc.) map to `heading_path`. New dependency: `python-docx` | Not started |
+| 2.4.e | DOCX extraction primitive: heading PARAGRAPH STYLES (Heading 1/2/etc.) map to `heading_path`. New dependency: `python-docx` | Done |
 | 2.4.f | TXT/MD extraction primitive: plain text passthrough for `.txt` (flat/empty `heading_path`); hand-rolled `#`-marker heading detection for `.md` (no new dependency). | Not started |
 | 2.4.g | Close-out: reassign the four `2.4–2.8`-range markers (stuck-job reaper, `HEARTBEAT_STALE_MULTIPLIER`, `job_type` naming, `enqueue()`'s unchecked `source_id`) to Step 2.6, the first real adapter with a real `job_type` and real `enqueue()` calls; reassign the "already-indexed content stays answerable" live re-proof marker to Step 2.5 (2.4 never touches Qdrant); update PROJECT_SPEC.md | Not started |
 
 ## 8. Task counter since the last duplication check
 
-n = 0 — reset after the duplication check following 2.4.b/c/d.
+n = 1 — 2.4.e counted (see its decision log entry below).
 
 ## 9. Open markers
 
