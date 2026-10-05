@@ -57,7 +57,12 @@ from io import BytesIO
 
 from docx import Document
 
-from app.ingest.extract_html import ContentBlock, ExtractedContent
+from app.ingest.extract_html import (
+    ContentBlock,
+    ExtractedContent,
+    current_heading_path,
+    push_heading,
+)
 
 _HEADING_STYLE_RE = re.compile(r"^Heading ([1-6])$")
 
@@ -83,11 +88,10 @@ def extract_docx(docx_bytes: bytes) -> ExtractedContent:
 
         level = _heading_level(paragraph.style.name)
         if level is not None:
-            heading_stack = [h for h in heading_stack if h[0] < level]
-            heading_stack.append((level, text))
+            heading_stack = push_heading(heading_stack, level, text)
             continue
 
-        blocks.append(ContentBlock(heading_path=tuple(h[1] for h in heading_stack), text=text))
+        blocks.append(ContentBlock(heading_path=current_heading_path(heading_stack), text=text))
 
     word_count = len(" ".join(all_paragraph_texts).split())
     return ExtractedContent(title=title, blocks=tuple(blocks), word_count=word_count)

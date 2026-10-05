@@ -77,7 +77,12 @@
 # bytes). str input is passed through with no decoding at all.
 import re
 
-from app.ingest.extract_html import ContentBlock, ExtractedContent
+from app.ingest.extract_html import (
+    ContentBlock,
+    ExtractedContent,
+    current_heading_path,
+    push_heading,
+)
 
 _ATX_HEADING_RE = re.compile(r"^(#{1,6}) (.*)$")
 _FENCE_RE = re.compile(r"^(`{3,}|~{3,})")
@@ -110,9 +115,7 @@ def extract_markdown(content: bytes | str) -> ExtractedContent:
             block_text = "\n".join(current_block_lines).strip()
             if block_text:
                 blocks.append(
-                    ContentBlock(
-                        heading_path=tuple(h[1] for h in heading_stack), text=block_text
-                    )
+                    ContentBlock(heading_path=current_heading_path(heading_stack), text=block_text)
                 )
                 all_text_parts.append(block_text)
         current_block_lines.clear()
@@ -136,8 +139,7 @@ def extract_markdown(content: bytes | str) -> ExtractedContent:
             flush()
             level = len(heading_match.group(1))
             heading_text = heading_match.group(2).strip()
-            heading_stack = [h for h in heading_stack if h[0] < level]
-            heading_stack.append((level, heading_text))
+            heading_stack = push_heading(heading_stack, level, heading_text)
             all_text_parts.append(heading_text)
             if level == 1 and title is None:
                 title = heading_text

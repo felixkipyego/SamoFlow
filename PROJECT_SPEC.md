@@ -1205,6 +1205,14 @@ A production-ready, multi-tenant, embeddable AI widget platform: one website is 
 
   Verified fresh, not copied from a prior entry: `make lint` clean; full `backend/tests` without a test database: **451 passed, 151 skipped** (unchanged — this task touches no code or tests); `make lock-check` clean; `make audit`: no known vulnerabilities (confirming the 2.4.c tooling fix still holds). `git status --short` showed exactly the one expected file (`PROJECT_SPEC.md`), `.env` correctly absent.
 
+- 2026-10-05: Duplication check after 2.4.e/f/g: extracted the shared heading-stack-maintenance helper (now at its 3rd occurrence across HTML/DOCX/text extractors) while deliberately leaving each format's own outer traversal loop separate (different iteration shapes don't share a meaningful abstraction); added a cross-format consistency test proving HTML/DOCX/Markdown's independently-implemented heading algorithms produce comparable output for comparable input, using fixtures that already happened to share identical heading text; declined a speculative `extract_content()` dispatcher as premature with no real caller yet, and confirmed fixture-loading/generator-script conventions are already fully consistent across all five extractors.
+
+  **A1**: `push_heading(stack, level, text)` / `current_heading_path(stack)` (new, `app/ingest/extract_html.py`, where the algorithm originated) replace the identical 2-line stack-pop/push pair and `tuple(h[1] for h in ...)` construction that `extract_docx.py` and `extract_text.py`'s own `extract_markdown()` had each repeated verbatim. All three callers' own outer traversal loops (BeautifulSoup tags, python-docx paragraphs, raw text lines) stay separate, on purpose — confirmed by inspection that they share nothing beyond this one tuple-level bookkeeping step. **C1**: `test_extract_consistency.py` (new) — confirmed live before writing it that `nested_headings.html`/`.docx`/`.md` already share identical heading text, so `extract_html()`'s and `extract_docx()`'s own 4-block `heading_path` sequences are directly comparable (and found to be byte-identical); Markdown's own fixture has one extra block (the fenced code block under "Subsection") excluded by its own known text, not position, so the comparison stays meaningful if unrelated prose changes order later. **Declined**: **A2** (no change to the 5 fixture-loading helpers or the 2 generator scripts — checked, already fully consistent in naming and shape). **B1** (a single `extract_content(bytes, content_type)` dispatcher — premature with no real caller yet; the identical reasoning already used to reject a format-flag version of `extract_text`/`extract_markdown` applies at the cross-format level too).
+
+  ASSUMPTION: none needed. UNCERTAIN: none. TODO: none new. Current task stays Step 2.5, next stays "Step 2.5 breakdown". **Counter reset to n=0.**
+
+  Verified: `make lint` clean. New test file run standalone, re-run 3 times for stability: **1 passed** every time, ~0.3s each run. Full `backend/tests` without a test database: **452 passed, 151 skipped** (up from 451 passed, 151 skipped — exactly the 1 new test, 0 new skips). Test-name diff (`git diff` restricted to `^[+-](async )?def test_` across the three modified source files): empty — zero test functions touched or renamed, confirming the refactor changed no test-facing behavior; all 32 pre-existing tests across `test_extract_html.py`/`test_extract_docx.py`/`test_extract_text.py`/`test_chunking.py` re-run and passed unchanged. `git status --short` named and cross-checked file by file: `backend/app/ingest/extract_html.py`, `backend/app/ingest/extract_docx.py`, `backend/app/ingest/extract_text.py` (modified) plus `backend/tests/test_extract_consistency.py` (new) — exactly the expected four, `.env` correctly absent.
+
 ### Estimates to measure
 
 - The default limits in §9 and the budgets in §17 are starting points.
@@ -1652,7 +1660,7 @@ here.
 
 ## 8. Task counter since the last duplication check
 
-n = 3 — 2.4.e, 2.4.f and 2.4.g counted (see their decision log entries below).
+n = 0 — reset after the duplication check following 2.4.e/f/g.
 
 ## 9. Open markers
 

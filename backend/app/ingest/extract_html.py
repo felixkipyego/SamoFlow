@@ -59,6 +59,24 @@ class ExtractedContent:
         return self.word_count < NEARLY_EMPTY_WORD_THRESHOLD
 
 
+# Duplication check after 2.4.e/f/g: the document-order heading-stack
+# maintenance logic below -- pop every stacked entry at the new
+# heading's own level or deeper, then push it -- was implemented
+# identically three times (here, extract_docx.py, extract_text.py) once
+# Markdown became the 3rd occurrence, crossing this project's own
+# extraction threshold. Shared here, where the algorithm originated;
+# the three callers' own OUTER traversal loops (BeautifulSoup tags,
+# python-docx paragraphs, raw text lines) stay separate on purpose --
+# different iteration shapes don't share a meaningful abstraction, only
+# this tuple-level bookkeeping does.
+def push_heading(stack: list[tuple[int, str]], level: int, text: str) -> list[tuple[int, str]]:
+    return [*(h for h in stack if h[0] < level), (level, text)]
+
+
+def current_heading_path(stack: list[tuple[int, str]]) -> tuple[str, ...]:
+    return tuple(text for _, text in stack)
+
+
 def _is_hidden(tag: Tag) -> bool:
     # Step 2.4.b decision: covers the four hiding mechanisms a real
     # tenant page is realistically likely to use, each a cheap, direct
@@ -122,15 +140,12 @@ def extract_html(html: str) -> ExtractedContent:
     for tag in body.find_all([*_HEADING_TAGS, "p"]):
         if tag.name in _HEADING_TAGS:
             level = int(tag.name[1])
-            heading_stack = [h for h in heading_stack if h[0] < level]
-            heading_stack.append((level, tag.get_text(strip=True)))
+            heading_stack = push_heading(heading_stack, level, tag.get_text(strip=True))
             continue
         text = tag.get_text(strip=True)
         if not text:
             continue
-        blocks.append(
-            ContentBlock(heading_path=tuple(h[1] for h in heading_stack), text=text)
-        )
+        blocks.append(ContentBlock(heading_path=current_heading_path(heading_stack), text=text))
 
     word_count = len(body.get_text(separator=" ", strip=True).split())
 
