@@ -63,6 +63,7 @@ _HARMLESS_ENV = {
     "JWT_SIGNING_KEY": "harmless-jwt-signing-key-32-chars-ok",  # noqa: S105
     "DB_CONNECTION_ENCRYPTION_KEY": "harmless-db-connection-key-32-chars-ok",  # noqa: S105
     "ADMIN_API_KEY": "harmless-admin-key-at-least-32-chars-ok",  # noqa: S105
+    "OPENAI_API_KEY": "harmless-openai-key",  # noqa: S105 (test fixture value, not a real secret)
     "API_HOST": "127.0.0.1",
     "API_PORT": "8000",
 }
@@ -229,7 +230,7 @@ def test_alembic_subprocess_env_excludes_stray_libpq_variables(monkeypatch):
     assert "PGUSER" not in env
 
 
-def test_alembic_subprocess_env_has_exactly_the_nine_settings_variables_plus_path_and_home(
+def test_alembic_subprocess_env_has_exactly_the_ten_settings_variables_plus_path_and_home(
     monkeypatch,
 ):
     monkeypatch.setenv("SOME_OTHER_STRAY_VAR", "should-not-be-inherited")
@@ -244,6 +245,7 @@ def test_alembic_subprocess_env_has_exactly_the_nine_settings_variables_plus_pat
         "JWT_SIGNING_KEY",
         "DB_CONNECTION_ENCRYPTION_KEY",
         "ADMIN_API_KEY",
+        "OPENAI_API_KEY",
         "API_HOST",
         "API_PORT",
     }

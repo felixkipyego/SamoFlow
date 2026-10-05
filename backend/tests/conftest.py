@@ -267,6 +267,7 @@ VALID_ENV = {
     "JWT_SIGNING_KEY": "test-jwt-signing-key-at-least-32-chars",  # noqa: S105
     "DB_CONNECTION_ENCRYPTION_KEY": "test-db-connection-key-at-least-32-chars",  # noqa: S105
     "ADMIN_API_KEY": "test-admin-key-at-least-32-characters-long",  # noqa: S105
+    "OPENAI_API_KEY": "test-openai-key",  # noqa: S105 (test fixture value, not a real secret)
     "API_HOST": "127.0.0.1",
     "API_PORT": "8000",
 }

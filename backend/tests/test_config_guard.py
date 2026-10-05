@@ -12,9 +12,11 @@
 # secret-accessor allow-list check itself into a shared
 # check_call_allowlist() helper, tests/conftest.py, reused by
 # test_ingest_repository_guard.py -- the Settings()/errors() checks below
-# stay this file's own, since they differ): parses every .py file under backend/app and
+# stay this file's own, since they differ; Task 2.5.a extends it to
+# openai_api_key_str(), starting ALLOWED_OPENAI_API_KEY_CALLERS with its
+# one real caller, app/ingest/embedding.py): parses every .py file under backend/app and
 # backend/alembic with ast (not text search, so comments/strings never
-# trigger it) and enforces seven rules from PROJECT_SPEC.md's decisions log
+# trigger it) and enforces eight rules from PROJECT_SPEC.md's decisions log
 # (corrected from a stale "five" here -- there were already six distinct
 # rules below before this task added the seventh, not five):
 #   - only app/config.py may construct Settings() directly;
@@ -30,7 +32,9 @@
 #   - only files listed in ALLOWED_DB_CONNECTION_ENCRYPTION_KEY_CALLERS may
 #     call db_connection_encryption_key_str() outside app/config.py;
 #   - only files listed in ALLOWED_ADMIN_API_KEY_CALLERS may call
-#     admin_api_key_str() outside app/config.py.
+#     admin_api_key_str() outside app/config.py;
+#   - only files listed in ALLOWED_OPENAI_API_KEY_CALLERS may call
+#     openai_api_key_str() outside app/config.py.
 import ast
 
 from tests.conftest import BACKEND_DIR, called_name, check_call_allowlist, iter_python_files
@@ -60,6 +64,10 @@ ALLOWED_DB_CONNECTION_ENCRYPTION_KEY_CALLERS: tuple[str, ...] = ("app/ingest/rep
 # receives the real temporary admin key (Task 2.2.f). Review it by hand.
 ALLOWED_ADMIN_API_KEY_CALLERS: tuple[str, ...] = ("app/admin/dependencies.py",)
 
+# NOTE: adding a file here is a deliberate decision: it means that file
+# receives the real OpenAI API key (Task 2.5.a). Review it by hand.
+ALLOWED_OPENAI_API_KEY_CALLERS: tuple[str, ...] = ("app/ingest/embedding.py",)
+
 # Duplication check after 1.3.a1/a2/b: both secret accessors are checked by
 # the same single branch below instead of one copy-pasted elif per accessor
 # -- a third one later needs one entry here, not a third branch. Task 1.4.a
@@ -72,6 +80,7 @@ _SECRET_ACCESSOR_ALLOW_LISTS: dict[str, tuple[str, ...]] = {
     "jwt_signing_key_previous_str": ALLOWED_JWT_KEY_CALLERS,
     "db_connection_encryption_key_str": ALLOWED_DB_CONNECTION_ENCRYPTION_KEY_CALLERS,
     "admin_api_key_str": ALLOWED_ADMIN_API_KEY_CALLERS,
+    "openai_api_key_str": ALLOWED_OPENAI_API_KEY_CALLERS,
 }
 
 

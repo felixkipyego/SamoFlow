@@ -10,7 +10,8 @@
 # for rotation via a future `kid` header -- PyJWT/the token module itself
 # arrive in 1.4.b, this task only adds the secret plumbing). Task 2.1.a
 # adds db_connection_encryption_key (required): the pgcrypto passphrase
-# for db_connections.encrypted_credentials.
+# for db_connections.encrypted_credentials. Task 2.5.a adds openai_api_key
+# (required): the dense-embedding primitive's own API credential.
 #
 # ASSUMPTION: pydantic and pydantic-settings are not new dependencies here.
 # pydantic-settings==2.15.0 is already an approved runtime dependency
@@ -123,6 +124,18 @@ class Settings(BaseSettings):
     # round trips -- retuned later with real load-test numbers if needed
     # (Phase 7), like every other estimate in this project.
     worker_poll_interval_seconds: float = Field(default=2, gt=0)
+    # Task 2.5.a: the dense-embedding primitive's own API credential
+    # (docs/SPEC.md §5.1: "an English embedding model such as
+    # text-embedding-3-small"). Required, same discipline as qdrant_api_key/
+    # admin_api_key -- an unauthenticated embedding call is not a real
+    # failure mode (the API simply refuses it), but a missing key would
+    # silently defer the failure from startup to the first real ingestion
+    # job, which this project's own "fail loud at startup" pattern exists
+    # to avoid. No min_length (matching qdrant_api_key's own treatment,
+    # not jwt_signing_key's): this is an opaque, already-high-entropy
+    # third-party-issued key, not a self-chosen secret needing an
+    # artificial entropy floor.
+    openai_api_key: SecretStr
 
     @field_validator("database_url")
     @classmethod
@@ -182,6 +195,22 @@ class Settings(BaseSettings):
             value.get_secret_value(),
             "DB_CONNECTION_ENCRYPTION_KEY",
             "it is used as a pgcrypto passphrase",
+        )
+        return value
+
+    @field_validator("openai_api_key")
+    @classmethod
+    def _require_a_clean_openai_api_key(cls, value: SecretStr) -> SecretStr:
+        raw = value.get_secret_value()
+        # Message names only the requirement, never the value under
+        # validation, so a bad key cannot leak here.
+        if not raw:
+            raise ValueError("OPENAI_API_KEY must not be empty.")
+        _require_no_whitespace_or_control_chars(
+            raw,
+            "OPENAI_API_KEY",
+            "it is sent as an HTTP Authorization header value; a newline would allow "
+            "header injection",
         )
         return value
 
@@ -259,6 +288,10 @@ class Settings(BaseSettings):
     def admin_api_key_str(self) -> str:
         # The one explicit call that unwraps the secret. Never log this.
         return self.admin_api_key.get_secret_value()
+
+    def openai_api_key_str(self) -> str:
+        # The one explicit call that unwraps the secret. Never log this.
+        return self.openai_api_key.get_secret_value()
 
 
 class SettingsError(Exception):

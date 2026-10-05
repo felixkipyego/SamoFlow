@@ -25,6 +25,7 @@ def test_valid_environment_loads_with_correct_types_and_values(monkeypatch):
     assert settings.jwt_signing_key_str() == VALID_ENV["JWT_SIGNING_KEY"]
     assert settings.jwt_signing_key_previous_str() is None
     assert settings.admin_api_key_str() == VALID_ENV["ADMIN_API_KEY"]
+    assert settings.openai_api_key_str() == VALID_ENV["OPENAI_API_KEY"]
     assert settings.api_host == "127.0.0.1"
     assert settings.api_port == 8000
     assert isinstance(settings.api_port, int)
@@ -77,6 +78,10 @@ def test_missing_required_variable_raises_and_names_field(monkeypatch, missing):
         {"ADMIN_API_KEY": "a" * 20 + " " + "a" * 20},
         {"ADMIN_API_KEY": "a" * 20 + "\t" + "a" * 20},
         {"ADMIN_API_KEY": "a" * 20 + "\n" + "a" * 20},
+        {"OPENAI_API_KEY": ""},
+        {"OPENAI_API_KEY": "has a space"},
+        {"OPENAI_API_KEY": "has\ttab"},
+        {"OPENAI_API_KEY": "has\nnewline"},
         {"API_PORT": "abc"},
         {"API_PORT": "0"},
         {"API_PORT": "70000"},
@@ -181,6 +186,22 @@ def test_get_settings_raises_settings_error_on_malformed_qdrant_api_key(monkeypa
 
 def test_settings_error_chain_never_carries_the_qdrant_api_key(monkeypatch):
     set_valid_env(monkeypatch, VALID_ENV, QDRANT_API_KEY="distinctive-key 123")
+    with pytest.raises(SettingsError) as exc_info:
+        get_settings()
+    err = exc_info.value
+    assert_secret_not_in_exception_chain(err, "distinctive-key")
+    assert err.__cause__ is None
+    assert err.__context__ is None
+
+
+def test_get_settings_raises_settings_error_on_malformed_openai_api_key(monkeypatch):
+    set_valid_env(monkeypatch, VALID_ENV, OPENAI_API_KEY="distinctive-key 123")
+    with pytest.raises(SettingsError):
+        get_settings()
+
+
+def test_settings_error_chain_never_carries_the_openai_api_key(monkeypatch):
+    set_valid_env(monkeypatch, VALID_ENV, OPENAI_API_KEY="distinctive-key 123")
     with pytest.raises(SettingsError) as exc_info:
         get_settings()
     err = exc_info.value
