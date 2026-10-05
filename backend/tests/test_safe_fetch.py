@@ -12,11 +12,17 @@
 #     (127.0.0.1 is categorically unsafe by design, so is_unsafe_
 #     destination_ip() is deliberately monkeypatched for this ONE test,
 #     clearly labeled -- this test is about the streaming/size-cap
-#     mechanism, not the SSRF check); and literal private/loopback/
-#     metadata IP URLs rejected with proof of zero bytes ever sent.
+#     mechanism, not the SSRF check); literal private/loopback/metadata
+#     IP URLs rejected with proof of zero bytes ever sent; and
+#     follow_redirects=False genuinely enforced, not just set in the
+#     code -- a real 3xx response comes back raw and unfollowed.
+#
+# Duplication check after 2.3.a/b/c: the socket.socket.connect-raises
+# proof and the local-HTTPServer lifecycle are now shared helpers
+# (tests/conftest.py's assert_no_socket_connections()/local_http_server())
+# instead of being repeated inline here -- each caller below still
+# defines its own handler class where the behavior actually differs.
 import http.server
-import socket
-import threading
 import time
 
 import httpx
@@ -25,6 +31,7 @@ import pytest
 from app.ingest import safe_fetch as safe_fetch_module
 from app.ingest.host_safety import resolve_and_validate
 from app.ingest.safe_fetch import UnsafeFetchError, _fetch_pinned, safe_fetch
+from tests.conftest import assert_no_socket_connections, local_http_server
 
 # --- Offline / structural ---------------------------------------------------
 
@@ -51,14 +58,7 @@ async def test_host_that_fails_validation_is_rejected_with_zero_connection_attem
     monkeypatch.setattr(
         safe_fetch_module, "resolve_and_validate", _fake_resolve_and_validate
     )
-
-    def _fail_if_connected(self, *args, **kwargs):
-        raise AssertionError(
-            "socket.socket.connect() was called despite resolve_and_validate() "
-            "rejecting the host -- a real connection was attempted"
-        )
-
-    monkeypatch.setattr(socket.socket, "connect", _fail_if_connected)
+    assert_no_socket_connections(monkeypatch)
 
     with pytest.raises(UnsafeFetchError):
         await safe_fetch("http://looks-innocuous.example/")
@@ -122,20 +122,8 @@ class _SlowLargeHandler(http.server.BaseHTTPRequestHandler):
         pass  # silence default request logging to stderr
 
 
-@pytest.fixture
-def _slow_large_server():
-    server = http.server.HTTPServer(("127.0.0.1", 0), _SlowLargeHandler)
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    try:
-        yield server.server_address[1]
-    finally:
-        server.shutdown()
-        thread.join()
-
-
 async def test_response_exceeding_max_size_bytes_is_aborted_during_streaming(
-    monkeypatch, _slow_large_server
+    monkeypatch,
 ):
     # 127.0.0.1 is categorically unsafe by design -- deliberately bypassed
     # here, and ONLY here, so this test can exercise the real streaming/
@@ -143,12 +131,12 @@ async def test_response_exceeding_max_size_bytes_is_aborted_during_streaming(
     # not a test of the SSRF rejection (that's proven separately, below,
     # against the REAL, unmodified safety check).
     monkeypatch.setattr(safe_fetch_module, "is_unsafe_destination_ip", lambda ip: False)
-    port = _slow_large_server
 
-    start = time.monotonic()
-    with pytest.raises(UnsafeFetchError):
-        await safe_fetch(f"http://127.0.0.1:{port}/", max_size_bytes=100_000)
-    elapsed = time.monotonic() - start
+    with local_http_server(_SlowLargeHandler) as port:
+        start = time.monotonic()
+        with pytest.raises(UnsafeFetchError):
+            await safe_fetch(f"http://127.0.0.1:{port}/", max_size_bytes=100_000)
+        elapsed = time.monotonic() - start
 
     # The full body would take ~2s to serve (200 * 10ms). A real abort at
     # the cap (reached after ~2 chunks, ~20-30ms of sleeps) finishes in a
@@ -163,17 +151,55 @@ async def test_response_exceeding_max_size_bytes_is_aborted_during_streaming(
 async def test_literal_unsafe_ip_urls_are_rejected_with_zero_bytes_sent(monkeypatch):
     # The most important test in this subtask: a literal private/
     # loopback/metadata IP target must cause ZERO network activity of any
-    # kind -- not just "an exception was raised eventually." Patches the
-    # lowest practical level (socket.socket.connect itself, beneath
-    # httpx/httpcore entirely) so this proof does not depend on any one
-    # library's own internal call shape.
-    def _fail_if_connected(self, *args, **kwargs):
-        raise AssertionError(
-            "socket.socket.connect() was called for a literal unsafe IP target"
-        )
-
-    monkeypatch.setattr(socket.socket, "connect", _fail_if_connected)
+    # kind -- not just "an exception was raised eventually."
+    assert_no_socket_connections(monkeypatch)
 
     for url in ("http://127.0.0.1/", "http://169.254.169.254/", "http://[::1]/"):
         with pytest.raises(UnsafeFetchError):
             await safe_fetch(url)
+
+
+class _RedirectToUnsafeHandler(http.server.BaseHTTPRequestHandler):
+    # Duplication check after 2.3.a/b/c, item C1: issues a real 3xx
+    # pointing at the cloud-metadata IP -- the exact shape of thing 2.3.d
+    # must one day re-validate and reject at this hop, not follow.
+    def do_GET(self):
+        self.send_response(302)
+        self.send_header("Location", "http://169.254.169.254/should-never-be-followed")
+        self.end_headers()
+
+    def log_message(self, *args):
+        pass
+
+
+async def test_follow_redirects_is_genuinely_enforced_not_just_set():
+    # 2.3.d's entire redirect-recheck design depends on the pinned-fetch
+    # mechanism never auto-following a redirect on its own. _fetch_pinned()
+    # itself only ever returns the response BODY (bytes) -- it has no way
+    # to hand back a 3xx's own status code or Location header today (see
+    # PROJECT_SPEC.md's own forward-looking note recorded at this task:
+    # 2.3.d will need to change that return shape to actually read one).
+    # This test instead drives the IDENTICAL construction _fetch_pinned()
+    # uses internally (the same follow_redirects=False AsyncClient, the
+    # same explicit Host header, the same extensions={"sni_hostname":...})
+    # directly, confirmed live before writing this as a permanent test:
+    # the raw 302 and its own Location header come back completely
+    # intact, with no automatic follow at all.
+    with local_http_server(_RedirectToUnsafeHandler) as port:
+        original_url = httpx.URL(f"http://127.0.0.1:{port}/")
+        async with httpx.AsyncClient(follow_redirects=False) as client:
+            async with client.stream(
+                "GET",
+                original_url,
+                headers={"Host": original_url.netloc.decode("ascii")},
+                extensions={"sni_hostname": "127.0.0.1"},
+                timeout=15.0,
+            ) as response:
+                body = b"".join([chunk async for chunk in response.aiter_bytes()])
+
+        assert response.status_code == 302
+        assert (
+            response.headers["location"]
+            == "http://169.254.169.254/should-never-be-followed"
+        )
+        assert body == b""

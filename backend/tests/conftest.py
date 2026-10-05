@@ -34,15 +34,25 @@
 # test_qdrant_isolation.py, mirroring db_session()'s own shape below).
 # Duplication check after 1.5.a-e adds _FakeClock (byte-identical in
 # test_ratelimit.py, test_dependencies.py and test_session.py -- the same
-# ~10-line injectable-clock test double, three times).
+# ~10-line injectable-clock test double, three times). Duplication check
+# after 2.3.a/b/c adds assert_no_socket_connections() (the socket.socket.
+# connect-raises-if-called proof, duplicated twice in test_safe_fetch.py)
+# and local_http_server() (the HTTPServer-on-an-ephemeral-port +
+# background-thread + shutdown/join lifecycle from test_safe_fetch.py's
+# own _slow_large_server, generalized to accept any handler class) --
+# both anticipating 2.3.d's own already-approved need for the identical
+# proof shapes against a redirect-issuing handler.
 import ast
 import asyncio
+import http.server
 import importlib
 import os
+import socket
 import sys
+import threading
 import uuid
-from collections.abc import AsyncIterator
-from contextlib import aclosing, asynccontextmanager
+from collections.abc import AsyncIterator, Iterator
+from contextlib import aclosing, asynccontextmanager, contextmanager
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -564,6 +574,47 @@ async def http_client(app) -> AsyncClient:
     # same two-line httpx.AsyncClient/ASGITransport construction, repeated
     # byte-identically in all three.
     return AsyncClient(transport=ASGITransport(app=app), base_url="http://test")
+
+
+def assert_no_socket_connections(monkeypatch) -> None:
+    # Duplication check after 2.3.a/b/c: test_safe_fetch.py had this exact
+    # shape -- monkeypatch socket.socket.connect to raise loudly if ever
+    # called -- at two separate call sites (zero-connection-attempt proofs
+    # for a validation-rejected host and a literal unsafe IP). 2.3.d's own
+    # already-approved redirect-chain hostile test ("caught at that
+    # specific hop") needs the identical proof shape again: confirming the
+    # unsafe hop's own target was never connected to. Patches the lowest
+    # practical level (beneath httpx/httpcore entirely), so the proof is
+    # implementation-agnostic -- it would catch a regression regardless of
+    # which library eventually handles the connection.
+    def _fail_if_connected(self, *args, **kwargs):
+        raise AssertionError(
+            "socket.socket.connect() was called -- a real connection was attempted"
+        )
+
+    monkeypatch.setattr(socket.socket, "connect", _fail_if_connected)
+
+
+@contextmanager
+def local_http_server(handler_cls: type[http.server.BaseHTTPRequestHandler]) -> Iterator[int]:
+    # Duplication check after 2.3.a/b/c: test_safe_fetch.py's own
+    # _slow_large_server fixture had this exact HTTPServer-on-an-
+    # ephemeral-port + background-thread + shutdown/join lifecycle inline,
+    # specific only in its choice of handler class -- 2.3.d's own
+    # redirect-chain tests need the identical lifecycle with a DIFFERENT
+    # handler (one issuing 3xx responses, not a slow large body), so only
+    # this generic shape is shared; each caller still defines its own
+    # handler_cls, matching this project's own precedent of sharing the
+    # repeated scaffold while keeping each caller's own differing logic
+    # separate (e.g. db_session() above, check_call_allowlist()).
+    server = http.server.HTTPServer(("127.0.0.1", 0), handler_cls)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield server.server_address[1]
+    finally:
+        server.shutdown()
+        thread.join()
 
 
 @asynccontextmanager
