@@ -47,13 +47,23 @@ dependencies = [
     # issues a plain TXT query over the system's own configured
     # resolver(s), nothing DNSSEC- or DoH-related.
     "dnspython==2.8.0",
+    # Task 2.3.c. Promoted from dev-only to a direct runtime dependency --
+    # version re-verified live on PyPI at this task's own build time (still
+    # 0.28.1, unchanged since it was first approved as a dev dependency at
+    # Step 1.1.a), not assumed from the existing pin. The safe-fetch
+    # primitive needs `extensions={"sni_hostname": ...}` (httpcore's own
+    # mechanism, confirmed real by reading its installed source at the
+    # Step 2.3 research stage) to connect to a validated IP literal while
+    # still sending the correct Host header and TLS SNI/certificate
+    # verification for the original hostname -- a capability this project
+    # did not need from httpx before this task, only as a test client.
+    "httpx==0.28.1",
 ]
 
 [project.optional-dependencies]
 dev = [
     "pytest==9.1.1",
     "pytest-asyncio==1.4.0",
-    "httpx==0.28.1",
     "ruff==0.16.8",
     "uv==0.12.19",
     "pip-audit==2.10.1",
