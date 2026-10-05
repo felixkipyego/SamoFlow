@@ -47,8 +47,24 @@ APP_DIR = BACKEND_DIR / "app"
 # CONFIG_METHODS below), not a READ, so app/main.py does NOT also need
 # READ_ALLOWLIST membership -- the same shape app/qdrant.py itself already
 # has (client access without read access).
+# Task 2.5.c: app/ingest/qdrant_writer.py added -- it constructs real
+# qdrant_client model objects (PointStruct, SparseVector) for the point
+# this step builds, even though it never acquires a client or calls any
+# method on one (confirmed by reading this guard's own code: rule (a) is a
+# pure import-level check, with no distinction between "holds a client"
+# and "imports a type with no client involved" -- the same shape that made
+# embed_sparse() trip this same rule in 2.5.b, fixed THERE by not importing
+# qdrant_client at all; here, constructing real PointStruct/SparseVector
+# objects genuinely IS this module's job, so the allow-list entry is the
+# correct fix this time, not a second local stand-in shape). This is
+# exactly the allow-list entry this file's own comment above already
+# anticipated for "Step 2.5's ingestion writer". It is NOT added to
+# READ_ALLOWLIST below -- it calls no method on a client at all yet (2.5.d's
+# own upsert primitive is the first to call client.upsert()), matching the
+# Step 1.3.e marker's own instruction that this file must use write
+# methods only and must never need read access.
 CLIENT_ACCESS_ALLOWLIST: frozenset[str] = frozenset(
-    {"app/qdrant.py", "app/retrieval/service.py", "app/main.py"}
+    {"app/qdrant.py", "app/retrieval/service.py", "app/main.py", "app/ingest/qdrant_writer.py"}
 )
 
 # NOTE: adding a file here is a deliberate decision -- it means that file may
