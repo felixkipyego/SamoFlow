@@ -60,6 +60,7 @@ import pytest
 import sqlalchemy as sa
 from httpx import ASGITransport, AsyncClient
 from qdrant_client import AsyncQdrantClient
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 # all_models (imported below, for its side effect, like db/qdrant) registers
@@ -597,6 +598,17 @@ def assert_no_socket_connections(monkeypatch) -> None:
         )
 
     monkeypatch.setattr(socket.socket, "connect", _fail_if_connected)
+
+
+def assert_rejected_by_integrity_error(engine, sql: str, params: dict | None = None) -> None:
+    # Duplication check after the Step 2.4 planning task and 2.4.a:
+    # test_alembic.py had this exact "connect, pytest.raises(IntegrityError),
+    # execute, commit" shape at 8 separate call sites (site_keys/tenants/
+    # visitors/verified_domains/documents constraint-rejection proofs) --
+    # well past this project's own established 3rd-occurrence threshold.
+    with engine.connect() as connection, pytest.raises(IntegrityError):
+        connection.execute(sa.text(sql), params)
+        connection.commit()
 
 
 @contextmanager

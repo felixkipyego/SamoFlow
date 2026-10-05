@@ -33,7 +33,7 @@ from pathlib import Path
 
 import pytest
 import sqlalchemy as sa
-from sqlalchemy.exc import IntegrityError, SQLAlchemyError
+from sqlalchemy.exc import SQLAlchemyError
 
 from app import db
 from app.config import get_settings
@@ -46,6 +46,7 @@ from tests.conftest import (
     EXPECTED_TABLES,
     EXPECTED_UNIQUE_INDEXES,
     assert_db_connection_credential_round_trip,
+    assert_rejected_by_integrity_error,
     db_session,
     minimal_subprocess_env,
     require_test_database,
@@ -428,14 +429,11 @@ def test_tenant_id_cannot_be_null(_test_engine):
     migrated = _run_alembic("upgrade", "head", engine=engine)
     assert migrated.returncode == 0, migrated.stdout + migrated.stderr
 
-    with engine.connect() as connection, pytest.raises(IntegrityError):
-        connection.execute(
-            sa.text(
-                "INSERT INTO site_keys (key, tenant_id, environment, status) "
-                "VALUES ('pk_live_null_tenant_test', NULL, 'production', 'draft')"
-            )
-        )
-        connection.commit()
+    assert_rejected_by_integrity_error(
+        engine,
+        "INSERT INTO site_keys (key, tenant_id, environment, status) "
+        "VALUES ('pk_live_null_tenant_test', NULL, 'production', 'draft')",
+    )
 
 
 def test_site_keys_key_uniqueness_is_enforced_by_the_database(_test_engine):
@@ -461,14 +459,11 @@ def test_site_keys_key_uniqueness_is_enforced_by_the_database(_test_engine):
         )
         connection.commit()
 
-    with engine.connect() as connection, pytest.raises(IntegrityError):
-        connection.execute(
-            sa.text(
-                "INSERT INTO site_keys (key, tenant_id, environment, status) "
-                "SELECT 'pk_live_duplicate_test', id, 'production', 'draft' FROM tenants"
-            )
-        )
-        connection.commit()
+    assert_rejected_by_integrity_error(
+        engine,
+        "INSERT INTO site_keys (key, tenant_id, environment, status) "
+        "SELECT 'pk_live_duplicate_test', id, 'production', 'draft' FROM tenants",
+    )
 
 
 def test_tenant_status_outside_the_allowed_vocabulary_is_rejected(_test_engine):
@@ -479,11 +474,9 @@ def test_tenant_status_outside_the_allowed_vocabulary_is_rejected(_test_engine):
     migrated = _run_alembic("upgrade", "head", engine=engine)
     assert migrated.returncode == 0, migrated.stdout + migrated.stderr
 
-    with engine.connect() as connection, pytest.raises(IntegrityError):
-        connection.execute(
-            sa.text("INSERT INTO tenants (name, status) VALUES ('bad tenant', 'pending')")
-        )
-        connection.commit()
+    assert_rejected_by_integrity_error(
+        engine, "INSERT INTO tenants (name, status) VALUES ('bad tenant', 'pending')"
+    )
 
 
 def test_visitor_secret_hash_uniqueness_is_scoped_to_one_site_key(_test_engine):
@@ -525,16 +518,13 @@ def test_visitor_secret_hash_uniqueness_is_scoped_to_one_site_key(_test_engine):
         connection.commit()
 
     # Same secret_hash, same site_key_id: rejected.
-    with engine.connect() as connection, pytest.raises(IntegrityError):
-        connection.execute(
-            sa.text(
-                "INSERT INTO visitors (tenant_id, site_key_id, secret_hash) "
-                "SELECT t.id, sk.id, 'shared-hash-value' FROM tenants t "
-                "JOIN site_keys sk ON sk.key = 'pk_live_visitor_test_a' "
-                "WHERE t.name = 'tenant one'"
-            )
-        )
-        connection.commit()
+    assert_rejected_by_integrity_error(
+        engine,
+        "INSERT INTO visitors (tenant_id, site_key_id, secret_hash) "
+        "SELECT t.id, sk.id, 'shared-hash-value' FROM tenants t "
+        "JOIN site_keys sk ON sk.key = 'pk_live_visitor_test_a' "
+        "WHERE t.name = 'tenant one'",
+    )
 
     # Same secret_hash, DIFFERENT site_key_id: accepted.
     with engine.connect() as connection:
@@ -782,12 +772,11 @@ def test_documents_url_and_file_name_constraints_enforced_by_the_database(_test_
         connection.commit()
 
     # Duplicate (source_id, url): rejected.
-    with engine.connect() as connection, pytest.raises(IntegrityError):
-        connection.execute(
-            sa.text(insert_document),
-            {"url": "https://example.com/a", "file_name": None, "status": "pending"},
-        )
-        connection.commit()
+    assert_rejected_by_integrity_error(
+        engine,
+        insert_document,
+        {"url": "https://example.com/a", "file_name": None, "status": "pending"},
+    )
 
     with engine.connect() as connection:
         connection.execute(
@@ -797,12 +786,9 @@ def test_documents_url_and_file_name_constraints_enforced_by_the_database(_test_
         connection.commit()
 
     # Duplicate (source_id, file_name): rejected.
-    with engine.connect() as connection, pytest.raises(IntegrityError):
-        connection.execute(
-            sa.text(insert_document),
-            {"url": None, "file_name": "report.pdf", "status": "pending"},
-        )
-        connection.commit()
+    assert_rejected_by_integrity_error(
+        engine, insert_document, {"url": None, "file_name": "report.pdf", "status": "pending"}
+    )
 
     # Neither url nor file_name set: allowed -- a `database`-source
     # document has neither (see app/ingest/models.py's Document class).
@@ -814,12 +800,9 @@ def test_documents_url_and_file_name_constraints_enforced_by_the_database(_test_
         connection.commit()
 
     # Invalid status: rejected.
-    with engine.connect() as connection, pytest.raises(IntegrityError):
-        connection.execute(
-            sa.text(insert_document),
-            {"url": None, "file_name": "bad-status.txt", "status": "bogus"},
-        )
-        connection.commit()
+    assert_rejected_by_integrity_error(
+        engine, insert_document, {"url": None, "file_name": "bad-status.txt", "status": "bogus"}
+    )
 
     # All three valid statuses: succeed.
     with engine.connect() as connection:
@@ -872,16 +855,13 @@ def test_verified_domains_partial_index_rejects_active_duplicate_frees_on_revoke
     # logic (not yet built) will wrap this in a clean application-level
     # rejection; proving the constraint itself rejects a direct duplicate
     # insert is this task's own scope.
-    with engine.connect() as connection, pytest.raises(IntegrityError):
-        connection.execute(
-            sa.text(
-                "INSERT INTO verified_domains "
-                "(tenant_id, domain, method, status, verification_token) "
-                "SELECT id, 'example.com', 'dns', 'pending', 'token-b' "
-                "FROM tenants WHERE name = 'Tenant B'"
-            )
-        )
-        connection.commit()
+    assert_rejected_by_integrity_error(
+        engine,
+        "INSERT INTO verified_domains "
+        "(tenant_id, domain, method, status, verification_token) "
+        "SELECT id, 'example.com', 'dns', 'pending', 'token-b' "
+        "FROM tenants WHERE name = 'Tenant B'",
+    )
 
     # (b) A's claim is revoked -> the domain is free again, for ANY
     # tenant (here, a DIFFERENT one, B) to successfully claim.
