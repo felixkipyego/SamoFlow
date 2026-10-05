@@ -134,11 +134,11 @@ install:
 # unless something about the dependency graph itself changed.
 lock:
 	$(UV_COMPILE) -o backend/requirements.lock
-	$(UV_COMPILE) --extra dev -o backend/requirements-dev.lock
+	$(UV_COMPILE) --extra dev -c backend/requirements.lock -o backend/requirements-dev.lock
 
 lock-upgrade:
 	$(UV_COMPILE) --upgrade -o backend/requirements.lock
-	$(UV_COMPILE) --extra dev --upgrade -o backend/requirements-dev.lock
+	$(UV_COMPILE) --extra dev --upgrade -c backend/requirements.lock -o backend/requirements-dev.lock
 	@echo "Review the lockfile diff, run 'make test-all', then commit."
 
 # Regenerates both lockfiles into a throwaway directory and diffs each
@@ -151,12 +151,28 @@ lock-upgrade:
 # always re-resolve every transitive dependency to its current latest
 # release and report a spurious diff for any patch published since the
 # lockfiles were last regenerated, even though nothing here is out of date.
+# The dev recompile is constrained against backend/requirements.lock (-c),
+# the exact same literal argument `lock`'s own second line uses, so a
+# package needed by both graphs can never disagree between the two files
+# (Task 2.4.c: found live when tiktoken pulled `requests`, and therefore
+# `charset-normalizer`, into the runtime lockfile for the first time).
+# Deliberately the real committed path, not $$tmp/requirements.lock: uv
+# embeds the literal -c path string into every affected package's own
+# "via" comment, so using the temp file's absolute path would make this
+# recompile's output byte-differ from what `lock` itself produces (a
+# constraint-path string, not a version) even when nothing is out of
+# date -- confirmed live, this was a real bug in this fix's own first
+# draft. Pointing at the committed file instead of the temp copy is safe:
+# when requirements.lock has NOT drifted (rc1 below is 0) its content is
+# byte-identical to $$tmp/requirements.lock anyway, so the constraint
+# resolves identically either way; when it HAS drifted, rc1 alone already
+# reports "out of date" regardless of what this second compile does.
 lock-check:
 	@tmp=$$(mktemp -d); \
 	cp backend/requirements.lock $$tmp/requirements.lock; \
 	cp backend/requirements-dev.lock $$tmp/requirements-dev.lock; \
 	$(UV_COMPILE) -o $$tmp/requirements.lock; \
-	$(UV_COMPILE) --extra dev -o $$tmp/requirements-dev.lock; \
+	$(UV_COMPILE) --extra dev -c backend/requirements.lock -o $$tmp/requirements-dev.lock; \
 	diff -u backend/requirements.lock $$tmp/requirements.lock; rc1=$$?; \
 	diff -u backend/requirements-dev.lock $$tmp/requirements-dev.lock; rc2=$$?; \
 	rm -rf $$tmp; \
