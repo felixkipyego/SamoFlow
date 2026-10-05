@@ -1213,6 +1213,41 @@ A production-ready, multi-tenant, embeddable AI widget platform: one website is 
 
   Verified: `make lint` clean. New test file run standalone, re-run 3 times for stability: **1 passed** every time, ~0.3s each run. Full `backend/tests` without a test database: **452 passed, 151 skipped** (up from 451 passed, 151 skipped — exactly the 1 new test, 0 new skips). Test-name diff (`git diff` restricted to `^[+-](async )?def test_` across the three modified source files): empty — zero test functions touched or renamed, confirming the refactor changed no test-facing behavior; all 32 pre-existing tests across `test_extract_html.py`/`test_extract_docx.py`/`test_extract_text.py`/`test_chunking.py` re-run and passed unchanged. `git status --short` named and cross-checked file by file: `backend/app/ingest/extract_html.py`, `backend/app/ingest/extract_docx.py`, `backend/app/ingest/extract_text.py` (modified) plus `backend/tests/test_extract_consistency.py` (new) — exactly the expected four, `.env` correctly absent.
 
+### Step 2.5 task list (approved)
+
+Six subtasks, 2.5.a–2.5.f, in build order. Stays a callerless shared
+library like 2.3/2.4 before it (decision (e) below) — Step 2.6 is the
+first real `job_type`/`enqueue()` caller.
+
+| ID | Goal | Status |
+|----|------|--------|
+| 2.5.a | Dense embedding primitive: `embed_dense(texts) -> list[list[float]]` against the real `openai` API; `openai_api_key` `Settings` field (`SecretStr`, guarded accessor); confirms `DENSE_VECTOR_SIZE`/model dimension live once a real key exists. New dependency: `openai` | Not started |
+| 2.5.b | Sparse (BM25-style) embedding primitive: `embed_sparse(texts) -> list[SparseVector]` via `fastembed`'s BM25 sparse model, matching the `idf`-modifier-configured sparse slot (1.3.c). New dependency: `fastembed` | Not started |
+| 2.5.c | Deterministic point construction: `uuid.uuid5(POINT_ID_NAMESPACE, f"{document_id}:{chunk_index}:{embedding_version}")` (point 2.5 decision (b)) plus the full §5.2 payload, canonical `str(client_id)` form (resolves the Step-1.3.d-owned marker) | Not started |
+| 2.5.d | Upsert primitive against the real `knowledge_chunks` collection; `CLIENT_ACCESS_ALLOWLIST` entry for the writer, write-methods only, never `READ_ALLOWLIST` (resolves the Step-1.3.e-owned marker) | Not started |
+| 2.5.e | End-to-end `embed_and_upsert()` tying 2.4's `chunk_text()` + 2.5.a–d together [SECURITY rigor, no tag — see decision entry]: the hostile cross-tenant isolation proof — real chunks upserted for tenant A, `tenant_filter(tenant_B)` against the real collection returns zero of them | Not started |
+| 2.5.f | Close-out: resolve the `DENSE_VECTOR_SIZE` `ASSUMPTION` (confirmed or revised, per 2.5.a's own live finding) and the "already-indexed content stays answerable" live re-proof (reassigned here from Step 2.4's close-out); update PROJECT_SPEC.md | Not started |
+
+- 2026-10-05: Step 2.5 breakdown approved (docs-only, no code) — six subtasks 2.5.a–2.5.f (see the task list above), based on docs/SPEC.md §5.1–§5.3 (dense + sparse BM25 embedding per chunk, deterministic point IDs from document + chunk index + embedding version, embedding model/version stored on every chunk) and the research reported separately before this approval (confirming the step's own four owned Open markers: the `DENSE_VECTOR_SIZE` `ASSUMPTION`, the `client_id` canonical-form marker, the `CLIENT_ACCESS_ALLOWLIST` marker, and the reassigned "already-indexed content stays answerable" marker). Five decisions confirmed:
+
+  (a) **Embedding API: the official `openai` SDK, approved as a new runtime dependency (rule 8).** Re-verified live at this breakdown's own time, not assumed: `openai==3.24.0` current on PyPI, `requires-python>=3.10`, a pure-Python wheel itself. Its own dependency footprint is a real, reportable finding, confirmed against the actual downloaded wheel's `METADATA` file directly (not a summarized fetch — an initial fetch's claim that it depends on a package literally named `httpx2` looked implausible enough to verify against raw PyPI/the wheel itself before trusting it; confirmed genuinely real): it depends on `httpx2`/`httpcore2` — httpx's own official "next generation" successor, a SEPARATE package from the `httpx==0.28.1`/`httpcore` stack already pinned in this project (used by `qdrant-client`, `safe_fetch.py`, etc.) — plus `jiter` (a Rust-accelerated JSON parser, confirmed to exist on PyPI at `0.17.0`, satisfying `openai`'s own `>=0.16.0` constraint). This means a SECOND, parallel HTTP-client stack enters the dependency tree, not a replacement of the first — reported plainly as a footprint consequence, not treated as a blocker. Exact hashes/wheel availability/real lockfile impact deferred to 2.5.a's own actual build time, matching every prior dependency's own precedent (2.4.b–f).
+
+  **Key storage**: a required `Settings` field (`openai_api_key: SecretStr`), a guarded accessor extending the same shared allow-list mechanism `test_config_guard.py` already enforces for `DATABASE_URL`/`QDRANT_API_KEY` — matching every other secret's own pattern exactly, built at 2.5.a.
+
+  **Testing — a real blocker found, not routed around**: the plan was one real, live API call during this breakdown to confirm dimension/response-shape/auth end to end before any code exists. **Could not be performed**: confirmed live that no `OPENAI_API_KEY` exists anywhere — checked the shell environment directly and the real, uncommitted `.env` file directly, both empty. `DENSE_VECTOR_SIZE=1536` therefore stays an unconfirmed `ASSUMPTION`, neither verified nor silently assumed true — the live call is deferred to 2.5.a's own actual build time, when a real key must be provisioned into `.env` anyway for the SDK to be usable at all; 2.5.a's own task must report the result then. The COMMITTED test suite will use recorded/stubbed responses for everything else (retry logic, error handling, dimension validation) once built — no real paid API calls in the automated suite going forward; this is the confirmed plan, not yet built.
+
+  (b) **Point-ID scheme approved exactly as proposed**: `uuid.uuid5(POINT_ID_NAMESPACE, f"{document_id}:{chunk_index}:{embedding_version}")`, with `POINT_ID_NAMESPACE` a hardcoded-forever project constant generated once — at 2.5.c's own actual build time, not fabricated here in planning prose, matching `DENSE_VECTOR_SIZE`'s own "fix once, never silently change" precedent.
+
+  (c) **`fastembed` approved as a new runtime dependency (rule 8) for sparse/BM25 generation.** Re-verified live at this breakdown's own time: `fastembed==0.8.1` current on PyPI, `requires-python>=3.10.0`. Dependency footprint, confirmed live and reported plainly: NOT pure-Python despite its own wheel being `py3-none-any` — it pulls in `onnxruntime` (a real ML inference engine, compiled/native), `numpy`, `tokenizers` (Rust-backed), `pillow` (C extensions), `py-rust-stemmers`, plus `huggingface-hub`/`loguru`/`requests`/`tqdm`/`mmh3` — a materially heavier footprint than anything added to this project so far. Exact version/hash/wheel-availability re-check and the real `make lock` impact (including image size delta) deferred to 2.5.b's own actual build time, matching precedent — not run today, since today's own file scope is PROJECT_SPEC.md only.
+
+  (d) **Confirmed, no change**: job-failure handling reuses Step 2.1's existing `JOB_HANDLERS`/`mark_job_failed()`-with-backoff primitives directly — already the correct, ready-to-extend shape, confirmed by reading `app/worker.py` directly.
+
+  (e) **2.5 stays callerless, matching 2.3/2.4's own precedent.** `embed_and_upsert()` is a function Step 2.6's own job handler will call later — 2.5 registers no `job_type` and calls `enqueue()` nowhere. The four `2.4–2.8`-range markers (stuck-job reaper, `HEARTBEAT_STALE_MULTIPLIER`, `job_type` naming, `enqueue()`'s unchecked `source_id`) stay owned by Step 2.6 exactly as reassigned at 2.4.g's own close-out — untouched by 2.5's own close-out (2.5.f).
+
+  **SECURITY rigor despite no `[SECURITY]` tag**: docs/SPEC.md's own Phase 2 step list does not tag Step 2.5 `[SECURITY]` (unlike 2.2/2.3/2.7/2.8) — but this step writes real, tenant-tagged data into the shared `knowledge_chunks` collection for the first time. 2.5.e's own hostile cross-tenant isolation proof (real chunks upserted for tenant A, `tenant_filter(tenant_B)` against the real collection confirmed to return zero of them) is to be built and reviewed with the exact same rigor as any `[SECURITY]`-tagged step's own hostile-proof work, tag or no tag — recorded here so it is never silently treated as lower-stakes than 1.3.d's own identical isolation proof was.
+
+  Current task set to 2.5.a, next to 2.5.b. Counter checked directly in the file, not assumed: left at **n=0** (this breakdown is planning/documentation only, no files outside PROJECT_SPEC.md changed, matching the precedent set at every prior Step breakdown).
+
 ### Estimates to measure
 
 - The default limits in §9 and the budgets in §17 are starting points.
@@ -1236,8 +1271,8 @@ A production-ready, multi-tenant, embeddable AI widget platform: one website is 
 
 ## 7. Current task and next task
 
-Current: Step 2.5.
-Next: Step 2.5 breakdown.
+Current: Step 2.5.a.
+Next: Step 2.5.b.
 Do not modify (completed tasks): 1.1.a, 1.1.b, 1.1.c, 1.1.d, 1.1.e, 1.1.f, 1.1.g, 1.1.h, 1.1.i, 1.1.j, 1.1.k, 1.1.l, 1.1.m, 1.1.n, 1.1.o.a, 1.1.o.b, 1.1.o.c, 1.1.o.d, 1.1.o.e, 1.1.o.f, 1.1.o.g, 1.1.o.h, 1.1b, 1.1c, 1.2.a, 1.2.b, 1.2.c, 1.2.d, 1.2.e, 1.2.f, 1.3.a1, 1.3.a2, 1.3.b, 1.3.c, 1.3.d, 1.3.e, 1.3.f, 1.4.a, 1.4.b, 1.4.c, 1.4.d, 1.4.e, 1.4.f, 1.4.g, 1.4.h, 1.4.i, 1.4.j, 1.4.k, 1.4.l, 1.5.a, 1.5.b, 1.5.c, 1.5.d, 1.5.e, 1.5.f, 1.6.a, 1.6.b, 1.6.c, 1.6.d, 1.6.e, 2.1.a, 2.1.b, 2.1.c, 2.1.d, 2.1.e, 2.1.f, 2.1.g, 2.1.h, 2.2.a, 2.2.b, 2.2.c, 2.2.d, 2.2.e, 2.2.f, 2.2.g, 2.2.h, 2.2.i, 2.3.a, 2.3.b, 2.3.c, 2.3.d, 2.3.e, 2.4.a, 2.4.b, 2.4.c, 2.4.d, 2.4.e, 2.4.f, 2.4.g.
 
 ### Step 1.1 task list (approved)
