@@ -1044,6 +1044,30 @@ A production-ready, multi-tenant, embeddable AI widget platform: one website is 
 
   Verified: `docker info` confirmed running first. Live migration proof: `upgrade head` → real inserts (`method='file'`/`'meta_tag'` now succeed, `'dns'` still works, an invalid value still rejected) → `downgrade -1` (re-confirmed `'file'` rejected again, the old constraint genuinely restored, not just assumed from the migration's own code) → `upgrade head`, all clean. `make lint` clean. `test_alembic.py`/`test_models.py` run standalone together against the real test database: **41 passed**, including the fixed stale-head test and the updated `EXPECTED_STATUS_CHECK_CONSTRAINTS` check. Full `backend/tests` without a test database: **412 passed, 149 skipped** (unchanged from 2.3.d's own last-reported count — no new test added or removed, matching that this task's only test change was fixing one existing test's body). `make test-all` against the real test-db/test-qdrant, run for the first time this step: **561 passed** (412 + the 149 previously-skipped, all for real), both services confirmed cleaned up afterward. `git status --short` named and cross-checked file by file: `backend/app/ingest/models.py`, `backend/tests/conftest.py`, `backend/tests/test_alembic.py` (modified) plus `backend/alembic/versions/77707a3b5369_*.py` (new) — exactly four changes, `.env` correctly absent. No new dependency.
 
+- 2026-10-05: Step 2.4 breakdown approved (docs-only, no code) — seven subtasks 2.4.a–2.4.g (see the Step 2.4 task list below), based on docs/SPEC.md §5.1 (chunking: 512 tokens/64 overlap, keeping the heading path, dense+sparse embedding per chunk) and §5.2's own Qdrant payload field list (`title`, `heading_path`, `chunk_index`, `content_hash`, confirming chunks live only in Qdrant, never a Postgres table). Eight decisions confirmed, researched and reported separately before this approval:
+
+  (a) **Four new runtime dependencies approved under rule 8**: `tiktoken` (token-accurate chunking matching `text-embedding-3-small`'s own tokenizer — counting with anything else would silently miscount against the real embedding boundary docs/SPEC.md names directly); `beautifulsoup4` + `lxml` (HTML, the standard choice); `pypdf` (PDF — chosen over `PyMuPDF`/`fitz` specifically for license reasons: permissive BSD vs. `PyMuPDF`'s AGPL/commercial dual license, a real concern for a product this project ships); `python-docx` (DOCX, effectively the only real option). All four to be re-verified live at each one's own actual build time (current version, hash availability, lockfile impact reported), not assumed from this planning session — matching every prior dependency addition's own precedent.
+
+  (b) **HTML cleanup (script/style/hidden-element stripping) lives in 2.4 as shared logic**, called by 2.6, not duplicated or rebuilt there — resolves the scoping ambiguity found during this breakdown's own research (docs/SPEC.md §5.5 places the sentence under "crawler" textually, but it is a text-extraction operation functionally).
+
+  (c) **`documents.status` gets a `CheckConstraint`**: `pending`/`extracted`/`failed` — mirroring `sources.status`'s own general lifecycle-vocabulary pattern (a closed, fail-closed set), but specific to this table's own extraction/chunking lifecycle, not copied verbatim. If 2.4.a's own build surfaces a real need for an additional intermediate state, that is to be flagged then, not silently added now.
+
+  (d) **"Nearly empty" page threshold: under 50 words of extracted text** (not raw bytes/characters) — a module constant, built at 2.4.b. Adjust if real fixture testing in that task suggests a different number is warranted; start here, not as a final, unreconsiderable number.
+
+  (e) **`content_hash` is computed on normalized/extracted text, not raw fetched bytes** — confirmed, so trivial HTML noise (whitespace, comments) never triggers a false "changed" detection. The hashing code lives in 2.4 (built at 2.4.c, alongside chunking, which already holds the normalized representation), shared by every adapter, not duplicated per adapter later.
+
+  (f) **Flat/empty `heading_path` for PDF and plain TXT, confirmed, no heuristic** — PDF and TXT have no real heading structure to extract (no font-size/layout analysis), matching rule 11: not building a heuristic nothing asked for.
+
+  (g) **Chunk size/overlap (512/64) are module constants, not `Settings` fields** — matching `DENSE_VECTOR_SIZE`'s own established precedent (nothing else needs either configurable yet).
+
+  (h) **The four `2.4–2.8`-range markers (stuck-job reaper, `HEARTBEAT_STALE_MULTIPLIER`, `job_type` naming, `enqueue()`'s unchecked `source_id`) stay unresolved by Step 2.4** — all four presuppose a step that enqueues real jobs with a real `job_type`, which 2.4 (a shared, callerless library) never does. Reassignment to Step 2.6 (the first real adapter) happens at 2.4's own close-out (2.4.g), not decided unilaterally here ahead of that task actually running.
+
+  **A ninth correction, recorded during this same review, not a separate numbered decision**: the "already-indexed content stays answerable" live re-proof marker (recorded at 2.2.g, "expected Step 2.4 or later") is more precisely owned by **Step 2.5** — "indexing" means the Qdrant upsert, and 2.4 never touches Qdrant. Reassignment also happens at 2.4.g's own close-out, not here.
+
+  **A counter-value correction, caught and flagged rather than silently followed**: this task's own instructions said to leave the counter at n=0, but the file's actual current value is n=2 (2.3.d, 2.3.e — the duplication check after 2.3.a/b/c already reset it once, since then two more subtasks counted). Left at its correct current value, n=2, not reset to 0: this breakdown is planning/documentation only and so does not itself increment the counter, matching the precedent set at every prior Step breakdown — but a breakdown has never reset the counter either, and doing so here would have silently erased the signal that a duplication check is one task away from being due.
+
+  Current task set to 2.4.a, next to 2.4.b.
+
 ### Estimates to measure
 
 - The default limits in §9 and the budgets in §17 are starting points.
@@ -1067,8 +1091,8 @@ A production-ready, multi-tenant, embeddable AI widget platform: one website is 
 
 ## 7. Current task and next task
 
-Current: Step 2.4.
-Next: Step 2.4 breakdown.
+Current: Step 2.4.a.
+Next: Step 2.4.b.
 Do not modify (completed tasks): 1.1.a, 1.1.b, 1.1.c, 1.1.d, 1.1.e, 1.1.f, 1.1.g, 1.1.h, 1.1.i, 1.1.j, 1.1.k, 1.1.l, 1.1.m, 1.1.n, 1.1.o.a, 1.1.o.b, 1.1.o.c, 1.1.o.d, 1.1.o.e, 1.1.o.f, 1.1.o.g, 1.1.o.h, 1.1b, 1.1c, 1.2.a, 1.2.b, 1.2.c, 1.2.d, 1.2.e, 1.2.f, 1.3.a1, 1.3.a2, 1.3.b, 1.3.c, 1.3.d, 1.3.e, 1.3.f, 1.4.a, 1.4.b, 1.4.c, 1.4.d, 1.4.e, 1.4.f, 1.4.g, 1.4.h, 1.4.i, 1.4.j, 1.4.k, 1.4.l, 1.5.a, 1.5.b, 1.5.c, 1.5.d, 1.5.e, 1.5.f, 1.6.a, 1.6.b, 1.6.c, 1.6.d, 1.6.e, 2.1.a, 2.1.b, 2.1.c, 2.1.d, 2.1.e, 2.1.f, 2.1.g, 2.1.h, 2.2.a, 2.2.b, 2.2.c, 2.2.d, 2.2.e, 2.2.f, 2.2.g, 2.2.h, 2.2.i, 2.3.a, 2.3.b, 2.3.c, 2.3.d, 2.3.e.
 
 ### Step 1.1 task list (approved)
@@ -1450,6 +1474,22 @@ came to depend on it.
 
 See Open markers below (file/meta-tag verification LOGIC still has no
 owner) — not repeated here.
+
+### Step 2.4 task list (approved)
+
+Seven subtasks, 2.4.a–2.4.g, in build order. A shared library with no
+real caller yet (the adapters, 2.6/2.7/2.8, are the real callers) — no
+new Qdrant/job-queue wiring here, matching 2.3's own precedent.
+
+| ID | Goal | Status |
+|----|------|--------|
+| 2.4.a | `documents` schema completion: a partial unique index on `(source_id, url)`/`(source_id, file_name)` (mutually exclusive, matching `verified_domains`'s own partial-index precedent) plus a `status` `CheckConstraint` (`pending`/`extracted`/`failed`). Resolves the Step-2.1.a-owned marker and the model's own `TODO(2.4)` comment | Not started |
+| 2.4.b | HTML extraction primitive: strips scripts/styles/hidden elements (shared logic, called by 2.6 — not duplicated there), extracts `<title>`, derives `heading_path` from `h1`–`h6`, flags "nearly empty" pages (under 50 words of extracted text, a module constant). New dependency: `beautifulsoup4` + `lxml` | Not started |
+| 2.4.c | Chunking primitive: 512 tokens/64 overlap (module constants, matching `DENSE_VECTOR_SIZE`'s own precedent — not `Settings` fields), heading-path-aware, deterministic (same input → byte-identical chunks every time — load-bearing for §5.3's "a re-run overwrites instead of duplicating"); computes `content_hash` over the normalized/extracted text, not raw fetched bytes (shared here, not duplicated per adapter). Tested against 2.4.b's own real extracted output, not only synthetic text. New dependency: `tiktoken` | Not started |
+| 2.4.d | PDF extraction primitive: text only, flat/empty `heading_path` (no font-size/layout heuristic — rule 11). New dependency: `pypdf` | Not started |
+| 2.4.e | DOCX extraction primitive: heading PARAGRAPH STYLES (Heading 1/2/etc.) map to `heading_path`. New dependency: `python-docx` | Not started |
+| 2.4.f | TXT/MD extraction primitive: plain text passthrough for `.txt` (flat/empty `heading_path`); hand-rolled `#`-marker heading detection for `.md` (no new dependency). | Not started |
+| 2.4.g | Close-out: reassign the four `2.4–2.8`-range markers (stuck-job reaper, `HEARTBEAT_STALE_MULTIPLIER`, `job_type` naming, `enqueue()`'s unchecked `source_id`) to Step 2.6, the first real adapter with a real `job_type` and real `enqueue()` calls; reassign the "already-indexed content stays answerable" live re-proof marker to Step 2.5 (2.4 never touches Qdrant); update PROJECT_SPEC.md | Not started |
 
 ## 8. Task counter since the last duplication check
 
