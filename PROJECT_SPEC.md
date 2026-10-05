@@ -1134,6 +1134,22 @@ A production-ready, multi-tenant, embeddable AI widget platform: one website is 
 
   Verified: `make lint` clean. New test file run standalone, re-run 3 times for stability: **10 passed** every time, ~0.4s each run. Full `backend/tests` without a test database: **431 passed, 151 skipped** (up from 421 passed, 151 skipped — exactly the 10 new tests, 0 new skips). `make lock-check` clean. `make audit`: no known vulnerabilities. `git status --short` named and cross-checked file by file: `Makefile`, `PROJECT_SPEC.md`, `backend/pyproject.toml`, `backend/requirements.lock`, `backend/requirements-dev.lock` (modified, the latter four shared with the tooling-fix entry above) plus `backend/app/ingest/chunking.py`, `backend/tests/test_chunking.py`, `backend/tests/fixtures/html/long_block.html` (new) — exactly the expected eight, `.env` correctly absent.
 
+- 2026-10-05: Step 2.4.d — PDF extraction primitive (new `backend/app/ingest/extract_pdf.py`: `extract_pdf()`, reusing 2.4.b's own `ExtractedContent`/`ContentBlock` unchanged; new dependency `pypdf==6.19.0`; new `backend/tests/test_extract_pdf.py` plus two new real, hand-constructed fixture PDFs under `backend/tests/fixtures/pdf/`).
+
+  **`pypdf==6.19.0`, re-verified live on PyPI at this task's own build time**: requires `>=3.9`; confirmed still genuinely pure Python — a single `py3-none-any` wheel, no platform-specific wheels at all since there is nothing to compile (the other half of why it was chosen over PyMuPDF, alongside the AGPL/license reason already recorded at the Step 2.4 breakdown). Its own declared dependency (`typing_extensions`) is conditional on `python_version < "3.11"`, so it resolves to zero required dependencies on this project's 3.12 pin. `make lock` (now using 2.4.c's own `-c`-constrained mechanism) gained exactly ONE new entry in BOTH lockfiles — `pypdf==6.19.0`, 2 hashes (wheel + sdist), no sdist-only surprise — confirming the cross-lockfile-conflict class of bug from 2.4.c does not recur here: with zero transitive dependencies on this Python version, there was nothing for the two independent resolutions to disagree about. `make lock-check`/`make audit` both clean.
+
+  **Multi-page handling, decided**: ALL pages flatten into exactly ONE `ContentBlock` per document, matching the user's own stated lean — a page boundary is a print-layout artifact (where a physical sheet happened to end), not semantic document structure, the identical reasoning the flat-`heading_path` decision already applies to font size. Each page's own extracted text is joined with `"\n"` before building the single block, confirmed live this prevents the last word of one page running directly into the first word of the next with no separating whitespace.
+
+  **`title` always `None`**: the task-list row's own framing is "text only" — unlike HTML's near-universal `<title>` tag, PDF metadata's `/Info /Title` field is frequently absent or unreliable across real-world producers; reading it would add a new, untested surface this primitive does not need. Stated plainly as a deliberate scope match, not an oversight.
+
+  **Fixture PDFs: hand-constructed via a small one-time script, not a library, and not committed** (the script lived in the scratchpad only; the OUTPUT `.pdf` bytes are the committed fixtures) — rule 8/11 reasoning: no PDF-WRITING library is a dependency anywhere in this project (`pypdf` itself has no real "draw text on a page" API), and adding one (e.g. `reportlab`) solely to generate a test fixture would be disproportionate. The script computes every object's exact byte offset programmatically (via running byte-length counts as it builds the file) rather than hand-counting them, so the resulting `xref` table is exactly correct by construction — confirmed live, `pypdf` parses both fixtures with no warnings on the valid path. Two fixtures: `multi_page.pdf` (2 pages, 80 words of genuine, assertable prose split across them, long enough to also prove the real "not nearly empty" direction) and `no_text.pdf` (1 page, a filled-rectangle-only content stream with zero text-showing operators — the smallest adequate proxy for a scanned-image-only page's own observable extraction result, without embedding real raster image data, which would have been impractical to construct reliably by hand for a primitive at this scope). `no_text.pdf` does double duty: it is both test (e)'s own "no extractable text" fixture AND test (b)'s own "near-empty" direction, avoiding a third near-duplicate fixture file.
+
+  **Malformed input, confirmed live rather than assumed adequate**: truncating `multi_page.pdf`'s own real bytes at the halfway point (cutting into its object stream, not just empty/garbage bytes) makes `PdfReader` raise `pypdf.errors.PdfStreamError` — confirmed to subclass `PdfReadError` → `PyPdfError`, pypdf's own common base exception, already clear, specific, and documented. `extract_pdf()` deliberately does NOT catch or re-wrap this: there is no existing caller-facing contract here needing a different shape (unlike `app/ingest/repository.py`'s own `IntegrityError`-to-domain-error translation), so adding a second, redundant exception type would be pure overhead (rule 11).
+
+  ASSUMPTION: none needed — the wheel/dependency claims, the multi-page join behavior, the fixture xref correctness, and the malformed-input exception type were all verified live. UNCERTAIN: none. TODO: none new. Current task set to 2.4.e, next to 2.4.f. **Counter reaches n=3 — report given below, duplication check NOT run (reserved for separate request).**
+
+  Verified: `make lint` clean. New test file run standalone, re-run 3 times for stability: **5 passed** every time, ~0.2s each run. Full `backend/tests` without a test database: **436 passed, 151 skipped** (up from 431 passed, 151 skipped — exactly the 5 new tests, 0 new skips). `make lock-check` clean. `make audit`: no known vulnerabilities. `git status --short` named and cross-checked file by file: `backend/pyproject.toml`, `backend/requirements.lock`, `backend/requirements-dev.lock` (modified) plus `backend/app/ingest/extract_pdf.py`, `backend/tests/test_extract_pdf.py`, `backend/tests/fixtures/pdf/` (new) — exactly the expected six, `.env` correctly absent.
+
 ### Estimates to measure
 
 - The default limits in §9 and the budgets in §17 are starting points.
@@ -1157,9 +1173,9 @@ A production-ready, multi-tenant, embeddable AI widget platform: one website is 
 
 ## 7. Current task and next task
 
-Current: Step 2.4.d.
-Next: Step 2.4.e.
-Do not modify (completed tasks): 1.1.a, 1.1.b, 1.1.c, 1.1.d, 1.1.e, 1.1.f, 1.1.g, 1.1.h, 1.1.i, 1.1.j, 1.1.k, 1.1.l, 1.1.m, 1.1.n, 1.1.o.a, 1.1.o.b, 1.1.o.c, 1.1.o.d, 1.1.o.e, 1.1.o.f, 1.1.o.g, 1.1.o.h, 1.1b, 1.1c, 1.2.a, 1.2.b, 1.2.c, 1.2.d, 1.2.e, 1.2.f, 1.3.a1, 1.3.a2, 1.3.b, 1.3.c, 1.3.d, 1.3.e, 1.3.f, 1.4.a, 1.4.b, 1.4.c, 1.4.d, 1.4.e, 1.4.f, 1.4.g, 1.4.h, 1.4.i, 1.4.j, 1.4.k, 1.4.l, 1.5.a, 1.5.b, 1.5.c, 1.5.d, 1.5.e, 1.5.f, 1.6.a, 1.6.b, 1.6.c, 1.6.d, 1.6.e, 2.1.a, 2.1.b, 2.1.c, 2.1.d, 2.1.e, 2.1.f, 2.1.g, 2.1.h, 2.2.a, 2.2.b, 2.2.c, 2.2.d, 2.2.e, 2.2.f, 2.2.g, 2.2.h, 2.2.i, 2.3.a, 2.3.b, 2.3.c, 2.3.d, 2.3.e, 2.4.a, 2.4.b, 2.4.c.
+Current: Step 2.4.e.
+Next: Step 2.4.f.
+Do not modify (completed tasks): 1.1.a, 1.1.b, 1.1.c, 1.1.d, 1.1.e, 1.1.f, 1.1.g, 1.1.h, 1.1.i, 1.1.j, 1.1.k, 1.1.l, 1.1.m, 1.1.n, 1.1.o.a, 1.1.o.b, 1.1.o.c, 1.1.o.d, 1.1.o.e, 1.1.o.f, 1.1.o.g, 1.1.o.h, 1.1b, 1.1c, 1.2.a, 1.2.b, 1.2.c, 1.2.d, 1.2.e, 1.2.f, 1.3.a1, 1.3.a2, 1.3.b, 1.3.c, 1.3.d, 1.3.e, 1.3.f, 1.4.a, 1.4.b, 1.4.c, 1.4.d, 1.4.e, 1.4.f, 1.4.g, 1.4.h, 1.4.i, 1.4.j, 1.4.k, 1.4.l, 1.5.a, 1.5.b, 1.5.c, 1.5.d, 1.5.e, 1.5.f, 1.6.a, 1.6.b, 1.6.c, 1.6.d, 1.6.e, 2.1.a, 2.1.b, 2.1.c, 2.1.d, 2.1.e, 2.1.f, 2.1.g, 2.1.h, 2.2.a, 2.2.b, 2.2.c, 2.2.d, 2.2.e, 2.2.f, 2.2.g, 2.2.h, 2.2.i, 2.3.a, 2.3.b, 2.3.c, 2.3.d, 2.3.e, 2.4.a, 2.4.b, 2.4.c, 2.4.d.
 
 ### Step 1.1 task list (approved)
 
@@ -1552,14 +1568,14 @@ new Qdrant/job-queue wiring here, matching 2.3's own precedent.
 | 2.4.a | `documents` schema completion: a partial unique index on `(source_id, url)`/`(source_id, file_name)` (mutually exclusive, matching `verified_domains`'s own partial-index precedent) plus a `status` `CheckConstraint` (`pending`/`extracted`/`failed`). Resolves the Step-2.1.a-owned marker and the model's own `TODO(2.4)` comment | Done |
 | 2.4.b | HTML extraction primitive: strips scripts/styles/hidden elements (shared logic, called by 2.6 — not duplicated there), extracts `<title>`, derives `heading_path` from `h1`–`h6`, flags "nearly empty" pages (under 50 words of extracted text, a module constant). New dependency: `beautifulsoup4` + `lxml` | Done |
 | 2.4.c | Chunking primitive: 512 tokens/64 overlap (module constants, matching `DENSE_VECTOR_SIZE`'s own precedent — not `Settings` fields), heading-path-aware, deterministic (same input → byte-identical chunks every time — load-bearing for §5.3's "a re-run overwrites instead of duplicating"); computes `content_hash` over the normalized/extracted text, not raw fetched bytes (shared here, not duplicated per adapter). Tested against 2.4.b's own real extracted output, not only synthetic text. New dependency: `tiktoken` | Done |
-| 2.4.d | PDF extraction primitive: text only, flat/empty `heading_path` (no font-size/layout heuristic — rule 11). New dependency: `pypdf` | Not started |
+| 2.4.d | PDF extraction primitive: text only, flat/empty `heading_path` (no font-size/layout heuristic — rule 11). New dependency: `pypdf` | Done |
 | 2.4.e | DOCX extraction primitive: heading PARAGRAPH STYLES (Heading 1/2/etc.) map to `heading_path`. New dependency: `python-docx` | Not started |
 | 2.4.f | TXT/MD extraction primitive: plain text passthrough for `.txt` (flat/empty `heading_path`); hand-rolled `#`-marker heading detection for `.md` (no new dependency). | Not started |
 | 2.4.g | Close-out: reassign the four `2.4–2.8`-range markers (stuck-job reaper, `HEARTBEAT_STALE_MULTIPLIER`, `job_type` naming, `enqueue()`'s unchecked `source_id`) to Step 2.6, the first real adapter with a real `job_type` and real `enqueue()` calls; reassign the "already-indexed content stays answerable" live re-proof marker to Step 2.5 (2.4 never touches Qdrant); update PROJECT_SPEC.md | Not started |
 
 ## 8. Task counter since the last duplication check
 
-n = 2 — 2.4.b and 2.4.c counted (see their decision log entries below).
+n = 3 — 2.4.b, 2.4.c and 2.4.d counted (see their decision log entries below).
 
 ## 9. Open markers
 

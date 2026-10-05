@@ -71,6 +71,14 @@ dependencies = [
     # on manylinux_2_28 x86_64/aarch64 and macOS) -- no Rust toolchain
     # needed in the Docker image, not an sdist-only build.
     "tiktoken==0.14.0",
+    # Task 2.4.d. Version re-verified live on PyPI at this task's own build
+    # time. Pure Python (py3-none-any wheel only, no platform-specific
+    # wheels at all since there is nothing to compile) -- part of why this
+    # was chosen over PyMuPDF (the other reason: PyMuPDF's AGPL/commercial
+    # dual license, Step 2.4 decision (a)). Its own declared dependency
+    # (typing_extensions) is conditional on python_version < "3.11", so it
+    # resolves to zero required dependencies on this project's 3.12 pin.
+    "pypdf==6.19.0",
 ]
 
 [project.optional-dependencies]
