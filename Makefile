@@ -14,7 +14,26 @@ COMPOSE = docker compose --env-file .env -f deploy/docker-compose.yml
 # --no-header: uv's default header embeds the literal -o path used, which
 # would make lock-check's tmp-directory comparison always show a spurious
 # diff (Task 1.1.o.c).
-UV_COMPILE = uv pip compile backend/pyproject.toml --universal --python-version 3.12 --generate-hashes --no-header
+#
+# --overrides backend/requirements-overrides.txt (Task 2.5.b): this
+# project now has TWO distinct uv mechanisms for two distinct problems --
+# don't reach for the wrong one. -c/--constraints (added at Task 2.4.c,
+# applied per-target to the dev lockfile only, see each target's own
+# comment below) forces a package SHARED between the runtime and dev
+# graphs to agree on one version across the two separately-compiled
+# lockfiles -- a cross-lockfile agreement problem. --overrides (here,
+# applied once, to every lock-related target uniformly) forces a SINGLE
+# package to a specific version regardless of what any dependency's own
+# marker-scoped constraint says for a Python version this project will
+# never actually run on (confirmed live: a plain pyproject.toml pin is
+# unsatisfiable here no matter how its own marker is scoped, since uv's
+# --universal resolution must find one consistent answer across every
+# theoretical split any dependency's markers reference, not just the
+# one requires-python actually targets) -- a marker-conflict problem,
+# not a cross-lockfile one. Reach for -c when two lockfiles disagree
+# with each other; reach for --overrides when one package's own upstream
+# constraint graph is unsatisfiable for an unreachable Python version.
+UV_COMPILE = uv pip compile backend/pyproject.toml --universal --python-version 3.12 --overrides backend/requirements-overrides.txt --generate-hashes --no-header
 
 .DEFAULT_GOAL := help
 

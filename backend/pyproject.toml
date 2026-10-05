@@ -94,6 +94,35 @@ dependencies = [
     # second, parallel HTTP-client stack, not a replacement of the first;
     # recorded as a known footprint consequence, not a defect.
     "openai==3.24.0",
+    # Task 2.5.b. Version re-verified live on PyPI at this task's own build
+    # time. NOT pure Python despite its own wheel being py3-none-any -- it
+    # pulls in onnxruntime, numpy, tokenizers and py-rust-stemmers (both
+    # Rust-backed), pillow. The heaviest dependency footprint added to
+    # this project so far. See onnxruntime's own pin immediately below
+    # for a real resolution problem this surfaced and fixed.
+    "fastembed==0.8.1",
+    # Task 2.5.b, pinned directly as its own fix (found live, not
+    # assumed): fastembed's own declared range let uv's --universal
+    # resolver pick onnxruntime's newest version (1.30.0), but onnxruntime
+    # dropped macOS x86_64 wheels entirely starting at 1.24.0 (confirmed
+    # directly against PyPI's raw simple index -- only arm64 macOS wheels
+    # exist from 1.24.0 onward). This made `pip install --require-hashes`
+    # genuinely fail on this project's own macOS x86_64 dev machine --
+    # confirmed live by actually running it, not inferred -- even though
+    # the Linux/Docker production target was never affected (real
+    # manylinux_2_28 wheels exist for 1.30.0 on both x86_64/aarch64).
+    # 1.23.2 is the last version with macOS x86_64 wheels, confirmed with
+    # full coverage (macOS arm64+x86_64, manylinux x86_64+aarch64,
+    # Windows), and satisfies fastembed==0.8.1's own declared constraint
+    # for Python 3.12 (>=1.17.0,!=1.20.0,!=1.24.0,!=1.24.1). Matches the
+    # platformdirs/charset-normalizer precedent: pin a transitive
+    # dependency directly when the resolver's own pick causes a real
+    # problem, rather than leaving it to chance. A plain dependencies-
+    # list pin alone is not sufficient to make this take effect -- see
+    # the Makefile's own UV_COMPILE variable, extended with --overrides
+    # for exactly this entry, and the matching PROJECT_SPEC.md decision
+    # entry for why a marker-scoped pin could not resolve this cleanly.
+    "onnxruntime==1.23.2",
 ]
 
 [project.optional-dependencies]

@@ -1,0 +1,18 @@
+# backend/requirements-overrides.txt
+# Task 2.5.b: forces onnxruntime to the last version with macOS x86_64
+# wheels (1.24.0+ dropped them -- confirmed live against PyPI's own raw
+# simple index). A plain pyproject.toml dependencies-list pin could not
+# express this: fastembed's own onnxruntime constraint is marker-scoped
+# by Python version, and uv's --universal resolution must find one
+# consistent answer across EVERY theoretical Python-version split any
+# dependency's markers reference (including 3.13/3.14), not just the
+# one this project actually targets (requires-python = "==3.12.*") --
+# a direct pin collided with fastembed's own separate, newer onnxruntime
+# constraint for those unreachable splits, unsatisfiable no matter how
+# the pin's own marker was scoped (confirmed live, three attempts).
+#
+# --overrides forces this version UNCONDITIONALLY across the whole
+# resolution, bypassing marker-conflict checking entirely -- the correct
+# mechanism for this class of problem (see Makefile's own UV_COMPILE
+# comment for when to reach for this vs. -c/--constraints instead).
+onnxruntime==1.23.2
