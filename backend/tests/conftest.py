@@ -98,6 +98,14 @@ def read_docx_fixture(name: str) -> bytes:
     return (_FIXTURES_DIR / "docx" / name).read_bytes()
 
 
+def read_text_fixture(name: str) -> str:
+    return (_FIXTURES_DIR / "text" / name).read_text()
+
+
+def read_markdown_fixture(name: str) -> str:
+    return (_FIXTURES_DIR / "markdown" / name).read_text()
+
+
 # Task 1.4.a: jwt_signing_key_previous is the first Settings field with a
 # default (optional), so REQUIRED_VARS must now actually filter rather than
 # list every field -- field.is_required() is pydantic's own built-in

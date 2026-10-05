@@ -1,0 +1,6 @@
+This is a plain text fixture file with no structure of any kind. It exists
+specifically to prove that extract_text() produces a single flattened block
+with no heading_path, matching plain text's total lack of structure. The
+file contains enough genuine words to comfortably clear the fifty word
+nearly-empty threshold, so a word-count assertion against it has a durable
+margin rather than sitting right at the edge of that boundary.
