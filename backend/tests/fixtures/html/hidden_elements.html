@@ -1,0 +1,17 @@
+<!DOCTYPE html>
+<html>
+<head><title>Hidden Elements Fixture</title></head>
+<body>
+<h1>Visible Heading</h1>
+<p>This visible paragraph should appear in the extracted output.</p>
+<p style="display:none">SECRET_HIDDEN_display_none content should never appear.</p>
+<p style="display: none;">SECRET_HIDDEN_display_none_spaced content should never appear.</p>
+<p style="visibility:hidden">SECRET_HIDDEN_visibility_hidden content should never appear.</p>
+<p hidden>SECRET_HIDDEN_attribute content should never appear.</p>
+<p aria-hidden="true">SECRET_HIDDEN_aria content should never appear.</p>
+<div style="display:none">
+<p>SECRET_HIDDEN_nested content inside a hidden ancestor should never appear.</p>
+</div>
+<p>This closing visible paragraph should also appear in the extracted output.</p>
+</body>
+</html>

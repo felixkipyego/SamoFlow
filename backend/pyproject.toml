@@ -58,6 +58,14 @@ dependencies = [
     # verification for the original hostname -- a capability this project
     # did not need from httpx before this task, only as a test client.
     "httpx==0.28.1",
+    # Task 2.4.b. Version re-verified live on PyPI at this task's own build
+    # time, matching the Step 2.4 decision entry's approval in principle --
+    # not assumed from that planning session. beautifulsoup4 is the HTML
+    # parse/query layer; lxml is its parser backend (prebuilt cp312 wheels
+    # confirmed on manylinux and macOS -- no sdist-only build, no extra
+    # system libxml2/libxslt packages needed in the Docker image).
+    "beautifulsoup4==4.15.0",
+    "lxml==6.1.3",
 ]
 
 [project.optional-dependencies]

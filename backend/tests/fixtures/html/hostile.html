@@ -1,0 +1,24 @@
+<!DOCTYPE html>
+<html>
+<head>
+<title>Hostile Fixture</title>
+<style>
+body { color: red; background-color: SECRET_STYLE_MARKER_blue; }
+.banner { font-size: 42px; }
+</style>
+</head>
+<body>
+<h1>Real Heading</h1>
+<script>
+alert('SECRET_SCRIPT_MARKER_xss');
+var secretPayload = "SECRET_SCRIPT_MARKER_payload";
+</script>
+<p>This is a normal, visible paragraph that should survive extraction untouched.</p>
+<style>
+p.hidden-rule { color: SECRET_STYLE_MARKER_green; }
+</style>
+<script>
+function secretFunction() { return "SECRET_SCRIPT_MARKER_function"; }
+</script>
+</body>
+</html>
