@@ -19,8 +19,11 @@ import pytest
 from qdrant_client.http.models import PointStruct, SparseVector
 
 from app import qdrant
-from app.ingest.embedding import EMBEDDING_MODEL, SparseVectorData
-from app.ingest.qdrant_writer import build_payload, build_point, build_point_id
+from app.ingest import embedding
+from app.ingest.chunking import chunk_text, compute_content_hash
+from app.ingest.embedding import EMBEDDING_MODEL, SparseVectorData, embed_dense, embed_sparse
+from app.ingest.extract_html import extract_html
+from app.ingest.qdrant_writer import build_payload, build_point, build_point_id, upsert_points
 from tests.conftest import live_qdrant_collection
 
 
@@ -245,3 +248,253 @@ async def test_a_point_written_with_the_canonical_client_id_form_is_found_by_ten
         # point, and vice versa.
         assert str(point_b.id) not in {r.id for r in records_a}
         assert str(point_a.id) not in {r.id for r in records_b}
+
+
+# --- Task 2.5.d: upsert_points() and the end-to-end idempotency proof ------
+#
+# embed_dense() is stubbed in every test below, mirroring test_embedding.py's
+# own _patch_client()/_FakeClient pattern exactly (monkeypatching embedding.
+# _get_client(), not a shared import across test files -- noted here, not
+# consolidated, since this is only the second file needing this exact
+# mechanism; a future duplication check can decide whether to extract a
+# shared helper). Confirmed with the user before building: 2.5.a's own
+# established rule ("verify live once during development, never a real
+# OpenAI call in the committed suite") applies here too -- the point-count/
+# idempotency properties these tests prove depend on build_point_id()'s
+# determinism and Qdrant's own upsert-overwrites-by-id semantics, not on
+# what the actual dense vector VALUES are, so a deterministic fake vector
+# exercises everything that matters at zero ongoing cost and no API-key
+# dependency in CI. embed_sparse() stays genuinely real (fastembed, free
+# and local) in every test below, like every other test in this file.
+class _FakeEmbeddingItem:
+    def __init__(self, vector: list[float]) -> None:
+        self.embedding = vector
+
+
+class _FakeEmbeddingResponse:
+    def __init__(self, vectors: list[list[float]]) -> None:
+        self.data = [_FakeEmbeddingItem(v) for v in vectors]
+
+
+class _FakeEmbeddingsResource:
+    async def create(self, *, model, input):  # noqa: A002 -- matches the real SDK's own param name
+        return _FakeEmbeddingResponse([[0.0] * qdrant.DENSE_VECTOR_SIZE for _ in input])
+
+
+class _FakeClient:
+    def __init__(self) -> None:
+        self.embeddings = _FakeEmbeddingsResource()
+
+
+def _patch_embed_dense(monkeypatch) -> None:
+    monkeypatch.setattr(embedding, "_get_client", lambda: _FakeClient())
+
+
+async def _run_full_pipeline(
+    client,
+    collection_name: str,
+    *,
+    tenant_id: uuid.UUID,
+    source_id: uuid.UUID,
+    document_id: uuid.UUID,
+    html: str,
+    embedding_version: str,
+) -> list[PointStruct]:
+    # THE full real pipeline (Task 2.5.d, point 3): extract_html() (2.4.b)
+    # -> chunk_text()/compute_content_hash() (2.4.c) -> embed_dense()
+    # (2.5.a, stubbed per the note above) / embed_sparse() (2.5.b, real) ->
+    # build_payload()/build_point_id()/build_point() (2.5.c) ->
+    # upsert_points() (this task) -- every stage genuinely real except the
+    # one stubbed dense-embedding call.
+    content = extract_html(html)
+    chunks = chunk_text(content)
+    content_hash = compute_content_hash(content)
+    texts = [chunk.text for chunk in chunks]
+
+    dense_vectors = await embed_dense(texts)
+    sparse_vectors = await embed_sparse(texts)
+
+    points = [
+        build_point(
+            build_point_id(document_id, chunk.chunk_index, embedding_version),
+            build_payload(
+                tenant_id=tenant_id,
+                source_id=source_id,
+                source_type="urls",
+                document_id=document_id,
+                source_url="https://example.com/page",
+                file_name=None,
+                title=content.title,
+                heading_path=chunk.heading_path,
+                chunk_index=chunk.chunk_index,
+                content_hash=content_hash,
+                embedding_model=EMBEDDING_MODEL,
+                embedding_version=embedding_version,
+                text=chunk.text,
+            ),
+            dense_vectors[i],
+            sparse_vectors[i],
+        )
+        for i, chunk in enumerate(chunks)
+    ]
+    await upsert_points(client, collection_name, points)
+    return points
+
+
+def _html_with_sections(*section_bodies: str) -> str:
+    # One <h2> section per body string -- chunking.py never merges text
+    # across a heading boundary, so each short section becomes exactly one
+    # chunk (confirmed by this module's own design, Task 2.4.c).
+    sections = "\n".join(
+        f"<h2>Section {i}</h2><p>{body}</p>" for i, body in enumerate(section_bodies, start=1)
+    )
+    return f"<html><head><title>Doc</title></head><body>{sections}</body></html>"
+
+
+async def test_upsert_points_batch_upserts_multiple_points_in_one_call_all_queryable(
+    monkeypatch,
+):
+    _patch_embed_dense(monkeypatch)
+    async with live_qdrant_collection("upsert_batch") as (client, name):
+        await qdrant.ensure_collection(client, name)
+        tenant_id, source_id, document_id = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+
+        points = await _run_full_pipeline(
+            client,
+            name,
+            tenant_id=tenant_id,
+            source_id=source_id,
+            document_id=document_id,
+            html=_html_with_sections("first section text", "second section text", "third one"),
+            embedding_version="v1",
+        )
+
+        assert len(points) == 3  # one chunk per section, confirming the batch is genuinely >1
+        count = await client.count(collection_name=name)
+        assert count.count == 3
+        fetched = await client.retrieve(collection_name=name, ids=[p.id for p in points])
+        assert {str(r.id) for r in fetched} == {str(p.id) for p in points}
+
+
+async def test_rerunning_the_identical_pipeline_overwrites_rather_than_duplicates(monkeypatch):
+    # THE idempotency proof (Task 2.5.d, point 3) -- the most important
+    # test in this task. docs/SPEC.md §5.3: "a re-run overwrites instead of
+    # duplicating," proven through the FULL real pipeline end to end, not
+    # just build_point_id()'s own isolated determinism (already proven at
+    # 2.5.c).
+    _patch_embed_dense(monkeypatch)
+    async with live_qdrant_collection("idempotency") as (client, name):
+        await qdrant.ensure_collection(client, name)
+        tenant_id, source_id, document_id = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+        html = _html_with_sections("alpha content", "beta content")
+
+        await _run_full_pipeline(
+            client,
+            name,
+            tenant_id=tenant_id,
+            source_id=source_id,
+            document_id=document_id,
+            html=html,
+            embedding_version="v1",
+        )
+        first_count = await client.count(collection_name=name)
+        assert first_count.count == 2
+
+        # Run the EXACT SAME content through the EXACT SAME full pipeline
+        # a second time.
+        await _run_full_pipeline(
+            client,
+            name,
+            tenant_id=tenant_id,
+            source_id=source_id,
+            document_id=document_id,
+            html=html,
+            embedding_version="v1",
+        )
+        second_count = await client.count(collection_name=name)
+        assert second_count.count == 2  # unchanged, not doubled to 4
+
+
+async def test_upsert_points_with_an_empty_list_is_a_clean_no_op():
+    # Task 2.5.d, point 4: confirmed live before building that the real
+    # Qdrant server actively REJECTS an empty upsert (400 "Empty update
+    # request") -- a clean no-op here is load-bearing, not just tidy,
+    # matching embed_dense()/embed_sparse()'s own "empty batch is a valid,
+    # reachable state" precedent (e.g. a nearly-empty document, 2.4.b's own
+    # is_nearly_empty concept, producing zero chunks).
+    async with live_qdrant_collection("upsert_empty") as (client, name):
+        await qdrant.ensure_collection(client, name)
+
+        await upsert_points(client, name, [])  # must not raise
+
+        count = await client.count(collection_name=name)
+        assert count.count == 0
+
+
+async def test_rerunning_with_shrunk_content_leaves_the_removed_chunks_orphaned(monkeypatch):
+    # Task 2.5.d, point 4 (the real failure-handling/correctness question):
+    # investigated live, not assumed. If new content for the SAME document
+    # produces FEWER chunks than the old version, do the old chunk_index
+    # positions beyond the new count become orphaned, never-cleaned-up
+    # points? CONFIRMED YES here, live -- this is a genuine, confirmed gap,
+    # not a defect in upsert_points() itself: this function has no way to
+    # know how many chunks a document had LAST time (that is Postgres/
+    # documents-table information, entirely outside this primitive's own
+    # scope). docs/SPEC.md §5.3/§14 already name the owner of exactly this
+    # class of cleanup: "A nightly reconcile compares Postgres with Qdrant
+    # per tenant and deletes orphaned points" -- Step 2.9 ("Scheduler,
+    # plans and reconcile"), not 2.5.d. See the matching Open marker in
+    # PROJECT_SPEC.md, owned by Step 2.9.
+    _patch_embed_dense(monkeypatch)
+    async with live_qdrant_collection("shrink_orphan") as (client, name):
+        await qdrant.ensure_collection(client, name)
+        tenant_id, source_id, document_id = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+
+        old_points = await _run_full_pipeline(
+            client,
+            name,
+            tenant_id=tenant_id,
+            source_id=source_id,
+            document_id=document_id,
+            html=_html_with_sections("one", "two", "three", "four", "five"),
+            embedding_version="v1",
+        )
+        assert len(old_points) == 5
+        assert (await client.count(collection_name=name)).count == 5
+
+        new_points = await _run_full_pipeline(
+            client,
+            name,
+            tenant_id=tenant_id,
+            source_id=source_id,
+            document_id=document_id,
+            html=_html_with_sections("one (updated)", "two (updated)", "three (updated)"),
+            embedding_version="v1",
+        )
+        assert len(new_points) == 3
+
+        # The gap: the collection still has all 5 points, not 3 -- chunk
+        # indices 3/4's old points were never touched by this second run
+        # at all (the new pipeline run never produced a chunk_index 3 or 4
+        # to upsert), so they remain exactly as they were.
+        total = await client.count(collection_name=name)
+        assert total.count == 5
+
+        # The 3 surviving-index points DID correctly overwrite in place
+        # (same ids as before, same point count as old_points[:3] -- the
+        # positive half of the idempotency guarantee still holds for
+        # indices that still exist).
+        assert {p.id for p in new_points} == {p.id for p in old_points[:3]}
+        updated = await client.retrieve(
+            collection_name=name, ids=[old_points[0].id], with_payload=True
+        )
+        assert updated[0].payload["text"] == "one (updated)"
+
+        # The 2 orphaned points (old chunk_index 3, 4) are still present,
+        # completely unchanged, with their OLD content -- confirmed stale,
+        # not coincidentally fine.
+        orphaned = await client.retrieve(
+            collection_name=name, ids=[old_points[3].id, old_points[4].id], with_payload=True
+        )
+        assert len(orphaned) == 2
+        assert {r.payload["text"] for r in orphaned} == {"four", "five"}

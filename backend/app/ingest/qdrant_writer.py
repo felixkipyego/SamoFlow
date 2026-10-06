@@ -30,6 +30,7 @@
 # qdrant_client at all before 2.5.d exists.
 import uuid
 
+from qdrant_client import AsyncQdrantClient
 from qdrant_client.http.models import PointStruct, SparseVector
 
 from app.ingest.embedding import SparseVectorData
@@ -138,3 +139,40 @@ def build_point(
         },
         payload=payload,
     )
+
+
+async def upsert_points(
+    client: AsyncQdrantClient, collection_name: str, points: list[PointStruct]
+) -> None:
+    """Upserts a batch of points into `collection_name` in ONE real Qdrant
+    call -- confirmed live by reading AsyncQdrantClient.upsert()'s own
+    docstring ("Batch or list of points to insert") rather than assumed:
+    `points` natively accepts a list of multiple PointStruct objects, no
+    one-at-a-time loop needed. `collection_name` is a parameter, not the
+    hardcoded real app.qdrant.COLLECTION_NAME, matching ensure_collection()'s
+    own precedent -- so a test can point this at its own disposable
+    collection while a real caller passes the real one.
+
+    Task 2.5.d. This is the first and only method call this module makes
+    (build_point_id()/build_payload()/build_point() above call none) --
+    upsert itself, confirmed classified under test_qdrant_read_path_guard.
+    py's own WRITE_METHODS, not READ_METHODS (read directly, not assumed).
+    This is what finally resolves the Step-1.3.e-owned marker's own
+    "write-classified methods only, never read-classified" half -- the
+    allow-list entry itself landed early, at 2.5.c (see that task's own
+    decision entry), but could not be fully checked until a real method
+    call existed in this file. It now does, and it is write-only.
+
+    Empty input: a clean no-op, no network call at all, matching embed_
+    dense()/embed_sparse()'s own "empty batch is a valid, reachable state"
+    precedent (e.g. a nearly-empty document, 2.4.b's own is_nearly_empty
+    concept, producing zero chunks and therefore zero points). This is not
+    merely stylistic consistency: confirmed live that the real Qdrant
+    server actively REJECTS an empty upsert with 400 Bad Request ("Empty
+    update request") -- calling through to client.upsert() with an empty
+    list would be a real, confirmed error, not a harmless no-op at the
+    server level, so the guard here is load-bearing, not decorative.
+    """
+    if not points:
+        return
+    await client.upsert(collection_name=collection_name, points=points)
