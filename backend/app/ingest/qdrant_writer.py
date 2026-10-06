@@ -33,7 +33,9 @@ import uuid
 from qdrant_client import AsyncQdrantClient
 from qdrant_client.http.models import PointStruct, SparseVector
 
-from app.ingest.embedding import SparseVectorData
+from app.ingest.chunking import chunk_text, compute_content_hash
+from app.ingest.embedding import EMBEDDING_MODEL, SparseVectorData, embed_dense, embed_sparse
+from app.ingest.extract_html import ExtractedContent
 from app.qdrant import DENSE_VECTOR_NAME, SPARSE_VECTOR_NAME
 
 # Task 2.5.c: a project-specific constant, generated ONCE (uuid.uuid4(),
@@ -176,3 +178,88 @@ async def upsert_points(
     if not points:
         return
     await client.upsert(collection_name=collection_name, points=points)
+
+
+async def embed_and_upsert(
+    content: ExtractedContent,
+    *,
+    client: AsyncQdrantClient,
+    collection_name: str,
+    tenant_id: uuid.UUID,
+    source_id: uuid.UUID,
+    source_type: str,
+    document_id: uuid.UUID,
+    source_url: str | None,
+    file_name: str | None,
+    embedding_version: str,
+) -> None:
+    """Task 2.5.e: the end-to-end primitive -- chunk_text() (2.4.c) ->
+    embed_dense()/embed_sparse() (2.5.a/b) -> build_payload()/
+    build_point_id()/build_point() (2.5.c, per chunk) -> upsert_points()
+    (2.5.d, the whole batch in one call). 2.5 stays callerless (Step 2.6's
+    job handler is the first real caller, per the Step 2.5 decision
+    entry's point (e)); `client`/`collection_name` are parameters for the
+    same reason upsert_points() takes them, not hardcoded.
+
+    Batching, confirmed live (not assumed) at 2.5.a/b and re-confirmed
+    here: embed_dense()/embed_sparse() each accept the WHOLE per-document
+    chunk-text list and make exactly ONE call internally (one real OpenAI
+    request; one fastembed model.embed() call) -- so this function calls
+    each exactly once per document, never once per chunk.
+
+    ALL-OR-NOTHING ATOMICITY (point 2's own design, confirmed achievable
+    by construction, not by added try/except machinery): both embedding
+    calls are awaited BEFORE any point is built or upserted. Since each is
+    a single batched call over the whole chunk list, there is no way for
+    "chunk 3 of 5 failed" to leave chunks 1-2's own embeddings sitting
+    around half-used -- the one call either returns every embedding or
+    raises before returning any of them. If either raises, this function
+    raises too, with zero points ever built or upserted for this document
+    -- left UNCAUGHT and unwrapped, matching embed_dense()'s own "no
+    redundant translation layer" precedent (2.5.a), for the caller's own
+    job-failure path to catch (Step 2.1's mark_job_failed()).
+
+    Nearly-empty content (point 3's own design question, decided): NO
+    explicit content.is_nearly_empty check here, deliberately. That
+    decision belongs to whichever caller has it (2.6's future adapter can
+    simply choose not to call this function at all for such content) --
+    adding a second, redundant check here would duplicate a decision the
+    caller is already positioned to make (rule 11). If chunk_text()
+    happens to produce zero chunks anyway (e.g. literally zero content
+    blocks), the already-established empty-input handling at every layer
+    below composes correctly for free: embed_dense([])/embed_sparse([])
+    both return [] with no API call (2.5.a/b), and upsert_points() with an
+    empty list is a clean no-op with no network call (2.5.d) -- proven by
+    a dedicated test, not merely assumed from the individual pieces.
+    """
+    chunks = chunk_text(content)
+    texts = [chunk.text for chunk in chunks]
+
+    dense_vectors = await embed_dense(texts)
+    sparse_vectors = await embed_sparse(texts)
+
+    content_hash = compute_content_hash(content)
+    points = [
+        build_point(
+            build_point_id(document_id, chunk.chunk_index, embedding_version),
+            build_payload(
+                tenant_id=tenant_id,
+                source_id=source_id,
+                source_type=source_type,
+                document_id=document_id,
+                source_url=source_url,
+                file_name=file_name,
+                title=content.title,
+                heading_path=chunk.heading_path,
+                chunk_index=chunk.chunk_index,
+                content_hash=content_hash,
+                embedding_model=EMBEDDING_MODEL,
+                embedding_version=embedding_version,
+                text=chunk.text,
+            ),
+            dense_vectors[i],
+            sparse_vectors[i],
+        )
+        for i, chunk in enumerate(chunks)
+    ]
+    await upsert_points(client, collection_name, points)

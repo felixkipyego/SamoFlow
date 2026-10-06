@@ -1225,7 +1225,7 @@ first real `job_type`/`enqueue()` caller.
 | 2.5.b | Sparse (BM25-style) embedding primitive: `embed_sparse(texts) -> list[SparseVectorData]` via `fastembed`'s BM25 sparse model, matching the `idf`-modifier-configured sparse slot (1.3.c). New dependency: `fastembed` | Done |
 | 2.5.c | Deterministic point construction: `uuid.uuid5(POINT_ID_NAMESPACE, f"{document_id}:{chunk_index}:{embedding_version}")` (point 2.5 decision (b)) plus the full §5.2 payload, canonical `str(client_id)` form (resolves the Step-1.3.d-owned marker) | Done |
 | 2.5.d | Upsert primitive against the real `knowledge_chunks` collection; confirm the `qdrant_writer.py` `CLIENT_ACCESS_ALLOWLIST` entry (landed early, at 2.5.c) calls write-classified methods only, never `READ_ALLOWLIST` (resolves the Step-1.3.e-owned marker) | Done |
-| 2.5.e | End-to-end `embed_and_upsert()` tying 2.4's `chunk_text()` + 2.5.a–d together [SECURITY rigor, no tag — see decision entry]: the hostile cross-tenant isolation proof — real chunks upserted for tenant A, `tenant_filter(tenant_B)` against the real collection returns zero of them | Not started |
+| 2.5.e | End-to-end `embed_and_upsert()` tying 2.4's `chunk_text()` + 2.5.a–d together [SECURITY rigor, no tag — see decision entry]: the hostile cross-tenant isolation proof — real chunks upserted for tenant A, `tenant_filter(tenant_B)` against the real collection returns zero of them | Done |
 | 2.5.f | Close-out: resolve the `DENSE_VECTOR_SIZE` `ASSUMPTION` (confirmed or revised, per 2.5.a's own live finding) and the "already-indexed content stays answerable" live re-proof (reassigned here from Step 2.4's close-out); update PROJECT_SPEC.md | Not started |
 
 - 2026-10-05: Step 2.5 breakdown approved (docs-only, no code) — six subtasks 2.5.a–2.5.f (see the task list above), based on docs/SPEC.md §5.1–§5.3 (dense + sparse BM25 embedding per chunk, deterministic point IDs from document + chunk index + embedding version, embedding model/version stored on every chunk) and the research reported separately before this approval (confirming the step's own four owned Open markers: the `DENSE_VECTOR_SIZE` `ASSUMPTION`, the `client_id` canonical-form marker, the `CLIENT_ACCESS_ALLOWLIST` marker, and the reassigned "already-indexed content stays answerable" marker). Five decisions confirmed:
@@ -1330,6 +1330,24 @@ first real `job_type`/`enqueue()` caller.
 
   Verified: the end-to-end idempotency proof (above) and the orphaned-chunk proof (above), both live against real test-Qdrant. `make lint` clean. Extended test file (`test_qdrant_writer.py`) run standalone, re-run 3 times for stability: **15 passed** every time, ~2.2-3.0s each run (11 pre-existing + 4 new). Full `backend/tests` without a test database: **480 passed, 157 skipped** (up from 480 passed, 153 skipped — exactly the 4 new tests, all requiring live test-Qdrant, all skipping cleanly with the standard `make test-qdrant` message, 0 new offline passes). `make test-all` (both real test-db and real test-qdrant): **637 passed** (up from 633 — exactly the 4 new tests, now running for real), 0 skipped, both test services confirmed fully removed afterward (`docker ps -a` empty for both). `git status --short` named and cross-checked file by file: `backend/app/ingest/qdrant_writer.py`, `backend/tests/test_qdrant_writer.py` (modified) — exactly the expected two; `test_qdrant_read_path_guard.py` correctly untouched (confirmed, not re-added, per instruction); `.env` correctly absent.
 
+- 2026-10-06: Step 2.5.e — end-to-end `embed_and_upsert()` (extends `backend/app/ingest/qdrant_writer.py`: `embed_and_upsert()`; extends `backend/tests/test_qdrant_writer.py` with a new section). [SECURITY]-level rigor applied throughout, matching the rest of Step 2.5 despite docs/SPEC.md not tagging this step `[SECURITY]` (per the Step 2.5 decision entry's own note) — this is the step's own hostile tenant-isolation proof.
+
+  **Batching, re-confirmed, not re-assumed**: `embed_dense()`/`embed_sparse()` each already accept the WHOLE per-document chunk-text list and make exactly ONE call internally (one real OpenAI request; one `fastembed` `model.embed()` call) — confirmed at 2.5.a/b, re-confirmed here by direct reading before writing `embed_and_upsert()`. This function therefore calls each exactly once per document, never once per chunk.
+
+  **All-or-nothing atomicity, achieved by construction, not by added try/except machinery.** Both embedding calls are awaited BEFORE any point is built or upserted. Because each is a single batched call over the whole chunk list, there is no mechanism by which "chunk 3 of 5 failed" could leave chunks 1-2's own embeddings sitting around half-used — the one call either returns every embedding or raises before returning any of them. A raised exception propagates UNCAUGHT and unwrapped (matching `embed_dense()`'s own "no redundant translation layer" precedent from 2.5.a), with zero points ever built or upserted for that document. **Proven live, not just reasoned**: a stubbed `embed_dense()` raising mid-call for a real 3-chunk document left the collection at exactly 0 points, not a partial 0-2 subset.
+
+  **Nearly-empty content: no explicit `is_nearly_empty` check added, deliberately.** That decision belongs to whichever caller has it — 2.6's future adapter can simply choose not to call `embed_and_upsert()` at all for such content; adding a second, redundant check here would duplicate a decision the caller is already positioned to make (rule 11). Proven live that the natural composition already handles the case correctly for free: a real empty-body HTML document through real `extract_html()` produces `ExtractedContent(blocks=(), word_count=0)`, `chunk_text()` on that produces zero chunks, and the already-established empty-input handling at every layer below (`embed_dense([])`/`embed_sparse([])` return `[]` with no API call, 2.5.a/b; `upsert_points()` with an empty list is a clean no-op with no network call, 2.5.d) composes into a clean, error-free no-op — not merely assumed from the individual pieces.
+
+  **THE DECISIVE HOSTILE ISOLATION PROOF**: two real documents (different real content, different tenants) run through `embed_and_upsert()` independently against the SAME real collection. `tenant_filter(tenant_a)` found exactly tenant A's 2 points (correct text, correct `client_id`); `tenant_filter(tenant_b)` found exactly tenant B's 2 points; the two id sets were confirmed disjoint. This is the complete, final version of this property proven through the single real top-level callable function — not synthetic points (`test_qdrant_isolation.py`, Task 1.3.d) or an isolated sub-component (2.5.c's own one-tenant-then-two-tenant proof through `build_payload()` alone).
+
+  **The idempotency property**, now proven through this exact top-level function too (not just `upsert_points()` directly, as at 2.5.d): the same document run through `embed_and_upsert()` twice left the collection at 2 points, not 4.
+
+  **A known, pre-flagged duplication, left untouched on purpose**: 2.5.d's own `test_qdrant_writer.py::_run_full_pipeline()` test helper is now a test-only duplicate of what `embed_and_upsert()` does for real. Not touched here — 2.5.d is a completed task (rule 2), and this is exactly the kind of cross-task consolidation the next duplication check should decide, not a one-off mid-task fix.
+
+  ASSUMPTION: none. UNCERTAIN: none. TODO: none new. Current task set to 2.5.f, next to "Step 2.6 breakdown" — confirmed via direct precedent lookup (2.4.f's own entry, one task before its step's own close-out 2.4.g, set its own `next` to "Step 2.5 breakdown" already, not bare "Step 2.5" — the identical shape here, one task before 2.5.f's own close-out). **Counter reaches n=2.**
+
+  Verified: the hostile isolation proof (above). `make lint` clean. Extended test file (`test_qdrant_writer.py`) run standalone, re-run 3 times for stability: **20 passed** every time, ~3.1-5.3s each run (15 pre-existing + 5 new). Full `backend/tests` without a test database: **480 passed, 162 skipped** (up from 480 passed, 157 skipped — exactly the 5 new tests, all requiring live test-Qdrant, all skipping cleanly with the standard `make test-qdrant` message, 0 new offline passes). `make test-all` (both real test-db and real test-qdrant): **642 passed** (up from 637 — exactly the 5 new tests, now running for real), 0 skipped, both test services confirmed fully removed afterward (`docker ps -a` empty for both). `git status --short` named and cross-checked file by file: `backend/app/ingest/qdrant_writer.py`, `backend/tests/test_qdrant_writer.py` (modified) — exactly the expected two, `.env` correctly absent.
+
 ### Estimates to measure
 
 - The default limits in §9 and the budgets in §17 are starting points.
@@ -1353,8 +1371,8 @@ first real `job_type`/`enqueue()` caller.
 
 ## 7. Current task and next task
 
-Current: Step 2.5.e.
-Next: Step 2.5.f.
+Current: Step 2.5.f.
+Next: Step 2.6 breakdown.
 Do not modify (completed tasks): 1.1.a, 1.1.b, 1.1.c, 1.1.d, 1.1.e, 1.1.f, 1.1.g, 1.1.h, 1.1.i, 1.1.j, 1.1.k, 1.1.l, 1.1.m, 1.1.n, 1.1.o.a, 1.1.o.b, 1.1.o.c, 1.1.o.d, 1.1.o.e, 1.1.o.f, 1.1.o.g, 1.1.o.h, 1.1b, 1.1c, 1.2.a, 1.2.b, 1.2.c, 1.2.d, 1.2.e, 1.2.f, 1.3.a1, 1.3.a2, 1.3.b, 1.3.c, 1.3.d, 1.3.e, 1.3.f, 1.4.a, 1.4.b, 1.4.c, 1.4.d, 1.4.e, 1.4.f, 1.4.g, 1.4.h, 1.4.i, 1.4.j, 1.4.k, 1.4.l, 1.5.a, 1.5.b, 1.5.c, 1.5.d, 1.5.e, 1.5.f, 1.6.a, 1.6.b, 1.6.c, 1.6.d, 1.6.e, 2.1.a, 2.1.b, 2.1.c, 2.1.d, 2.1.e, 2.1.f, 2.1.g, 2.1.h, 2.2.a, 2.2.b, 2.2.c, 2.2.d, 2.2.e, 2.2.f, 2.2.g, 2.2.h, 2.2.i, 2.3.a, 2.3.b, 2.3.c, 2.3.d, 2.3.e, 2.4.a, 2.4.b, 2.4.c, 2.4.d, 2.4.e, 2.4.f, 2.4.g, 2.5.a.
 
 ### Step 1.1 task list (approved)
@@ -1777,7 +1795,7 @@ here.
 
 ## 8. Task counter since the last duplication check
 
-n = 1 — 2.5.d counted (see its decision log entry above).
+n = 2 — 2.5.d, 2.5.e counted (see their decision log entries above).
 
 ## 9. Open markers
 

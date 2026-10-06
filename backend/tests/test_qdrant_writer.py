@@ -23,7 +23,13 @@ from app.ingest import embedding
 from app.ingest.chunking import chunk_text, compute_content_hash
 from app.ingest.embedding import EMBEDDING_MODEL, SparseVectorData, embed_dense, embed_sparse
 from app.ingest.extract_html import extract_html
-from app.ingest.qdrant_writer import build_payload, build_point, build_point_id, upsert_points
+from app.ingest.qdrant_writer import (
+    build_payload,
+    build_point,
+    build_point_id,
+    embed_and_upsert,
+    upsert_points,
+)
 from tests.conftest import live_qdrant_collection
 
 
@@ -498,3 +504,226 @@ async def test_rerunning_with_shrunk_content_leaves_the_removed_chunks_orphaned(
         )
         assert len(orphaned) == 2
         assert {r.payload["text"] for r in orphaned} == {"four", "five"}
+
+
+# --- Task 2.5.e: embed_and_upsert() -- the end-to-end primitive and the ----
+# step's own hostile tenant-isolation proof.
+#
+# embed_dense() stays stubbed, matching 2.5.d's own established pattern
+# (and this task's own confirmed design): reuses _patch_embed_dense() from
+# the 2.5.d section above. NOTE for a future duplication check: _run_full_
+# pipeline() (2.5.d section, above) is now a test-only duplicate of what
+# embed_and_upsert() does for real -- not touched here, since 2.5.d is a
+# completed task and this consolidation is exactly the kind of thing the
+# next duplication check should decide, not a one-off fix mid-task.
+async def _patch_embed_dense_to_raise(monkeypatch, error: Exception) -> None:
+    class _RaisingEmbeddingsResource:
+        async def create(self, *, model, input):  # noqa: A002
+            raise error
+
+    class _RaisingClient:
+        def __init__(self) -> None:
+            self.embeddings = _RaisingEmbeddingsResource()
+
+    monkeypatch.setattr(embedding, "_get_client", lambda: _RaisingClient())
+
+
+async def test_embed_and_upsert_a_real_document_lands_correct_points_with_correct_payloads(
+    monkeypatch,
+):
+    _patch_embed_dense(monkeypatch)
+    async with live_qdrant_collection("embed_and_upsert") as (client, name):
+        await qdrant.ensure_collection(client, name)
+        tenant_id, source_id, document_id = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+        content = extract_html(
+            _html_with_sections("first section text", "second section text", "third one")
+        )
+
+        await embed_and_upsert(
+            content,
+            client=client,
+            collection_name=name,
+            tenant_id=tenant_id,
+            source_id=source_id,
+            source_type="urls",
+            document_id=document_id,
+            source_url="https://example.com/page",
+            file_name=None,
+            embedding_version="v1",
+        )
+
+        count = await client.count(collection_name=name)
+        assert count.count == 3  # one chunk per section
+        records, _ = await client.scroll(
+            collection_name=name, scroll_filter=qdrant.tenant_filter(tenant_id), limit=10
+        )
+        assert len(records) == 3
+        payloads_by_index = {r.payload["chunk_index"]: r.payload for r in records}
+        assert payloads_by_index.keys() == {0, 1, 2}
+        assert payloads_by_index[0]["text"] == "first section text"
+        assert payloads_by_index[0]["client_id"] == str(tenant_id)
+        assert payloads_by_index[0]["doc_id"] == str(document_id)
+        assert payloads_by_index[0]["source_type"] == "urls"
+        assert payloads_by_index[0]["embedding_model"] == EMBEDDING_MODEL
+        assert payloads_by_index[0]["embedding_version"] == "v1"
+
+
+async def test_embed_and_upsert_hostile_isolation_proof_two_tenants_two_real_documents(
+    monkeypatch,
+):
+    # THE decisive hostile isolation proof (Task 2.5.e, point (b)) -- the
+    # complete, final version of this property proven through the single
+    # real top-level callable, not synthetic points (test_qdrant_isolation.
+    # py, Task 1.3.d) or an isolated sub-component (test_qdrant_writer.py's
+    # own 2.5.c proof, one tenant through build_payload() alone).
+    _patch_embed_dense(monkeypatch)
+    async with live_qdrant_collection("hostile_isolation") as (client, name):
+        await qdrant.ensure_collection(client, name)
+        tenant_a, tenant_b = uuid.uuid4(), uuid.uuid4()
+
+        await embed_and_upsert(
+            extract_html(_html_with_sections("alpha tenant content", "alpha second section")),
+            client=client,
+            collection_name=name,
+            tenant_id=tenant_a,
+            source_id=uuid.uuid4(),
+            source_type="urls",
+            document_id=uuid.uuid4(),
+            source_url="https://a.example.com/page",
+            file_name=None,
+            embedding_version="v1",
+        )
+        await embed_and_upsert(
+            extract_html(
+                _html_with_sections(
+                    "beta tenant totally different content", "beta second section here too"
+                )
+            ),
+            client=client,
+            collection_name=name,
+            tenant_id=tenant_b,
+            source_id=uuid.uuid4(),
+            source_type="urls",
+            document_id=uuid.uuid4(),
+            source_url="https://b.example.com/page",
+            file_name=None,
+            embedding_version="v1",
+        )
+
+        assert (await client.count(collection_name=name)).count == 4  # 2 chunks x 2 tenants
+
+        records_a, _ = await client.scroll(
+            collection_name=name, scroll_filter=qdrant.tenant_filter(tenant_a), limit=10
+        )
+        records_b, _ = await client.scroll(
+            collection_name=name, scroll_filter=qdrant.tenant_filter(tenant_b), limit=10
+        )
+
+        assert len(records_a) == 2
+        assert all(r.payload["client_id"] == str(tenant_a) for r in records_a)
+        assert {r.payload["text"] for r in records_a} == {
+            "alpha tenant content",
+            "alpha second section",
+        }
+
+        assert len(records_b) == 2
+        assert all(r.payload["client_id"] == str(tenant_b) for r in records_b)
+        assert {r.payload["text"] for r in records_b} == {
+            "beta tenant totally different content",
+            "beta second section here too",
+        }
+
+        # The negative half, explicit: tenant A's own filter finds ONLY
+        # tenant A's points, never any of tenant B's, and vice versa.
+        ids_a = {r.id for r in records_a}
+        ids_b = {r.id for r in records_b}
+        assert ids_a.isdisjoint(ids_b)
+
+
+async def test_embed_and_upsert_partial_embedding_failure_upserts_zero_points(monkeypatch):
+    # THE atomicity proof (Task 2.5.e, point 2): simulating "chunk 3 of 5
+    # failed" with a batched embed_dense() call means the WHOLE call
+    # raises before returning anything -- there is no partial result to
+    # leak into an upsert. Confirmed here: the stubbed embed_dense() call
+    # for a real 3-chunk document raises, and ZERO points land in the
+    # collection, not a partial 0-2 subset.
+    await _patch_embed_dense_to_raise(monkeypatch, RuntimeError("simulated embedding failure"))
+    async with live_qdrant_collection("atomicity") as (client, name):
+        await qdrant.ensure_collection(client, name)
+        content = extract_html(
+            _html_with_sections("one section", "two section", "three section")
+        )
+
+        with pytest.raises(RuntimeError, match="simulated embedding failure"):
+            await embed_and_upsert(
+                content,
+                client=client,
+                collection_name=name,
+                tenant_id=uuid.uuid4(),
+                source_id=uuid.uuid4(),
+                source_type="urls",
+                document_id=uuid.uuid4(),
+                source_url="https://example.com/page",
+                file_name=None,
+                embedding_version="v1",
+            )
+
+        assert (await client.count(collection_name=name)).count == 0
+
+
+async def test_embed_and_upsert_nearly_empty_content_is_a_clean_no_op(monkeypatch):
+    # Task 2.5.e, point 3 (decided): no explicit is_nearly_empty check
+    # inside embed_and_upsert() -- real extract_html() on an empty-body
+    # document genuinely produces zero content blocks (confirmed live:
+    # ExtractedContent(blocks=(), word_count=0)), chunk_text() on that
+    # produces zero chunks, and the already-established empty-input
+    # handling at every layer below (embed_dense/embed_sparse/
+    # upsert_points) composes into a clean no-op with no error and no
+    # network call -- proven here, not merely assumed from the pieces.
+    _patch_embed_dense(monkeypatch)
+    async with live_qdrant_collection("nearly_empty") as (client, name):
+        await qdrant.ensure_collection(client, name)
+        content = extract_html("<html><head><title>Empty</title></head><body></body></html>")
+        assert content.blocks == ()  # confirms this really is the zero-chunk case
+
+        await embed_and_upsert(
+            content,
+            client=client,
+            collection_name=name,
+            tenant_id=uuid.uuid4(),
+            source_id=uuid.uuid4(),
+            source_type="urls",
+            document_id=uuid.uuid4(),
+            source_url="https://example.com/empty",
+            file_name=None,
+            embedding_version="v1",
+        )
+
+        assert (await client.count(collection_name=name)).count == 0
+
+
+async def test_embed_and_upsert_rerun_on_the_same_document_overwrites_not_duplicates(monkeypatch):
+    # The idempotency property (docs/SPEC.md §5.3), now proven through
+    # THIS exact top-level function too -- not just upsert_points()
+    # directly, as in 2.5.d.
+    _patch_embed_dense(monkeypatch)
+    async with live_qdrant_collection("embed_and_upsert_idempotency") as (client, name):
+        await qdrant.ensure_collection(client, name)
+        tenant_id, source_id, document_id = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+        content = extract_html(_html_with_sections("stable content one", "stable content two"))
+
+        for _ in range(2):
+            await embed_and_upsert(
+                content,
+                client=client,
+                collection_name=name,
+                tenant_id=tenant_id,
+                source_id=source_id,
+                source_type="urls",
+                document_id=document_id,
+                source_url="https://example.com/page",
+                file_name=None,
+                embedding_version="v1",
+            )
+
+        assert (await client.count(collection_name=name)).count == 2
