@@ -18,8 +18,10 @@ import time
 import uuid
 from datetime import UTC, datetime
 
+import httpx2
 import pytest
 import sqlalchemy as sa
+from openai import AuthenticationError
 
 from app.config import SettingsError, get_settings
 from app.ingest.models import Job
@@ -210,8 +212,50 @@ async def test_run_marks_a_raising_handler_failed_and_keeps_looping(monkeypatch,
     # itself proof this took the non-permanent branch.
     assert row.status == "pending"
     assert row.attempts == 1
-    assert row.error == "handler exploded"
+    # Duplication check after 2.5.a/b/c, C1: type(exc).__name__ only, never
+    # str(exc) -- see worker.py's own comment on this exact line for why
+    # ("handler exploded" is harmless here, but a real handler's exception
+    # message is no longer provably safe for an arbitrary handler).
+    assert row.error == "handler raised RuntimeError"
     assert row.next_run_at > datetime.now(UTC)
+
+
+def _fake_authentication_error(message: str) -> AuthenticationError:
+    # Matches test_embedding.py's own _fake_rate_limit_error() helper
+    # pattern -- a real openai.AuthenticationError, not a bespoke stand-in,
+    # built from the real httpx2 request/response types the SDK itself
+    # uses.
+    request = httpx2.Request("POST", "https://api.openai.com/v1/embeddings")
+    response = httpx2.Response(401, request=request)
+    return AuthenticationError(message, response=response, body=None)
+
+
+async def test_run_never_leaks_a_real_api_key_through_a_handlers_own_exception_message(
+    monkeypatch, _seeded_tenant
+):
+    # Duplication check after 2.5.a/b/c, C1: a live-reproduced security
+    # bug, fixed in worker.py (str(exc) -> type(exc).__name__ only) --
+    # this test proves the fix, mirroring test_config.py's own
+    # test_settings_error_chain_never_carries_the_openai_api_key pattern
+    # but for THIS propagation path (a real handler's own real SDK
+    # exception, through _claim_and_process_one_job()'s except block, into
+    # the job row's stored error column) rather than Settings validation.
+    # Confirmed live (duplication check research): a real
+    # openai.AuthenticationError's own str() can echo the submitted API
+    # key verbatim -- e.g. "Incorrect API key provided: sk-...".
+    distinctive_key = "sk-DISTINCTIVE-FAKE-LEAK-TEST-KEY-13579"
+
+    async def _raises_with_a_leaked_looking_key(payload: dict) -> None:
+        raise _fake_authentication_error(f"Incorrect API key provided: {distinctive_key}")
+
+    monkeypatch.setitem(JOB_HANDLERS, "leaks-key-test-only", _raises_with_a_leaked_looking_key)
+    job_id = await _enqueue(_seeded_tenant, "leaks-key-test-only")
+
+    await asyncio.wait_for(run(asyncio.Event(), max_iterations=1), timeout=10)
+
+    row = await _fetch_job(job_id)
+    assert row.error == "handler raised AuthenticationError"
+    assert distinctive_key not in row.error
 
     # The loop itself completed (run() returned via max_iterations, not an
     # unhandled exception) -- that this test reached this line at all,

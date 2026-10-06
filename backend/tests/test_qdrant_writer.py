@@ -19,7 +19,7 @@ import pytest
 from qdrant_client.http.models import PointStruct, SparseVector
 
 from app import qdrant
-from app.ingest.embedding import SparseVectorData
+from app.ingest.embedding import EMBEDDING_MODEL, SparseVectorData
 from app.ingest.qdrant_writer import build_payload, build_point, build_point_id
 from tests.conftest import live_qdrant_collection
 
@@ -72,7 +72,7 @@ def _sample_payload(**overrides) -> dict:
         "heading_path": ("Intro", "Getting started"),
         "chunk_index": 0,
         "content_hash": "abc123",
-        "embedding_model": "text-embedding-3-small",
+        "embedding_model": EMBEDDING_MODEL,
         "embedding_version": "v1",
         "text": "hello world",
     }
@@ -113,7 +113,7 @@ def test_build_payload_contains_every_required_field_correctly_typed():
     assert payload["chunk_index"] == 0
     assert isinstance(payload["chunk_index"], int)
     assert payload["content_hash"] == "abc123"
-    assert payload["embedding_model"] == "text-embedding-3-small"
+    assert payload["embedding_model"] == EMBEDDING_MODEL
     assert payload["embedding_version"] == "v1"
     assert payload["text"] == "hello world"
 
@@ -174,42 +174,74 @@ def test_build_point_vector_names_match_the_real_collection_schema():
     assert point.payload == payload
 
 
+def _build_real_point(tenant_id: uuid.UUID, sparse_index: int) -> PointStruct:
+    # Shared by both halves of the live proof below -- one real point,
+    # through the real build_payload()/build_point_id()/build_point() code
+    # path, for whichever tenant_id is passed in. sparse_index keeps the
+    # two tenants' points from being otherwise-identical twins.
+    document_id = uuid.uuid4()
+    payload = build_payload(
+        tenant_id=tenant_id,
+        source_id=uuid.uuid4(),
+        source_type="urls",
+        document_id=document_id,
+        source_url="https://example.com/page",
+        file_name=None,
+        title="Example Page",
+        heading_path=("Intro",),
+        chunk_index=0,
+        content_hash="abc123",
+        embedding_model=EMBEDDING_MODEL,
+        embedding_version="v1",
+        text="hello world",
+    )
+    point_id = build_point_id(document_id, 0, "v1")
+    sparse = SparseVectorData(indices=[sparse_index], values=[1.5])
+    return build_point(point_id, payload, [0.0] * qdrant.DENSE_VECTOR_SIZE, sparse)
+
+
 async def test_a_point_written_with_the_canonical_client_id_form_is_found_by_tenant_filter():
     # THE critical live proof (Task 2.5.c, point 5): build_payload()'s own
     # str(tenant_id) form for client_id must be genuinely matched by
     # app.qdrant.tenant_filter() against a real collection -- not merely
     # plausible-looking. A bare upsert here, scoped to this one test; the
     # full upsert primitive is Task 2.5.d's own job.
+    #
+    # Duplication check after 2.5.a/b/c, C2: extended to seed a SECOND
+    # tenant's point through this same real code path and assert tenant
+    # B's own tenant_filter() EXCLUDES tenant A's point -- the negative
+    # isolation half, not just the positive "A finds A" half originally
+    # proven here. test_qdrant_isolation.py (Task 1.3.d) already proves
+    # this negative property exhaustively for the underlying mechanism
+    # (hand-built payloads using the identical str(uuid.UUID) form); this
+    # test's own new claim is that build_payload()/build_point() THEMSELVES
+    # produce correctly-isolated points, not a hand-typed test dict.
     async with live_qdrant_collection("point_construction") as (client, name):
         await qdrant.ensure_collection(client, name)
 
-        tenant_id = uuid.uuid4()
-        document_id = uuid.uuid4()
-        payload = build_payload(
-            tenant_id=tenant_id,
-            source_id=uuid.uuid4(),
-            source_type="urls",
-            document_id=document_id,
-            source_url="https://example.com/page",
-            file_name=None,
-            title="Example Page",
-            heading_path=("Intro",),
-            chunk_index=0,
-            content_hash="abc123",
-            embedding_model="text-embedding-3-small",
-            embedding_version="v1",
-            text="hello world",
+        tenant_a = uuid.uuid4()
+        tenant_b = uuid.uuid4()
+        point_a = _build_real_point(tenant_a, sparse_index=10)
+        point_b = _build_real_point(tenant_b, sparse_index=20)
+
+        await client.upsert(collection_name=name, points=[point_a, point_b])
+
+        records_a, _ = await client.scroll(
+            collection_name=name, scroll_filter=qdrant.tenant_filter(tenant_a), limit=10
         )
-        point_id = build_point_id(document_id, 0, "v1")
-        sparse = SparseVectorData(indices=[10, 20], values=[1.5, 2.5])
-        point = build_point(point_id, payload, [0.0] * qdrant.DENSE_VECTOR_SIZE, sparse)
-
-        await client.upsert(collection_name=name, points=[point])
-
-        records, _ = await client.scroll(
-            collection_name=name, scroll_filter=qdrant.tenant_filter(tenant_id), limit=10
+        records_b, _ = await client.scroll(
+            collection_name=name, scroll_filter=qdrant.tenant_filter(tenant_b), limit=10
         )
 
-        assert len(records) == 1
-        assert records[0].id == str(point_id)
-        assert records[0].payload["client_id"] == str(tenant_id)
+        assert len(records_a) == 1
+        assert records_a[0].id == str(point_a.id)
+        assert records_a[0].payload["client_id"] == str(tenant_a)
+
+        assert len(records_b) == 1
+        assert records_b[0].id == str(point_b.id)
+        assert records_b[0].payload["client_id"] == str(tenant_b)
+
+        # The negative half: tenant A's filter must not surface tenant B's
+        # point, and vice versa.
+        assert str(point_b.id) not in {r.id for r in records_a}
+        assert str(point_a.id) not in {r.id for r in records_b}

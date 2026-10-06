@@ -31,6 +31,7 @@ from functools import lru_cache
 
 import tiktoken
 
+from app.ingest.embedding import EMBEDDING_MODEL
 from app.ingest.extract_html import ExtractedContent
 
 # Step 2.4 decision (c): module constants, matching DENSE_VECTOR_SIZE's
@@ -39,12 +40,17 @@ from app.ingest.extract_html import ExtractedContent
 MAX_CHUNK_TOKENS = 512
 CHUNK_OVERLAP_TOKENS = 64
 
-_EMBEDDING_MODEL = "text-embedding-3-small"
 
-
+# Duplication check after 2.5.a/b/c: this used to be its own private
+# _EMBEDDING_MODEL copy of the identical literal -- now imported from
+# embedding.py (the module that owns this value, Task 2.5.a) instead of
+# redeclared here. Two independent copies risked silent drift: changing
+# the dense embedding model in one file without the other would leave
+# this tokenizer picking the WRONG encoding for the real model. No
+# circular import: embedding.py never imports chunking.py.
 @lru_cache
 def _get_encoding() -> tiktoken.Encoding:
-    return tiktoken.encoding_for_model(_EMBEDDING_MODEL)
+    return tiktoken.encoding_for_model(EMBEDDING_MODEL)
 
 
 @dataclass(frozen=True)

@@ -169,15 +169,22 @@ async def _claim_and_process_one_job() -> bool:
         # permanent=False (the default): a raising handler could be a
         # transient failure, unlike an unknown job_type above, so this
         # keeps 2.1.c's normal backoff/retry treatment, never the
-        # permanent path. str(exc) is safe to store here: job.payload is
-        # this project's own untrusted ingestion input (never a secret),
-        # and _noop_handler (the only handler registered so far) raises
-        # nothing of its own -- there is no credential or connection
-        # string in this path the way IngestRepository's own pgcrypto
-        # statements had (duplication check after 2.1.a/b, item C1).
-        # Revisit this reasoning once a real handler (2.4+) can itself
-        # touch something sensitive.
-        await _mark_done(job.id, str(exc))
+        # permanent path. type(exc).__name__ only, never str(exc) --
+        # matching the identical, already-correct pattern this same file
+        # uses a few lines below for the claim/process loop's own
+        # exception handler. This used to store str(exc) directly, reasoned
+        # safe only because "_noop_handler (the only handler registered so
+        # far) raises nothing of its own" -- that reasoning's own comment
+        # explicitly said to revisit it "once a real handler (2.4+) can
+        # itself touch something sensitive". embed_dense() (Task 2.5.a) is
+        # exactly such a handler: a real OpenAI AuthenticationError's own
+        # str() can echo the submitted API key verbatim (confirmed live
+        # against the installed SDK during the duplication check after
+        # 2.5.a/b/c), and Step 2.6 will wire embed_dense() into a real job
+        # handler here. str(exc) is no longer provably safe for an
+        # arbitrary handler, so this stays defensive like the sibling
+        # handler below, not merely convenient for debugging.
+        await _mark_done(job.id, f"handler raised {type(exc).__name__}")
         return True
 
     await _mark_done(job.id, None)

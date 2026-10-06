@@ -1310,6 +1310,8 @@ first real `job_type`/`enqueue()` caller.
 
   Verified: the live client_id-findability proof (above). `make lint` clean. New test file (`test_qdrant_writer.py`) run standalone, re-run 3 times for stability: **11 passed** every time, ~0.5-0.6s each run (10 offline + 1 live-Qdrant). Full `backend/tests` without a test database: **480 passed, 152 skipped** (up from 470 passed, 151 skipped — exactly the 11 new tests: 10 offline pass unconditionally, the 1 live-proof test skips cleanly without `TEST_QDRANT_URL`, confirmed as the +1 new skip). `make test-all` (both real test-db and real test-qdrant): **632 passed**, 0 skipped, both test services confirmed fully removed afterward (`docker ps -a` empty for both). `git status --short` named and cross-checked file by file: `backend/tests/test_qdrant_read_path_guard.py` (modified) plus `backend/app/ingest/qdrant_writer.py`, `backend/tests/test_qdrant_writer.py` (new) — exactly the expected three, `.env` correctly absent.
 
+- 2026-10-06: Duplication check after 2.5.a/b/c: confirmed the 1.3.e marker's narrowed-not-closed framing is accurate everywhere; removed a duplicated `EMBEDDING_MODEL` literal between `chunking.py` and `embedding.py` (a real silent-drift risk — wrong tokenizer for the real model); fixed a live-reproduced security bug where `worker.py`'s handler-exception path could leak a real API key through `openai.AuthenticationError`'s own `str()`, extending the already-correct type-name-only pattern used elsewhere in the same file; extended 2.5.c's own live isolation proof to cover the negative case (tenant B correctly excluded) through the real `build_payload()`/`build_point()` code path, not just the already-proven-elsewhere underlying mechanism; D/A3/A4/B1/B2 declined as already accurate or correct.
+
 ### Estimates to measure
 
 - The default limits in §9 and the budgets in §17 are starting points.
@@ -1757,7 +1759,7 @@ here.
 
 ## 8. Task counter since the last duplication check
 
-n = 3 — 2.5.a, 2.5.b, 2.5.c counted (see their decision log entries below).
+n = 0 — reset after the duplication check after 2.5.a/b/c.
 
 ## 9. Open markers
 
