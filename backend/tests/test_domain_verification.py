@@ -17,8 +17,6 @@
 #     that the result is non-empty (never its specific content), proving
 #     the success path actually works end to end without pinning anything
 #     that could drift.
-import http.server
-
 import dns.asyncresolver
 import pytest
 
@@ -34,44 +32,9 @@ from app.ingest.domain_verification import (
     domain_is_verified_by_dns,
     fetch_txt_records,
 )
-from app.ingest.ip_safety import is_unsafe_destination_ip as _real_is_unsafe_destination_ip
-from tests.conftest import local_http_server
+from tests.conftest import fake_is_unsafe_except_loopback, local_http_server, scripted_handler
 
 _FILE_META_TOKEN = "distinctive-file-meta-token-456"  # noqa: S105 (test fixture value)
-
-
-def _fake_is_unsafe_except_loopback(ip) -> bool:
-    # Task 2.6.a: the identical small, local helper test_safe_fetch.py
-    # already defined for the identical reason (its own header comment:
-    # "not extracted to conftest.py -- only this file needs it so far").
-    # Now a second file needs it -- noted here, not consolidated now,
-    # matching this project's own established "flag, don't fix mid-task"
-    # discipline; a future duplication check can decide whether to
-    # extract a shared version. 127.0.0.1 is categorically unsafe by
-    # design, so it is treated as safe FOR TEST PURPOSES ONLY here; every
-    # other address still goes through the real, unmodified check.
-    if str(ip) == "127.0.0.1":
-        return False
-    return _real_is_unsafe_destination_ip(ip)
-
-
-def _scripted_handler(routes: dict):
-    # routes: path -> (status_code, body_bytes). A small local copy of
-    # the identical shape test_safe_fetch.py's own _scripted_handler
-    # already has (same duplication note as above) -- this file's own
-    # needs are simpler (no custom headers), so a trimmed copy, not an
-    # import of that file's own private helper.
-    class _Handler(http.server.BaseHTTPRequestHandler):
-        def do_GET(self):
-            status, body = routes.get(self.path, (404, b"not found"))
-            self.send_response(status)
-            self.end_headers()
-            self.wfile.write(body)
-
-        def log_message(self, *args):
-            pass
-
-    return _Handler
 
 _TOKEN = "abc123-distinctive-token"  # noqa: S105 (test fixture value, not a real secret)
 
@@ -180,7 +143,7 @@ async def test_check_dns_verification_returns_false_for_a_nonexistent_domain():
 
 def _patch_loopback_safe_and_file_url(monkeypatch, port: int) -> None:
     monkeypatch.setattr(
-        safe_fetch_module, "is_unsafe_destination_ip", _fake_is_unsafe_except_loopback
+        safe_fetch_module, "is_unsafe_destination_ip", fake_is_unsafe_except_loopback
     )
     monkeypatch.setattr(
         domain_verification,
@@ -191,7 +154,7 @@ def _patch_loopback_safe_and_file_url(monkeypatch, port: int) -> None:
 
 def _patch_loopback_safe_and_meta_tag_url(monkeypatch, port: int) -> None:
     monkeypatch.setattr(
-        safe_fetch_module, "is_unsafe_destination_ip", _fake_is_unsafe_except_loopback
+        safe_fetch_module, "is_unsafe_destination_ip", fake_is_unsafe_except_loopback
     )
     monkeypatch.setattr(
         domain_verification, "_meta_tag_verification_url", lambda domain: f"http://127.0.0.1:{port}/"
@@ -200,7 +163,7 @@ def _patch_loopback_safe_and_meta_tag_url(monkeypatch, port: int) -> None:
 
 async def test_check_file_verification_with_the_correct_token_is_true(monkeypatch):
     with local_http_server(
-        _scripted_handler({FILE_VERIFICATION_PATH: (200, _FILE_META_TOKEN.encode())})
+        scripted_handler({FILE_VERIFICATION_PATH: (200, _FILE_META_TOKEN.encode())})
     ) as port:
         _patch_loopback_safe_and_file_url(monkeypatch, port)
         verified = await check_file_verification("test.example", _FILE_META_TOKEN)
@@ -209,7 +172,7 @@ async def test_check_file_verification_with_the_correct_token_is_true(monkeypatc
 
 async def test_check_file_verification_with_a_wrong_token_is_false(monkeypatch):
     with local_http_server(
-        _scripted_handler({FILE_VERIFICATION_PATH: (200, b"some-other-token")})
+        scripted_handler({FILE_VERIFICATION_PATH: (200, b"some-other-token")})
     ) as port:
         _patch_loopback_safe_and_file_url(monkeypatch, port)
         verified = await check_file_verification("test.example", _FILE_META_TOKEN)
@@ -217,7 +180,7 @@ async def test_check_file_verification_with_a_wrong_token_is_false(monkeypatch):
 
 
 async def test_check_file_verification_on_a_404_is_false_not_an_exception(monkeypatch):
-    with local_http_server(_scripted_handler({})) as port:  # no routes -- every path 404s
+    with local_http_server(scripted_handler({})) as port:  # no routes -- every path 404s
         _patch_loopback_safe_and_file_url(monkeypatch, port)
         verified = await check_file_verification("test.example", _FILE_META_TOKEN)
     assert verified is False
@@ -229,7 +192,7 @@ async def test_check_file_verification_tolerates_a_trailing_newline(monkeypatch)
     # trailing newline (near-universal from real text editors/webservers)
     # must not fail an otherwise-correct token.
     with local_http_server(
-        _scripted_handler({FILE_VERIFICATION_PATH: (200, f"{_FILE_META_TOKEN}\n".encode())})
+        scripted_handler({FILE_VERIFICATION_PATH: (200, f"{_FILE_META_TOKEN}\n".encode())})
     ) as port:
         _patch_loopback_safe_and_file_url(monkeypatch, port)
         verified = await check_file_verification("test.example", _FILE_META_TOKEN)
@@ -258,7 +221,7 @@ async def test_check_meta_tag_verification_with_the_correct_tag_is_true(monkeypa
         f'<html><head><meta name="{META_TAG_NAME}" content="{_FILE_META_TOKEN}">'
         "</head><body>hello</body></html>"
     ).encode()
-    with local_http_server(_scripted_handler({"/": (200, html)})) as port:
+    with local_http_server(scripted_handler({"/": (200, html)})) as port:
         _patch_loopback_safe_and_meta_tag_url(monkeypatch, port)
         verified = await check_meta_tag_verification("test.example", _FILE_META_TOKEN)
     assert verified is True
@@ -269,7 +232,7 @@ async def test_check_meta_tag_verification_with_a_wrong_token_in_the_tag_is_fals
         f'<html><head><meta name="{META_TAG_NAME}" content="wrong-token">'
         "</head><body>hello</body></html>"
     ).encode()
-    with local_http_server(_scripted_handler({"/": (200, html)})) as port:
+    with local_http_server(scripted_handler({"/": (200, html)})) as port:
         _patch_loopback_safe_and_meta_tag_url(monkeypatch, port)
         verified = await check_meta_tag_verification("test.example", _FILE_META_TOKEN)
     assert verified is False
@@ -288,7 +251,7 @@ async def test_check_meta_tag_verification_token_present_elsewhere_but_not_in_th
         f'content="wrong-token"></head>'
         f"<body>{_FILE_META_TOKEN}</body></html>"
     ).encode()
-    with local_http_server(_scripted_handler({"/": (200, html)})) as port:
+    with local_http_server(scripted_handler({"/": (200, html)})) as port:
         _patch_loopback_safe_and_meta_tag_url(monkeypatch, port)
         verified = await check_meta_tag_verification("test.example", _FILE_META_TOKEN)
     assert verified is False
@@ -298,7 +261,7 @@ async def test_check_meta_tag_verification_with_no_meta_tag_at_all_is_false_not_
     monkeypatch,
 ):
     html = b"<html><head><title>No tag here</title></head><body>hello</body></html>"
-    with local_http_server(_scripted_handler({"/": (200, html)})) as port:
+    with local_http_server(scripted_handler({"/": (200, html)})) as port:
         _patch_loopback_safe_and_meta_tag_url(monkeypatch, port)
         verified = await check_meta_tag_verification("test.example", _FILE_META_TOKEN)
     assert verified is False

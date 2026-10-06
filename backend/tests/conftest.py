@@ -46,6 +46,7 @@ import ast
 import asyncio
 import http.server
 import importlib
+import ipaddress
 import os
 import socket
 import sys
@@ -73,6 +74,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app import all_models, db, qdrant  # noqa: F401
 from app.config import POSTGRES_SCHEME, Settings, get_settings
 from app.ingest import embedding
+from app.ingest.ip_safety import is_unsafe_destination_ip
 from app.ingest.models import Job
 from app.ingest.repository import IngestRepository
 from app.tenancy.models import Tenant
@@ -660,6 +662,49 @@ def local_http_server(handler_cls: type[http.server.BaseHTTPRequestHandler]) -> 
     finally:
         server.shutdown()
         thread.join()
+
+
+def fake_is_unsafe_except_loopback(
+    ip: ipaddress.IPv4Address | ipaddress.IPv6Address,
+) -> bool:
+    # Duplication check after 2.6.a/b/c: this exact two-line function
+    # existed as three separate, byte-identical local copies --
+    # test_safe_fetch.py (2.3.d, the original), test_domain_verification.py
+    # (2.6.a, already flagged there as a second occurrence), and
+    # test_web_adapter.py (2.6.c, the confirmed 3rd) -- past this
+    # project's own established extraction threshold. 127.0.0.1 is
+    # categorically unsafe by design (ip_safety.py), so it is treated as
+    # safe FOR TEST PURPOSES ONLY here, letting a real local HTTP server
+    # be used against SSRF-guarded primitives; every other address still
+    # goes through the real, unmodified is_unsafe_destination_ip().
+    if str(ip) == "127.0.0.1":
+        return False
+    return is_unsafe_destination_ip(ip)
+
+
+def scripted_handler(routes: dict):
+    # Duplication check after 2.6.a/b/c: the simple `path -> (status_code,
+    # body_bytes)` handler factory existed as two separate, byte-identical
+    # local copies -- test_domain_verification.py (2.6.a) and
+    # test_web_adapter.py (2.6.c) -- past this project's own established
+    # extraction threshold. test_safe_fetch.py's own _scripted_handler
+    # stays local and separate: it supports a third element (custom
+    # response headers, needed for its own redirect-chain Location-header
+    # tests), a genuinely different shape, not duplication of this one.
+    # routes is read fresh on EVERY request, so a caller can mutate the
+    # dict after the server has already started (used by callers that
+    # change what the SAME running server returns on a later request).
+    class _Handler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            status, body = routes.get(self.path, (404, b"not found"))
+            self.send_response(status)
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *args):
+            pass
+
+    return _Handler
 
 
 @asynccontextmanager

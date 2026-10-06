@@ -26,13 +26,14 @@
 # Task 2.3.d: fetch_with_redirects()'s own tests, against local servers
 # under this file's own control (never real third-party redirects, for
 # the same reliability reasons 2.3.c's own size-cap test already gives).
-# _fake_is_unsafe_except_loopback() is this file's own small, local
-# helper (not extracted to conftest.py -- only this file needs it so
-# far): 127.0.0.1 is categorically unsafe by design, so every redirect
-# test below treats it as safe FOR TEST PURPOSES ONLY, while every OTHER
-# address still goes through the real, unmodified is_unsafe_destination_ip()
-# -- this is what lets a chain's later hop (a genuinely different,
-# untouched address) still be rejected for real within the same test.
+# fake_is_unsafe_except_loopback() (tests/conftest.py, extracted at the
+# duplication check after 2.6.a/b/c -- this file's own original copy was
+# the first of what became 3 identical copies): 127.0.0.1 is categorically
+# unsafe by design, so every redirect test below treats it as safe FOR
+# TEST PURPOSES ONLY, while every OTHER address still goes through the
+# real, unmodified is_unsafe_destination_ip() -- this is what lets a
+# chain's later hop (a genuinely different, untouched address) still be
+# rejected for real within the same test.
 import http.server
 import ipaddress
 import socket
@@ -43,20 +44,17 @@ import pytest
 
 from app.ingest import safe_fetch as safe_fetch_module
 from app.ingest.host_safety import resolve_and_validate
-from app.ingest.ip_safety import is_unsafe_destination_ip as _real_is_unsafe_destination_ip
 from app.ingest.safe_fetch import (
     UnsafeFetchError,
     _fetch_pinned,
     fetch_with_redirects,
     safe_fetch,
 )
-from tests.conftest import assert_no_socket_connections, local_http_server
-
-
-def _fake_is_unsafe_except_loopback(ip) -> bool:
-    if str(ip) == "127.0.0.1":
-        return False
-    return _real_is_unsafe_destination_ip(ip)
+from tests.conftest import (
+    assert_no_socket_connections,
+    fake_is_unsafe_except_loopback,
+    local_http_server,
+)
 
 
 def _scripted_handler(routes: dict):
@@ -250,15 +248,15 @@ async def test_a_single_safe_redirect_is_followed_and_final_content_returned(
     monkeypatch,
 ):
     monkeypatch.setattr(
-        safe_fetch_module, "is_unsafe_destination_ip", _fake_is_unsafe_except_loopback
+        safe_fetch_module, "is_unsafe_destination_ip", fake_is_unsafe_except_loopback
     )
     routes: dict = {}
     with local_http_server(_scripted_handler(routes)) as port:
         routes["/start"] = (302, {"Location": f"http://127.0.0.1:{port}/final"}, b"")
         routes["/final"] = (200, {}, b"final content here")
-        body = await fetch_with_redirects(f"http://127.0.0.1:{port}/start")
+        result = await fetch_with_redirects(f"http://127.0.0.1:{port}/start")
 
-    assert body == b"final content here"
+    assert result.body == b"final content here"
 
 
 async def test_hop_2_pointing_at_an_unsafe_address_is_rejected_with_zero_connection_to_it(
@@ -275,7 +273,7 @@ async def test_hop_2_pointing_at_an_unsafe_address_is_rejected_with_zero_connect
     # is used instead -- real connections proceed completely unmodified,
     # except to the one address this test must prove is never reached.
     monkeypatch.setattr(
-        safe_fetch_module, "is_unsafe_destination_ip", _fake_is_unsafe_except_loopback
+        safe_fetch_module, "is_unsafe_destination_ip", fake_is_unsafe_except_loopback
     )
 
     real_connect = socket.socket.connect
@@ -309,7 +307,7 @@ async def test_a_chain_exceeding_the_redirect_cap_fails_closed(monkeypatch):
     # fail closed rather than follow it, and never reach the real "final"
     # content a 5th hop would have returned.
     monkeypatch.setattr(
-        safe_fetch_module, "is_unsafe_destination_ip", _fake_is_unsafe_except_loopback
+        safe_fetch_module, "is_unsafe_destination_ip", fake_is_unsafe_except_loopback
     )
     routes: dict = {}
     with local_http_server(_scripted_handler(routes)) as port:
@@ -328,7 +326,7 @@ async def test_a_relative_location_header_is_resolved_against_the_current_hop(
     monkeypatch,
 ):
     monkeypatch.setattr(
-        safe_fetch_module, "is_unsafe_destination_ip", _fake_is_unsafe_except_loopback
+        safe_fetch_module, "is_unsafe_destination_ip", fake_is_unsafe_except_loopback
     )
     routes: dict = {}
     with local_http_server(_scripted_handler(routes)) as port:
@@ -338,9 +336,9 @@ async def test_a_relative_location_header_is_resolved_against_the_current_hop(
         # treated as a literal, scheme-less target.
         routes["/start"] = (302, {"Location": "/relative-target"}, b"")
         routes["/relative-target"] = (200, {}, b"reached via a relative redirect")
-        body = await fetch_with_redirects(f"http://127.0.0.1:{port}/start")
+        result = await fetch_with_redirects(f"http://127.0.0.1:{port}/start")
 
-    assert body == b"reached via a relative redirect"
+    assert result.body == b"reached via a relative redirect"
 
 
 async def test_each_hop_gets_its_own_fresh_size_cap_not_a_cumulative_one(monkeypatch):
@@ -352,7 +350,7 @@ async def test_each_hop_gets_its_own_fresh_size_cap_not_a_cumulative_one(monkeyp
     # would exceed it. A cumulative implementation would fail partway
     # through hop 2; this must succeed, returning hop 2's own body.
     monkeypatch.setattr(
-        safe_fetch_module, "is_unsafe_destination_ip", _fake_is_unsafe_except_loopback
+        safe_fetch_module, "is_unsafe_destination_ip", fake_is_unsafe_except_loopback
     )
     routes: dict = {}
     with local_http_server(_scripted_handler(routes)) as port:
@@ -363,8 +361,8 @@ async def test_each_hop_gets_its_own_fresh_size_cap_not_a_cumulative_one(monkeyp
             hop_body,
         )
         routes["/final"] = (200, {}, hop_body)
-        body = await fetch_with_redirects(
+        result = await fetch_with_redirects(
             f"http://127.0.0.1:{port}/start", max_size_bytes=100_000
         )
 
-    assert body == hop_body
+    assert result.body == hop_body

@@ -184,10 +184,10 @@ async def check_file_verification(domain: str, expected_token: str) -> bool:
     """
     url = _file_verification_url(domain)
     try:
-        body = await fetch_with_redirects(url)
+        result = await fetch_with_redirects(url)
     except (UnsafeFetchError, httpx.HTTPError):
         return False
-    return body.decode("utf-8", errors="replace").strip() == expected_token
+    return result.body.decode("utf-8", errors="replace").strip() == expected_token
 
 
 async def check_meta_tag_verification(domain: str, expected_token: str) -> bool:
@@ -205,10 +205,10 @@ async def check_meta_tag_verification(domain: str, expected_token: str) -> bool:
     """
     url = _meta_tag_verification_url(domain)
     try:
-        body = await fetch_with_redirects(url)
+        result = await fetch_with_redirects(url)
     except (UnsafeFetchError, httpx.HTTPError):
         return False
-    soup = BeautifulSoup(body.decode("utf-8", errors="replace"), "lxml")
+    soup = BeautifulSoup(result.body.decode("utf-8", errors="replace"), "lxml")
     tag = soup.head.find("meta", attrs={"name": META_TAG_NAME}) if soup.head else None
     if tag is None:
         return False

@@ -16,15 +16,24 @@
 # pattern for exercising HTTPS-only production code against plain HTTP.
 #
 # is_unsafe_destination_ip is monkeypatched so 127.0.0.1 is treated as
-# safe FOR TEST PURPOSES ONLY -- the identical small helper
-# test_safe_fetch.py and test_domain_verification.py each already define
-# locally. This is now the THIRD occurrence (flagged here, not
-# consolidated now, matching this project's own established "flag, don't
-# fix mid-task" discipline -- a candidate for the next duplication
-# check).
+# safe FOR TEST PURPOSES ONLY -- fake_is_unsafe_except_loopback()
+# (tests/conftest.py, extracted at the duplication check after
+# 2.6.a/b/c -- this file's own original copy was the confirmed 3rd
+# identical copy, past this project's own extraction threshold).
+#
+# Duplication check after 2.6.a/b/c, item A3: tests (a)/(b)/(c)/(e)/(f)
+# below all repeated the identical "patch is_unsafe_destination_ip,
+# optionally patch_embed_dense(), unpack live_test_services, ensure_
+# collection(), seed tenant/source/verified-domain" setup -- consolidated
+# into _setup() below. Test (d) deliberately does NOT use it: it needs
+# neither a verified domain nor the is_unsafe_destination_ip patch (zero
+# fetch is ever attempted), a structurally different setup, not an
+# oversight.
 import http.server
 import socket
+import threading
 import uuid
+from contextlib import contextmanager
 
 import sqlalchemy as sa
 
@@ -39,11 +48,24 @@ from app.tenancy.models import Tenant
 from tests.conftest import (
     assert_no_socket_connections,
     db_session,
+    fake_is_unsafe_except_loopback,
     local_http_server,
     patch_embed_dense,
+    scripted_handler,
 )
 
 _LOOPBACK_HOST = "127.0.0.1"
+# C1 [SECURITY] fix (duplication check after 2.6.a/b/c): the IPv6
+# loopback address, standing in for "a different host" from the verified
+# one, for the new redirect-to-an-unverified-host test below. Still an IP
+# literal (no DNS, no third-party content, as deterministic as every
+# other test here) -- confirmed live to be the only genuinely portable
+# choice: a second IPv4 loopback alias (127.0.0.2) needs OS-level network
+# configuration most systems don't have by default (confirmed live: fails
+# with "Can't assign requested address" on this machine), while ::1 is a
+# real, independently bindable loopback address on both Linux and macOS
+# with zero special setup.
+_IPV6_LOOPBACK_HOST = "::1"
 
 # 50+ words (NEARLY_EMPTY_WORD_THRESHOLD, extract_html.py) -- real content,
 # not nearly-empty.
@@ -59,28 +81,54 @@ _RICH_BODY_V2 = (
 _SPARSE_BODY = "<html><head><title>Sparse</title></head><body><p>too short</p></body></html>"
 
 
-def _fake_is_unsafe_except_loopback(ip) -> bool:
-    if str(ip) == _LOOPBACK_HOST:
+def _fake_is_unsafe_except_both_loopback_hosts(ip) -> bool:
+    # C1 [SECURITY] fix: a local variant of fake_is_unsafe_except_loopback
+    # (tests/conftest.py) that permits BOTH loopback addresses used by
+    # the redirect-to-an-unverified-host test below -- a genuinely
+    # different need (two addresses, not one), not the same duplicated
+    # logic, so kept local rather than folded into the shared one-address
+    # version.
+    if str(ip) in (_LOOPBACK_HOST, _IPV6_LOOPBACK_HOST):
         return False
     return _real_is_unsafe_destination_ip(ip)
 
 
-def _scripted_handler(routes: dict):
-    # routes: path -> (status_code, body_bytes), read fresh on EVERY
-    # request -- a caller can mutate the dict between requests (used by
-    # the "changed content" test below) to change what the SAME running
-    # server returns on a later request.
+def _redirect_handler(location: str):
+    # C1 [SECURITY] fix: the shared scripted_handler() (tests/conftest.py)
+    # deliberately supports no custom headers -- this test is the one
+    # place in this file that needs a Location header, so a tiny local
+    # handler, matching test_safe_fetch.py's own precedent of a per-test
+    # custom handler when behavior genuinely differs.
     class _Handler(http.server.BaseHTTPRequestHandler):
         def do_GET(self):
-            status, body = routes.get(self.path, (404, b"not found"))
-            self.send_response(status)
+            self.send_response(302)
+            self.send_header("Location", location)
             self.end_headers()
-            self.wfile.write(body)
 
         def log_message(self, *args):
             pass
 
     return _Handler
+
+
+class _IPv6HTTPServer(http.server.HTTPServer):
+    address_family = socket.AF_INET6
+
+
+@contextmanager
+def _local_ipv6_http_server(handler_cls: type[http.server.BaseHTTPRequestHandler]):
+    # C1 [SECURITY] fix: a local variant of local_http_server()
+    # (tests/conftest.py) for the one test in this project that needs an
+    # IPv6-bound server -- kept local rather than widening that shared
+    # helper's own signature for a single caller's need (rule 11).
+    server = _IPv6HTTPServer((_IPV6_LOOPBACK_HOST, 0), handler_cls)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield server.server_address[1]
+    finally:
+        server.shutdown()
+        thread.join()
 
 
 def _unused_loopback_port() -> int:
@@ -136,6 +184,20 @@ async def _seed_tenant_source_and_verified_domain(domain: str = _LOOPBACK_HOST) 
     return {"tenant_id": tenant_id, "source_id": source_id}
 
 
+async def _setup(monkeypatch, live_test_services, *, embed: bool = True):
+    # Duplication check after 2.6.a/b/c, item A3 -- see this file's own
+    # header comment for why test (d) does not use this helper.
+    monkeypatch.setattr(
+        safe_fetch_module, "is_unsafe_destination_ip", fake_is_unsafe_except_loopback
+    )
+    if embed:
+        patch_embed_dense(monkeypatch)
+    _, client, collection_name = live_test_services
+    await qdrant.ensure_collection(client, collection_name)
+    ids = await _seed_tenant_source_and_verified_domain()
+    return client, collection_name, ids
+
+
 async def _ingest(client, collection_name: str, *, tenant_id, source_id, url):
     async with db_session() as session:
         result = await ingest_url(
@@ -165,15 +227,9 @@ async def test_first_time_ingest_creates_document_and_indexes_content(
 ):
     # (a) first-time ingest: a new document row is created and the real
     # content is really chunked, embedded and upserted into Qdrant.
-    monkeypatch.setattr(
-        safe_fetch_module, "is_unsafe_destination_ip", _fake_is_unsafe_except_loopback
-    )
-    patch_embed_dense(monkeypatch)
-    _, client, collection_name = live_test_services
-    await qdrant.ensure_collection(client, collection_name)
-    ids = await _seed_tenant_source_and_verified_domain()
+    client, collection_name, ids = await _setup(monkeypatch, live_test_services)
 
-    with local_http_server(_scripted_handler({"/": (200, _RICH_BODY_V1.encode())})) as port:
+    with local_http_server(scripted_handler({"/": (200, _RICH_BODY_V1.encode())})) as port:
         url = f"http://{_LOOPBACK_HOST}:{port}/"
         result = await _ingest(
             client, collection_name, tenant_id=ids["tenant_id"], source_id=ids["source_id"], url=url
@@ -208,15 +264,9 @@ async def test_rerun_with_identical_content_skips_rechunk_and_reembed(
     # content must NOT re-chunk or re-embed at all -- proven directly by
     # counting calls to embed_and_upsert() itself, not just by observing
     # the end result.
-    monkeypatch.setattr(
-        safe_fetch_module, "is_unsafe_destination_ip", _fake_is_unsafe_except_loopback
-    )
-    patch_embed_dense(monkeypatch)
-    _, client, collection_name = live_test_services
-    await qdrant.ensure_collection(client, collection_name)
-    ids = await _seed_tenant_source_and_verified_domain()
+    client, collection_name, ids = await _setup(monkeypatch, live_test_services)
 
-    with local_http_server(_scripted_handler({"/": (200, _RICH_BODY_V1.encode())})) as port:
+    with local_http_server(scripted_handler({"/": (200, _RICH_BODY_V1.encode())})) as port:
         url = f"http://{_LOOPBACK_HOST}:{port}/"
 
         first = await _ingest(
@@ -250,16 +300,10 @@ async def test_rerun_with_changed_content_reembeds_same_document(monkeypatch, li
     # the same document_id (build_point_id()'s own determinism, 2.5.c,
     # depends on the SAME document_id being reused across re-runs of the
     # same URL).
-    monkeypatch.setattr(
-        safe_fetch_module, "is_unsafe_destination_ip", _fake_is_unsafe_except_loopback
-    )
-    patch_embed_dense(monkeypatch)
-    _, client, collection_name = live_test_services
-    await qdrant.ensure_collection(client, collection_name)
-    ids = await _seed_tenant_source_and_verified_domain()
+    client, collection_name, ids = await _setup(monkeypatch, live_test_services)
 
     routes = {"/": (200, _RICH_BODY_V1.encode())}
-    with local_http_server(_scripted_handler(routes)) as port:
+    with local_http_server(scripted_handler(routes)) as port:
         url = f"http://{_LOOPBACK_HOST}:{port}/"
 
         first = await _ingest(
@@ -334,17 +378,68 @@ async def test_unverified_domain_is_skipped_with_zero_network_activity(
     assert "not verified" in result.reason
 
 
+async def test_redirect_to_an_unverified_host_is_rejected_with_nothing_persisted(
+    monkeypatch, live_test_services
+):
+    # C1 [SECURITY] fix (duplication check after 2.6.a/b/c): the real gap
+    # this closes -- a redirect from a VERIFIED host to a DIFFERENT,
+    # unverified-but-SSRF-safe host must be rejected before anything from
+    # the final destination is ever chunked/embedded/persisted. Does NOT
+    # use the shared _setup() helper: it needs a two-host-permissive
+    # is_unsafe_destination_ip override, not the one-host version every
+    # other test here shares.
+    monkeypatch.setattr(
+        safe_fetch_module,
+        "is_unsafe_destination_ip",
+        _fake_is_unsafe_except_both_loopback_hosts,
+    )
+    patch_embed_dense(monkeypatch)
+    _, client, collection_name = live_test_services
+    await qdrant.ensure_collection(client, collection_name)
+    ids = await _seed_tenant_source_and_verified_domain(domain=_LOOPBACK_HOST)
+
+    with _local_ipv6_http_server(
+        scripted_handler({"/": (200, b"unverified host content")})
+    ) as second_port:
+        with local_http_server(
+            _redirect_handler(f"http://[{_IPV6_LOOPBACK_HOST}]:{second_port}/")
+        ) as first_port:
+            url = f"http://{_LOOPBACK_HOST}:{first_port}/"
+            result = await _ingest(
+                client,
+                collection_name,
+                tenant_id=ids["tenant_id"],
+                source_id=ids["source_id"],
+                url=url,
+            )
+
+    assert result.status == "skipped"
+    assert result.document_id is None
+    assert _IPV6_LOOPBACK_HOST in result.reason
+    assert "not verified" in result.reason
+
+    # Nothing from the unverified final destination was ever chunked,
+    # embedded or persisted.
+    count = await client.count(collection_name=collection_name)
+    assert count.count == 0
+
+    async with db_session() as session:
+        persisted = (
+            await session.execute(
+                sa.select(Document).where(
+                    Document.source_id == ids["source_id"], Document.url == url
+                )
+            )
+        ).scalar_one_or_none()
+    assert persisted is None
+
+
 async def test_connection_failure_is_reported_as_failed(monkeypatch, live_test_services):
     # (e) a genuine connection-level failure (nothing listening on this
     # port) is reported as IngestResult(status="failed", ...) -- NOT a
     # 404, which never raises at all (see _unused_loopback_port()'s own
     # comment above for why).
-    monkeypatch.setattr(
-        safe_fetch_module, "is_unsafe_destination_ip", _fake_is_unsafe_except_loopback
-    )
-    _, client, collection_name = live_test_services
-    await qdrant.ensure_collection(client, collection_name)
-    ids = await _seed_tenant_source_and_verified_domain()
+    client, collection_name, ids = await _setup(monkeypatch, live_test_services, embed=False)
 
     port = _unused_loopback_port()
     url = f"http://{_LOOPBACK_HOST}:{port}/"
@@ -364,15 +459,9 @@ async def test_nearly_empty_content_is_ingested_and_flagged(monkeypatch, live_te
     # (f) nearly-empty content is still real content -- ingested
     # normally, with is_nearly_empty persisted True, not treated as a
     # failure or a skip.
-    monkeypatch.setattr(
-        safe_fetch_module, "is_unsafe_destination_ip", _fake_is_unsafe_except_loopback
-    )
-    patch_embed_dense(monkeypatch)
-    _, client, collection_name = live_test_services
-    await qdrant.ensure_collection(client, collection_name)
-    ids = await _seed_tenant_source_and_verified_domain()
+    client, collection_name, ids = await _setup(monkeypatch, live_test_services)
 
-    with local_http_server(_scripted_handler({"/": (200, _SPARSE_BODY.encode())})) as port:
+    with local_http_server(scripted_handler({"/": (200, _SPARSE_BODY.encode())})) as port:
         url = f"http://{_LOOPBACK_HOST}:{port}/"
         result = await _ingest(
             client, collection_name, tenant_id=ids["tenant_id"], source_id=ids["source_id"], url=url

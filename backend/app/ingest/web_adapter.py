@@ -32,6 +32,20 @@
 # function (producing the byte-identical result), not real duplicated work;
 # it exists here for the content-hash COMPARISON against the stored row,
 # a concern embed_and_upsert() has no reason to know about.
+#
+# Duplication check after 2.6.a/b/c, item C1 [SECURITY] fix: a real gap
+# found, not assumed safe -- ingest_url() originally checked
+# verified_domains only against the URL's ORIGINAL host, before calling
+# fetch_with_redirects(), which re-validates SSRF-safety (the IP) per hop
+# but has no concept of tenant domain verification at all. A redirect to
+# a different, unverified-but-IP-safe host would have had that host's
+# own content fetched and persisted under this tenant's own `documents`
+# row. Fixed by widening fetch_with_redirects()'s own return type
+# (safe_fetch.py's new FetchResult) to expose the final hop's URL, and
+# re-checking verified_domains against it too, before any content is
+# chunked/embedded/persisted -- see ingest_url()'s own docstring for the
+# full reasoning, including why only the original and final hosts are
+# checked, never every intermediate redirect hop.
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -69,8 +83,15 @@ class IngestResult:
       - "unchanged": content_hash matched the stored row; re-chunking/
         re-embedding was SKIPPED entirely (the core idempotency property
         this task exists to prove); only last_seen_at was updated.
-      - "skipped": the URL's own domain is not verified for this tenant;
-        no fetch was ever attempted.
+      - "skipped": the URL's own domain is not verified for this tenant.
+        Two distinct cases, both reported this way (`reason` names
+        which): (1) the ORIGINAL url's host isn't verified -- no fetch
+        was ever attempted; or (2) a redirect moved the fetch to a
+        DIFFERENT host that also isn't verified for this tenant (Task
+        2.6.c's own duplication check, C1 [SECURITY] fix) -- a fetch DID
+        happen here, but its content is discarded unpersisted, never
+        chunked/embedded. Either way, nothing from an unverified host
+        ever reaches `embed_and_upsert()` or the `documents` table.
       - "failed": fetch_with_redirects() itself failed (an SSRF rejection,
         a timeout, a size/redirect-cap violation, or a real connection-
         level error) -- `reason` carries a plain description. Deliberately
@@ -81,6 +102,26 @@ class IngestResult:
     status: str
     document_id: uuid.UUID | None = None
     reason: str | None = None
+
+
+async def _domain_is_verified(session: AsyncSession, tenant_id: uuid.UUID, hostname: str) -> bool:
+    # Task 2.6.c's own duplication check (C1 [SECURITY] fix): extracted
+    # so ingest_url() can run the exact same check twice -- once against
+    # the URL's original host (before fetching at all) and again against
+    # the FINAL host a redirect may have moved the fetch to (before
+    # persisting anything) -- without duplicating this SELECT's own
+    # exact-string-match wording in two places. See ingest_url()'s own
+    # docstring for why only these two hosts are checked, never every
+    # intermediate redirect hop.
+    return (
+        await session.execute(
+            select(VerifiedDomain.id).where(
+                VerifiedDomain.tenant_id == tenant_id,
+                VerifiedDomain.domain == hostname,
+                VerifiedDomain.status == "verified",
+            )
+        )
+    ).scalar_one_or_none() is not None
 
 
 async def ingest_url(
@@ -158,26 +199,52 @@ async def ingest_url(
     few garbled characters; this is a deliberate v1 scope limit for a
     primitive (rule 11), not full charset-sniffing -- flagged as an
     ASSUMPTION, not silently decided.
+
+    Redirect-to-a-different-host re-check (Task 2.6.c's own duplication
+    check, C1 [SECURITY] fix): fetch_with_redirects() re-validates
+    SSRF-safety (the IP) on every hop, but has no concept of tenant domain
+    verification at all -- left unchecked, a verified domain redirecting
+    to a different, unverified-but-IP-safe external host would have that
+    host's own content fetched and persisted under THIS tenant's own
+    `documents` row, defeating domain verification's actual purpose
+    (proving tenant control over the content source), not merely an SSRF
+    concern. Fixed by checking `fetch_with_redirects()`'s own returned
+    `final_url` against `verified_domains` too, but ONLY when it differs
+    from the original host -- the common, no-redirect case pays zero
+    extra query cost. Deliberately NOT checking every intermediate hop:
+    SSRF-safety (every hop's IP must be safe) and domain-ownership
+    verification (whose content is this) are different guarantees -- a
+    redirect that bounces through some unrelated-but-safe intermediate
+    host (a URL shortener, an http-to-https canonicalizer) and lands back
+    on the tenant's own verified domain is normal, harmless web behavior;
+    rejecting it would be over-restrictive for no real benefit. What
+    actually matters for content provenance is only the ORIGINAL host
+    (gates whether anything is fetched at all) and the FINAL host (whose
+    content is about to be persisted) -- confirmed by reasoning through
+    this explicitly, not assumed safe, before building it.
     """
     hostname = httpx.URL(url).host
-    verified_domain = (
-        await session.execute(
-            select(VerifiedDomain.id).where(
-                VerifiedDomain.tenant_id == tenant_id,
-                VerifiedDomain.domain == hostname,
-                VerifiedDomain.status == "verified",
-            )
-        )
-    ).scalar_one_or_none()
-    if verified_domain is None:
+    if not await _domain_is_verified(session, tenant_id, hostname):
         return IngestResult(status="skipped", reason=f"domain {hostname!r} is not verified")
 
     try:
-        body = await fetch_with_redirects(url)
+        fetch_result = await fetch_with_redirects(url)
     except (UnsafeFetchError, httpx.HTTPError) as exc:
         return IngestResult(status="failed", reason=f"{type(exc).__name__}: {exc}")
 
-    content = extract_html(body.decode("utf-8", errors="replace"))
+    final_hostname = fetch_result.final_url.host
+    if final_hostname != hostname and not await _domain_is_verified(
+        session, tenant_id, final_hostname
+    ):
+        return IngestResult(
+            status="skipped",
+            reason=(
+                f"redirected from {hostname!r} to {final_hostname!r}, "
+                "which is not verified"
+            ),
+        )
+
+    content = extract_html(fetch_result.body.decode("utf-8", errors="replace"))
     content_hash = compute_content_hash(content)
 
     existing = (

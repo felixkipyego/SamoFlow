@@ -51,6 +51,30 @@ class UnsafeFetchError(Exception):
 
 
 @dataclass(frozen=True)
+class FetchResult:
+    # Task 2.6.c's own duplication check (C1 [SECURITY] fix): fetch_with_
+    # redirects()'s own public return type, widened from a bare `bytes`
+    # so a caller can tell whether a redirect moved it to a DIFFERENT
+    # host than the one it originally asked for -- a real gap, not a
+    # hypothetical one: web_adapter.py's ingest_url() checks
+    # verified_domains against the ORIGINAL url's host before fetching,
+    # but fetch_with_redirects() re-validates only SSRF-safety (the IP)
+    # on each hop, with no concept of tenant domain verification at all.
+    # Without this, a verified domain redirecting to a different,
+    # unverified-but-IP-safe external host would have that host's own
+    # content fetched and persisted under the tenant's own `documents`
+    # row -- defeating domain verification's actual purpose (proving
+    # tenant control over the content source), not merely an SSRF
+    # concern. safe_fetch() deliberately stays untouched, still returning
+    # bare `bytes`: it never follows a redirect, so "final" is never
+    # distinct from "original" for it -- adding this field there would
+    # be a field with only one possible value, pure over-engineering
+    # (rule 11).
+    body: bytes
+    final_url: httpx.URL
+
+
+@dataclass(frozen=True)
 class _PinnedResponse:
     # Task 2.3.d: _fetch_pinned()'s own return type, widened from a bare
     # `bytes` (2.3.c's original shape) to this, so fetch_with_redirects()
@@ -184,7 +208,7 @@ async def fetch_with_redirects(
     max_size_bytes: int = 5_000_000,
     timeout_seconds: float = 15.0,
     max_redirects: int = 3,
-) -> bytes:
+) -> FetchResult:
     """Like safe_fetch(), but follows up to `max_redirects` redirects
     (default matches docs/SPEC.md §5.5's own "max 3 redirects"). Every
     hop -- including the first request and every redirect target after
@@ -205,6 +229,13 @@ async def fetch_with_redirects(
     confirmed live -- not hand-rolled). Exceeding max_redirects fails
     closed with UnsafeFetchError, never an infinite loop and never a
     silent truncation of the chain.
+
+    Returns a FetchResult, not bare bytes (Task 2.6.c's own duplication
+    check, C1 [SECURITY] fix) -- `final_url` is this function's own
+    `current_url` at the hop that actually returned content, letting a
+    caller that cares about content PROVENANCE (not just SSRF-safety,
+    which every hop already gets re-validated for above) tell whether a
+    redirect moved it to a different host than the one it started with.
     """
     current_url = httpx.URL(url)
     for hop in range(max_redirects + 1):
@@ -218,7 +249,7 @@ async def fetch_with_redirects(
         )
         location = result.headers.get("location")
         if not httpx.codes.is_redirect(result.status_code) or location is None:
-            return result.body
+            return FetchResult(body=result.body, final_url=current_url)
         if hop == max_redirects:
             raise UnsafeFetchError(
                 f"exceeded max_redirects ({max_redirects}) while following redirects "
