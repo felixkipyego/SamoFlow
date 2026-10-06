@@ -63,8 +63,26 @@ APP_DIR = BACKEND_DIR / "app"
 # own upsert primitive is the first to call client.upsert()), matching the
 # Step 1.3.e marker's own instruction that this file must use write
 # methods only and must never need read access.
+# Task 2.6.c: app/ingest/web_adapter.py added -- it type-hints its own
+# `client` parameter as the real AsyncQdrantClient (confirmed live, by
+# running this guard before deciding, that it trips rule (a) exactly like
+# qdrant_writer.py did at 2.5.c: a pure import-level check, no distinction
+# between "holds a client" and "imports a type for an unused-at-runtime
+# annotation"). Unlike embed_sparse()'s own fix at 2.5.b, there is no
+# qdrant-agnostic stand-in that makes sense for a bare pass-through
+# parameter whose only job is to be forwarded, unmodified, to embed_and_
+# upsert() -- the allow-list entry is correct here too. This file calls NO
+# method on the client itself (it only ever forwards it), so it is NOT
+# added to READ_ALLOWLIST below, matching qdrant_writer.py's own identical
+# shape.
 CLIENT_ACCESS_ALLOWLIST: frozenset[str] = frozenset(
-    {"app/qdrant.py", "app/retrieval/service.py", "app/main.py", "app/ingest/qdrant_writer.py"}
+    {
+        "app/qdrant.py",
+        "app/retrieval/service.py",
+        "app/main.py",
+        "app/ingest/qdrant_writer.py",
+        "app/ingest/web_adapter.py",
+    }
 )
 
 # NOTE: adding a file here is a deliberate decision -- it means that file may

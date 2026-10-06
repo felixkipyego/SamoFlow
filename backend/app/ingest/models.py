@@ -96,6 +96,18 @@ class Document(Base):
     # failed (extraction raised) -- a closed vocabulary matching sources.
     # type's/jobs.status's own CheckConstraint precedent.
     status: Mapped[str] = mapped_column(String, nullable=False)
+    # Task 2.6.c: a separate, orthogonal signal from `status` -- a nearly-
+    # empty page (2.4.b's own ExtractedContent.is_nearly_empty) is NOT an
+    # extraction failure; extraction succeeded fine, there's just very
+    # little content. Collapsing this into `status` would conflate two
+    # different concepts (pipeline state vs. content quality) that this
+    # column keeps separate (rule 11: the smallest correct mechanism, not
+    # a new status value or a repurposed existing column). Mirrors
+    # ExtractedContent.is_nearly_empty 1:1 -- this is only the persistence
+    # half; the dashboard-flagging half ("may need JavaScript") is Phase
+    # 6's own job, out of scope here (2.4.c's own ASSUMPTION marker for
+    # "whoever builds the real crawler adapter").
+    is_nearly_empty: Mapped[bool] = mapped_column(nullable=False, server_default=text("false"))
 
     # Task 2.4.a: url and file_name are mutually exclusive per row -- a web
     # source (urls/crawl) sets url, an upload sets file_name -- but NEITHER

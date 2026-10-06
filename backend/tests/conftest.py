@@ -745,6 +745,33 @@ async def live_qdrant_collection(
         await client.close()
 
 
+@pytest.fixture
+async def live_test_services(
+    reset_test_database,
+) -> AsyncIterator[tuple[str, AsyncQdrantClient, str]]:
+    # Task 2.6.c: the second real caller the two-service watch-item marker
+    # anticipated (recorded at the duplication check after 2.5.d/e/f) --
+    # test_web_adapter.py needs BOTH real services together for most of
+    # its own tests, matching test_revocation_preserves_indexed_content.py's
+    # (2.5.f) own inline combination of reset_test_database + the identical
+    # qdrant-collection lifecycle live_qdrant_collection() already has.
+    # Extracted now, per that marker's own stated trigger ("if a second
+    # real caller appears, extract a shared fixture then") -- NOT
+    # retrofitting test_revocation_preserves_indexed_content.py's own
+    # already-completed inline version in this task (rule 2); flagged here
+    # as a candidate for the next duplication check instead.
+    database_url = reset_test_database
+    url, key = require_test_qdrant()
+    client = qdrant.build_qdrant_client(url, key)
+    name = f"probe_{uuid.uuid4()}"
+    try:
+        yield database_url, client, name
+    finally:
+        if await client.collection_exists(name):
+            await client.delete_collection(name)
+        await client.close()
+
+
 class _FakeEmbeddingItem:
     def __init__(self, vector: list[float]) -> None:
         self.embedding = vector
