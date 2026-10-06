@@ -35,7 +35,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
 from app.db import DateTimeClock, violated_constraint_name
-from app.ingest.domain_verification import check_dns_verification
+from app.ingest.domain_verification import (
+    check_dns_verification,
+    check_file_verification,
+    check_meta_tag_verification,
+)
 from app.ingest.models import AuditLog, DbConnection, Job, VerifiedDomain
 
 
@@ -307,12 +311,30 @@ class IngestRepository:
         await self.session.flush()
         return job
 
-    async def claim_domain(self, domain: str) -> VerifiedDomain:
+    async def claim_domain(self, domain: str, method: str = "dns") -> VerifiedDomain:
         # Task 2.2.c. A method here, not a standalone function, for the
         # identical reason enqueue() above is one: claiming always happens
         # on behalf of an already-known tenant. Always starts "pending"
         # with a fresh token -- this method never verifies anything itself
         # (2.2.e's own job) and never returns an existing row.
+        #
+        # Task 2.6.a: `method` is now a real, caller-supplied parameter,
+        # not hardcoded -- 2.2.c's own decision entry explicitly deferred
+        # this exact change ("added back once 2.3 lands and file/meta-tag
+        # return"), which is now true. default="dns" keeps every existing
+        # caller's own behavior byte-for-byte unchanged with zero edits
+        # needed anywhere else. No Python-side validation against
+        # ('dns','file','meta_tag') added here -- the DB's own
+        # ck_verified_domains_method CheckConstraint (2.3.e) already owns
+        # that vocabulary; duplicating it here would be a second,
+        # independently-maintained copy of the same rule (rule 11),
+        # matching this project's own precedent of trusting a closed-
+        # vocabulary CheckConstraint rather than re-validating in Python
+        # (sources.type, documents.status -- neither is pre-checked here
+        # either). An invalid value still fails safely: it raises
+        # IntegrityError, caught below, and (see that except block's own
+        # updated comment) re-raised unchanged since it is not the one
+        # specific constraint this method already knows how to translate.
         #
         # Same-tenant double-claim is deliberately NOT special-cased into
         # an idempotent "return the existing row" -- PROJECT_SPEC.md's
@@ -333,7 +355,7 @@ class IngestRepository:
         verified_domain = VerifiedDomain(
             tenant_id=self.tenant_id,
             domain=domain,
-            method="dns",
+            method=method,
             status="pending",
             verification_token=_generate_verification_token(),
         )
@@ -342,10 +364,16 @@ class IngestRepository:
             await self.session.flush()
         except IntegrityError as exc:
             # Narrowed to the specific constraint, not a blanket catch
-            # (duplication check after 2.2.a/b/c, item B1): method/status
-            # are hardcoded above and tenant_id is this repository's own
-            # trusted identity, so today only the partial unique index is
-            # reachable through this method's own inputs -- but a bare
+            # (duplication check after 2.2.a/b/c, item B1): status is
+            # hardcoded above and tenant_id is this repository's own
+            # trusted identity; `method` became a real caller-supplied
+            # parameter at Task 2.6.a, so ck_verified_domains_method is
+            # now also reachable through this method's own inputs (an
+            # invalid method string) -- correctly handled by the existing
+            # structure below with no change needed: it re-raises
+            # anything that isn't this one specific partial-unique-index
+            # violation, unchanged, rather than silently mis-translating
+            # a different constraint's own failure. But a bare
             # `except IntegrityError` doesn't know that, and would
             # silently mis-report any future violation (e.g. a new
             # caller-reachable constraint added later) as "already
@@ -426,8 +454,38 @@ class IngestRepository:
         if domain.status == "revoked":
             raise DomainRevokedError(f"domain {domain_id} has been revoked")
 
-        # Only "pending" reaches here and triggers a real DNS check.
-        if await check_dns_verification(domain.domain, domain.verification_token):
+        # Only "pending" reaches here and triggers a real check -- which
+        # one depends on this row's own `method` (Task 2.6.a: previously
+        # DNS was the only method that existed at all, so this was
+        # unconditional; now dispatches on the row's own column). Each
+        # branch calls its own check function by its plain, bare,
+        # module-level name (not through a dict/registry indirection) --
+        # deliberately, so test_ingest_repository.py's own existing
+        # `monkeypatch.setattr(repository_module, "check_dns_verification",
+        # ...)` tests keep working completely unchanged: a dict built
+        # from these names at import time would capture the ORIGINAL
+        # function object, making that exact monkeypatch style silently
+        # no-op (confirmed by reading those tests before choosing this
+        # shape, not assumed).
+        if domain.method == "dns":
+            verified = await check_dns_verification(domain.domain, domain.verification_token)
+        elif domain.method == "file":
+            verified = await check_file_verification(domain.domain, domain.verification_token)
+        elif domain.method == "meta_tag":
+            verified = await check_meta_tag_verification(
+                domain.domain, domain.verification_token
+            )
+        else:
+            # Unreachable through this class's own public inputs today --
+            # ck_verified_domains_method (2.3.e) already rejects anything
+            # outside ('dns', 'file', 'meta_tag') before a row with any
+            # other value could ever exist. Fails loudly rather than
+            # silently treating an unrecognized method as "not verified",
+            # matching this project's own "fail closed, not silently" rule
+            # for anything that should be structurally impossible.
+            raise ValueError(f"unknown verification method {domain.method!r}")
+
+        if verified:
             # Deliberately a Python-side clock() value, NOT func.now() --
             # found live, before committing to this, not assumed: unlike
             # mark_job_succeeded()/mark_job_failed() (app/ingest/queue.py),
@@ -454,16 +512,18 @@ class IngestRepository:
             await self.session.flush()
             return domain
 
-        # A clean "False" from check_dns_verification() -- whether DNS
-        # resolved fine but the token simply isn't there yet, or the
-        # lookup itself failed outright (NXDOMAIN, timeout, no reachable
-        # nameserver, etc., per 2.2.d's own fetch_txt_records() design) --
-        # is structurally INDISTINGUISHABLE from here, by construction:
-        # both collapse to the identical boolean False before this method
-        # ever sees them. That is deliberate, not a gap: neither case is
-        # an application error, both mean exactly "not verified yet" from
-        # the tenant's own perspective, and conflating them is what lets
-        # this branch stay a single, simple no-op -- the row is returned
-        # completely unchanged (still "pending", verified_at still null),
-        # never an exception.
+        # A clean "False" from whichever check function ran -- whether the
+        # fetch/lookup resolved fine but the token simply isn't there yet,
+        # or the fetch/lookup itself failed outright (NXDOMAIN for DNS;
+        # a 404, an UnsafeFetchError/SSRF rejection, or a connection
+        # failure for file/meta_tag, per each check function's own design,
+        # Tasks 2.2.d/2.6.a) -- is structurally INDISTINGUISHABLE from
+        # here, by construction: all of these collapse to the identical
+        # boolean False before this method ever sees them. That is
+        # deliberate, not a gap: none of these is an application error,
+        # all mean exactly "not verified yet" from the tenant's own
+        # perspective, and conflating them is what lets this branch stay
+        # a single, simple no-op -- the row is returned completely
+        # unchanged (still "pending", verified_at still null), never an
+        # exception.
         return domain

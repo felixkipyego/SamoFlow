@@ -592,6 +592,137 @@ async def test_confirm_verification_rejects_another_tenants_domain_with_no_side_
     assert row.verified_at is None
 
 
+# --- Task 2.6.a: claim_domain()'s new `method` parameter, and confirm_
+# verification()'s dispatch extended to file/meta_tag ------------------------
+
+
+@pytest.mark.parametrize("method", ["file", "meta_tag"])
+async def test_claim_domain_accepts_the_new_non_dns_methods(_seeded_tenants, method):
+    ids = _seeded_tenants
+    async with db_session() as session:
+        repo = IngestRepository(tenant_id=ids["tenant_a"], session=session)
+        domain = await repo.claim_domain(f"{method}-claim.example", method=method)
+        await session.commit()
+        domain_id = domain.id
+
+    async with db_session() as session:
+        row = (
+            await session.execute(sa.select(VerifiedDomain).where(VerifiedDomain.id == domain_id))
+        ).scalar_one()
+    assert row.method == method
+    assert row.status == "pending"
+
+
+async def test_confirm_verification_on_a_pending_domain_with_a_positive_file_match(
+    _seeded_tenants, monkeypatch
+):
+    # Matches test_confirm_verification_on_a_pending_domain_with_a_positive_
+    # dns_match's own exact style, for the file method's own dispatch branch.
+    ids = _seeded_tenants
+    async with db_session() as session:
+        repo = IngestRepository(tenant_id=ids["tenant_a"], session=session)
+        domain = await repo.claim_domain("pending-file-positive.example", method="file")
+        await session.commit()
+        domain_id = domain.id
+        expected_domain = domain.domain
+        expected_token = domain.verification_token
+
+    captured_calls = []
+
+    async def _fake_true(domain_arg, token_arg):
+        captured_calls.append((domain_arg, token_arg))
+        return True
+
+    monkeypatch.setattr(repository_module, "check_file_verification", _fake_true)
+
+    fixed_now = datetime(2026, 6, 15, 12, 0, 0, tzinfo=UTC)
+    async with db_session() as session:
+        repo = IngestRepository(tenant_id=ids["tenant_a"], session=session)
+        result = await repo.confirm_verification(domain_id, clock=lambda: fixed_now)
+        await session.commit()
+
+    assert result.status == "verified"
+    assert result.verified_at == fixed_now
+    assert captured_calls == [(expected_domain, expected_token)]
+
+
+async def test_confirm_verification_on_a_pending_domain_with_a_negative_file_match(
+    _seeded_tenants, monkeypatch
+):
+    ids = _seeded_tenants
+    async with db_session() as session:
+        repo = IngestRepository(tenant_id=ids["tenant_a"], session=session)
+        domain = await repo.claim_domain("pending-file-negative.example", method="file")
+        await session.commit()
+        domain_id = domain.id
+
+    async def _fake_false(domain_arg, token_arg):
+        return False
+
+    monkeypatch.setattr(repository_module, "check_file_verification", _fake_false)
+
+    async with db_session() as session:
+        repo = IngestRepository(tenant_id=ids["tenant_a"], session=session)
+        result = await repo.confirm_verification(domain_id)
+
+    assert result.status == "pending"
+    assert result.verified_at is None
+
+
+async def test_confirm_verification_on_a_pending_domain_with_a_positive_meta_tag_match(
+    _seeded_tenants, monkeypatch
+):
+    ids = _seeded_tenants
+    async with db_session() as session:
+        repo = IngestRepository(tenant_id=ids["tenant_a"], session=session)
+        domain = await repo.claim_domain("pending-meta-positive.example", method="meta_tag")
+        await session.commit()
+        domain_id = domain.id
+        expected_domain = domain.domain
+        expected_token = domain.verification_token
+
+    captured_calls = []
+
+    async def _fake_true(domain_arg, token_arg):
+        captured_calls.append((domain_arg, token_arg))
+        return True
+
+    monkeypatch.setattr(repository_module, "check_meta_tag_verification", _fake_true)
+
+    fixed_now = datetime(2026, 6, 15, 12, 0, 0, tzinfo=UTC)
+    async with db_session() as session:
+        repo = IngestRepository(tenant_id=ids["tenant_a"], session=session)
+        result = await repo.confirm_verification(domain_id, clock=lambda: fixed_now)
+        await session.commit()
+
+    assert result.status == "verified"
+    assert result.verified_at == fixed_now
+    assert captured_calls == [(expected_domain, expected_token)]
+
+
+async def test_confirm_verification_on_a_pending_domain_with_a_negative_meta_tag_match(
+    _seeded_tenants, monkeypatch
+):
+    ids = _seeded_tenants
+    async with db_session() as session:
+        repo = IngestRepository(tenant_id=ids["tenant_a"], session=session)
+        domain = await repo.claim_domain("pending-meta-negative.example", method="meta_tag")
+        await session.commit()
+        domain_id = domain.id
+
+    async def _fake_false(domain_arg, token_arg):
+        return False
+
+    monkeypatch.setattr(repository_module, "check_meta_tag_verification", _fake_false)
+
+    async with db_session() as session:
+        repo = IngestRepository(tenant_id=ids["tenant_a"], session=session)
+        result = await repo.confirm_verification(domain_id)
+
+    assert result.status == "pending"
+    assert result.verified_at is None
+
+
 # --- Task 2.2.g: revoke_domain() ---------------------------------------------
 
 
