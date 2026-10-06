@@ -20,8 +20,8 @@ from qdrant_client.http.models import PointStruct, SparseVector
 
 from app import qdrant
 from app.ingest import embedding
-from app.ingest.chunking import chunk_text, compute_content_hash
-from app.ingest.embedding import EMBEDDING_MODEL, SparseVectorData, embed_dense, embed_sparse
+from app.ingest.chunking import chunk_text
+from app.ingest.embedding import EMBEDDING_MODEL, SparseVectorData
 from app.ingest.extract_html import extract_html
 from app.ingest.qdrant_writer import (
     build_payload,
@@ -263,15 +263,17 @@ async def test_a_point_written_with_the_canonical_client_id_form_is_found_by_ten
 # _get_client(), not a shared import across test files -- noted here, not
 # consolidated, since this is only the second file needing this exact
 # mechanism; a future duplication check can decide whether to extract a
-# shared helper). Confirmed with the user before building: 2.5.a's own
-# established rule ("verify live once during development, never a real
-# OpenAI call in the committed suite") applies here too -- the point-count/
-# idempotency properties these tests prove depend on build_point_id()'s
-# determinism and Qdrant's own upsert-overwrites-by-id semantics, not on
-# what the actual dense vector VALUES are, so a deterministic fake vector
-# exercises everything that matters at zero ongoing cost and no API-key
-# dependency in CI. embed_sparse() stays genuinely real (fastembed, free
-# and local) in every test below, like every other test in this file.
+# shared helper -- a third file, test_revocation_preserves_indexed_content.py,
+# now has its own copy too, Task 2.5.f). Confirmed with the user before
+# building: 2.5.a's own established rule ("verify live once during
+# development, never a real OpenAI call in the committed suite") applies
+# here too -- the point-count/idempotency properties these tests prove
+# depend on build_point_id()'s determinism and Qdrant's own
+# upsert-overwrites-by-id semantics, not on what the actual dense vector
+# VALUES are, so a deterministic fake vector exercises everything that
+# matters at zero ongoing cost and no API-key dependency in CI.
+# embed_sparse() stays genuinely real (fastembed, free and local) in
+# every test below, like every other test in this file.
 class _FakeEmbeddingItem:
     def __init__(self, vector: list[float]) -> None:
         self.embedding = vector
@@ -305,46 +307,34 @@ async def _run_full_pipeline(
     document_id: uuid.UUID,
     html: str,
     embedding_version: str,
-) -> list[PointStruct]:
-    # THE full real pipeline (Task 2.5.d, point 3): extract_html() (2.4.b)
-    # -> chunk_text()/compute_content_hash() (2.4.c) -> embed_dense()
-    # (2.5.a, stubbed per the note above) / embed_sparse() (2.5.b, real) ->
-    # build_payload()/build_point_id()/build_point() (2.5.c) ->
-    # upsert_points() (this task) -- every stage genuinely real except the
-    # one stubbed dense-embedding call.
+) -> list[uuid.UUID]:
+    # Task 2.5.f's own duplication fix: this used to reimplement the whole
+    # pipeline independently (extract -> chunk -> embed -> build_point ->
+    # upsert_points), which became a second, test-only implementation of
+    # exactly what embed_and_upsert() (Task 2.5.e) does for real the
+    # moment that function existed. Now a thin wrapper: delegates the
+    # actual work to the real function, then re-derives the point ids its
+    # own callers need to inspect afterward (build_point_id() is pure and
+    # cheap -- calling it again here is calling the SAME public primitive
+    # a second time, same precedent as every test in this file that
+    # predicts a point's own id, not a reimplementation of its logic).
+    # embed_and_upsert() itself returns None, which is why callers can't
+    # just use its own return value for this.
     content = extract_html(html)
     chunks = chunk_text(content)
-    content_hash = compute_content_hash(content)
-    texts = [chunk.text for chunk in chunks]
-
-    dense_vectors = await embed_dense(texts)
-    sparse_vectors = await embed_sparse(texts)
-
-    points = [
-        build_point(
-            build_point_id(document_id, chunk.chunk_index, embedding_version),
-            build_payload(
-                tenant_id=tenant_id,
-                source_id=source_id,
-                source_type="urls",
-                document_id=document_id,
-                source_url="https://example.com/page",
-                file_name=None,
-                title=content.title,
-                heading_path=chunk.heading_path,
-                chunk_index=chunk.chunk_index,
-                content_hash=content_hash,
-                embedding_model=EMBEDDING_MODEL,
-                embedding_version=embedding_version,
-                text=chunk.text,
-            ),
-            dense_vectors[i],
-            sparse_vectors[i],
-        )
-        for i, chunk in enumerate(chunks)
-    ]
-    await upsert_points(client, collection_name, points)
-    return points
+    await embed_and_upsert(
+        content,
+        client=client,
+        collection_name=collection_name,
+        tenant_id=tenant_id,
+        source_id=source_id,
+        source_type="urls",
+        document_id=document_id,
+        source_url="https://example.com/page",
+        file_name=None,
+        embedding_version=embedding_version,
+    )
+    return [build_point_id(document_id, chunk.chunk_index, embedding_version) for chunk in chunks]
 
 
 def _html_with_sections(*section_bodies: str) -> str:
@@ -365,7 +355,7 @@ async def test_upsert_points_batch_upserts_multiple_points_in_one_call_all_query
         await qdrant.ensure_collection(client, name)
         tenant_id, source_id, document_id = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
 
-        points = await _run_full_pipeline(
+        point_ids = await _run_full_pipeline(
             client,
             name,
             tenant_id=tenant_id,
@@ -375,11 +365,11 @@ async def test_upsert_points_batch_upserts_multiple_points_in_one_call_all_query
             embedding_version="v1",
         )
 
-        assert len(points) == 3  # one chunk per section, confirming the batch is genuinely >1
+        assert len(point_ids) == 3  # one chunk per section, confirming the batch is genuinely >1
         count = await client.count(collection_name=name)
         assert count.count == 3
-        fetched = await client.retrieve(collection_name=name, ids=[p.id for p in points])
-        assert {str(r.id) for r in fetched} == {str(p.id) for p in points}
+        fetched = await client.retrieve(collection_name=name, ids=point_ids)
+        assert {str(r.id) for r in fetched} == {str(i) for i in point_ids}
 
 
 async def test_rerunning_the_identical_pipeline_overwrites_rather_than_duplicates(monkeypatch):
@@ -456,7 +446,7 @@ async def test_rerunning_with_shrunk_content_leaves_the_removed_chunks_orphaned(
         await qdrant.ensure_collection(client, name)
         tenant_id, source_id, document_id = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
 
-        old_points = await _run_full_pipeline(
+        old_ids = await _run_full_pipeline(
             client,
             name,
             tenant_id=tenant_id,
@@ -465,10 +455,10 @@ async def test_rerunning_with_shrunk_content_leaves_the_removed_chunks_orphaned(
             html=_html_with_sections("one", "two", "three", "four", "five"),
             embedding_version="v1",
         )
-        assert len(old_points) == 5
+        assert len(old_ids) == 5
         assert (await client.count(collection_name=name)).count == 5
 
-        new_points = await _run_full_pipeline(
+        new_ids = await _run_full_pipeline(
             client,
             name,
             tenant_id=tenant_id,
@@ -477,7 +467,7 @@ async def test_rerunning_with_shrunk_content_leaves_the_removed_chunks_orphaned(
             html=_html_with_sections("one (updated)", "two (updated)", "three (updated)"),
             embedding_version="v1",
         )
-        assert len(new_points) == 3
+        assert len(new_ids) == 3
 
         # The gap: the collection still has all 5 points, not 3 -- chunk
         # indices 3/4's old points were never touched by this second run
@@ -487,20 +477,18 @@ async def test_rerunning_with_shrunk_content_leaves_the_removed_chunks_orphaned(
         assert total.count == 5
 
         # The 3 surviving-index points DID correctly overwrite in place
-        # (same ids as before, same point count as old_points[:3] -- the
+        # (same ids as before, same point count as old_ids[:3] -- the
         # positive half of the idempotency guarantee still holds for
         # indices that still exist).
-        assert {p.id for p in new_points} == {p.id for p in old_points[:3]}
-        updated = await client.retrieve(
-            collection_name=name, ids=[old_points[0].id], with_payload=True
-        )
+        assert set(new_ids) == set(old_ids[:3])
+        updated = await client.retrieve(collection_name=name, ids=[old_ids[0]], with_payload=True)
         assert updated[0].payload["text"] == "one (updated)"
 
         # The 2 orphaned points (old chunk_index 3, 4) are still present,
         # completely unchanged, with their OLD content -- confirmed stale,
         # not coincidentally fine.
         orphaned = await client.retrieve(
-            collection_name=name, ids=[old_points[3].id, old_points[4].id], with_payload=True
+            collection_name=name, ids=[old_ids[3], old_ids[4]], with_payload=True
         )
         assert len(orphaned) == 2
         assert {r.payload["text"] for r in orphaned} == {"four", "five"}
@@ -511,11 +499,11 @@ async def test_rerunning_with_shrunk_content_leaves_the_removed_chunks_orphaned(
 #
 # embed_dense() stays stubbed, matching 2.5.d's own established pattern
 # (and this task's own confirmed design): reuses _patch_embed_dense() from
-# the 2.5.d section above. NOTE for a future duplication check: _run_full_
-# pipeline() (2.5.d section, above) is now a test-only duplicate of what
-# embed_and_upsert() does for real -- not touched here, since 2.5.d is a
-# completed task and this consolidation is exactly the kind of thing the
-# next duplication check should decide, not a one-off fix mid-task.
+# the 2.5.d section above. _run_full_pipeline() (2.5.d section, above) was
+# a test-only duplicate of what embed_and_upsert() does for real -- RESOLVED
+# at Task 2.5.f: that helper now delegates to this real function directly
+# instead of reimplementing the pipeline a second time (see its own
+# updated comment, 2.5.d section above).
 async def _patch_embed_dense_to_raise(monkeypatch, error: Exception) -> None:
     class _RaisingEmbeddingsResource:
         async def create(self, *, model, input):  # noqa: A002
