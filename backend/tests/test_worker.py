@@ -25,7 +25,6 @@ from openai import AuthenticationError
 
 from app.config import SettingsError, get_settings
 from app.ingest.models import Job
-from app.ingest.repository import IngestRepository
 from app.tenancy.models import Tenant
 from app.worker import JOB_HANDLERS, check_heartbeat_fresh, run
 from tests.conftest import (
@@ -153,9 +152,18 @@ async def test_worker_with_empty_environment_exits_nonzero_without_traceback():
 
 
 async def _enqueue(tenant_id, job_type: str) -> uuid.UUID:
+    # Task 2.6.b: constructs the Job row directly, bypassing IngestRepository.
+    # enqueue() -- the 4 tests calling this helper are about WORKER dispatch/
+    # claim/mark behavior given a pre-existing row, not about enqueue()'s own
+    # validation, and three of them deliberately need a job_type enqueue()
+    # now rejects (VALID_JOB_TYPES is real-types-only, per the Step 2.6.b
+    # decision -- never polluted with test scaffolding names). max_attempts
+    # relies on the column's own server_default=5 -- already documented as
+    # existing for exactly this case ("an inert defensive floor for any
+    # insert that bypasses enqueue()", Task 2.1.c's own decision entry).
     async with db_session() as session:
-        repo = IngestRepository(tenant_id=tenant_id, session=session)
-        job = await repo.enqueue(job_type=job_type, payload={})
+        job = Job(tenant_id=tenant_id, job_type=job_type, status="pending", payload={})
+        session.add(job)
         await session.commit()
         return job.id
 
@@ -340,9 +348,16 @@ async def test_sigterm_mid_handler_finishes_the_current_job_and_claims_no_other(
     async with db_session() as session:
         session.add(Tenant(id=tenant_id, name="Shutdown Tenant", status="active"))
         await session.commit()
-        repo = IngestRepository(tenant_id=tenant_id, session=session)
-        slow_job = await repo.enqueue(job_type="sleep", payload={"seconds": 0.5})
-        other_job = await repo.enqueue(job_type="noop", payload={})
+        # Task 2.6.b: direct Job construction, bypassing enqueue() -- the
+        # identical reasoning as _enqueue()'s own updated comment above
+        # ("sleep"/"noop" are worker-loop test scaffolding, never part of
+        # the real VALID_JOB_TYPES vocabulary).
+        slow_job = Job(
+            tenant_id=tenant_id, job_type="sleep", status="pending", payload={"seconds": 0.5}
+        )
+        other_job = Job(tenant_id=tenant_id, job_type="noop", status="pending", payload={})
+        session.add(slow_job)
+        session.add(other_job)
         await session.commit()
         slow_job_id, other_job_id = slow_job.id, other_job.id
 

@@ -24,13 +24,16 @@ from sqlalchemy.exc import IntegrityError
 
 from app.config import get_settings
 from app.ingest import repository as repository_module
-from app.ingest.models import AuditLog, Job, VerifiedDomain
+from app.ingest.models import AuditLog, Job, Source, VerifiedDomain
 from app.ingest.queue import claim_next_job
 from app.ingest.repository import (
+    VALID_JOB_TYPES,
     CredentialEncryptionError,
     DomainAlreadyClaimedError,
     DomainRevokedError,
     IngestRepository,
+    UnknownJobTypeError,
+    UnknownSourceError,
     revoke_domain,
 )
 from app.plans import models as plans_models  # noqa: F401 (registers "plans" on Base.metadata)
@@ -188,7 +191,7 @@ async def test_enqueue_creates_a_pending_job_with_the_right_initial_state(_seede
     ids = _seeded_tenants
     async with db_session() as session:
         repo = IngestRepository(tenant_id=ids["tenant_a"], session=session)
-        job = await repo.enqueue(job_type="crawl", payload={"url": "https://example.com"})
+        job = await repo.enqueue(job_type="ingest_crawl", payload={"url": "https://example.com"})
         await session.commit()
         job_id = job.id
 
@@ -197,7 +200,7 @@ async def test_enqueue_creates_a_pending_job_with_the_right_initial_state(_seede
 
     assert row.tenant_id == ids["tenant_a"]
     assert row.source_id is None
-    assert row.job_type == "crawl"
+    assert row.job_type == "ingest_crawl"
     assert row.status == "pending"
     assert row.attempts == 0
     assert row.max_attempts == get_settings().job_max_attempts
@@ -218,6 +221,87 @@ async def test_enqueue_creates_a_pending_job_with_the_right_initial_state(_seede
         await session.commit()
     assert claimed is not None
     assert claimed.id == job_id
+
+
+# --- Task 2.6.b: job_type validation and the source_id FK fix ---------------
+
+
+async def test_enqueue_rejects_an_unregistered_job_type_before_any_database_write(
+    _seeded_tenants, monkeypatch
+):
+    # THE "zero database attempts" proof (matching 2.3.c's own discipline,
+    # applied here to a write instead of a network connection): session.add
+    # is spied on, not just the final row count checked afterward, so this
+    # proves the rejection happens BEFORE any attempt to touch the database
+    # at all, not merely that the eventual insert would have failed.
+    ids = _seeded_tenants
+    add_calls = []
+
+    async with db_session() as session:
+        monkeypatch.setattr(session, "add", lambda obj: add_calls.append(obj))
+        repo = IngestRepository(tenant_id=ids["tenant_a"], session=session)
+        with pytest.raises(UnknownJobTypeError, match="not-a-real-job-type"):
+            await repo.enqueue(job_type="not-a-real-job-type", payload={})
+
+    assert add_calls == []
+
+
+@pytest.mark.parametrize("job_type", sorted(VALID_JOB_TYPES))
+async def test_enqueue_accepts_every_value_in_the_real_vocabulary(_seeded_tenants, job_type):
+    ids = _seeded_tenants
+    async with db_session() as session:
+        repo = IngestRepository(tenant_id=ids["tenant_a"], session=session)
+        job = await repo.enqueue(job_type=job_type, payload={})
+        await session.commit()
+    assert job.job_type == job_type
+    assert job.status == "pending"
+
+
+async def test_enqueue_rejects_a_nonexistent_source_id_with_a_usable_rollback(_seeded_tenants):
+    # Matches claim_domain()'s own established rollback-proof pattern
+    # exactly: a real query on the SAME session immediately afterward
+    # proves the transaction was not left aborted, not just that an
+    # exception was raised.
+    ids = _seeded_tenants
+    bogus_source_id = uuid.uuid4()
+    async with db_session() as session:
+        repo = IngestRepository(tenant_id=ids["tenant_a"], session=session)
+        with pytest.raises(UnknownSourceError, match=str(bogus_source_id)):
+            await repo.enqueue(job_type="ingest_url", source_id=bogus_source_id, payload={})
+
+        # The session must still be usable for another real query right
+        # here -- if rollback() were missing, this would fail with
+        # "current transaction is aborted."
+        still_counts = (
+            await session.execute(sa.select(sa.func.count()).select_from(Job))
+        ).scalar_one()
+        assert still_counts == 0  # confirms the rejected insert left no row behind either
+
+
+async def test_enqueue_succeeds_with_a_real_existing_source_id(_seeded_tenants):
+    ids = _seeded_tenants
+    async with db_session() as session:
+        source = Source(
+            tenant_id=ids["tenant_a"],
+            type="urls",
+            refresh_interval="daily",
+            status="active",
+        )
+        session.add(source)
+        await session.commit()
+        source_id = source.id
+
+    async with db_session() as session:
+        repo = IngestRepository(tenant_id=ids["tenant_a"], session=session)
+        job = await repo.enqueue(job_type="ingest_url", source_id=source_id, payload={})
+        await session.commit()
+        job_id = job.id
+
+    async with db_session() as session:
+        row = (await session.execute(sa.select(Job).where(Job.id == job_id))).scalar_one()
+    assert row.source_id == source_id
+    assert row.job_type == "ingest_url"
+    assert row.status == "pending"
 
 
 async def test_get_decrypted_credentials_never_leaks_the_key_on_a_wrong_key_failure(

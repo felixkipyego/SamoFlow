@@ -42,6 +42,29 @@ from app.ingest.domain_verification import (
 )
 from app.ingest.models import AuditLog, DbConnection, Job, VerifiedDomain
 
+# Task 2.6.b: the first REAL job-type vocabulary -- a real caller
+# (adapter, scheduler) could legitimately enqueue(). Deliberately real-
+# types-only, never polluted with the worker's own test-scaffolding
+# handler names ("noop"/"sleep", app/worker.py's JOB_HANDLERS) -- a
+# future reader checking this constant should see exactly what real job
+# types exist, nothing else. Confirmed live (not assumed) that this is
+# NOT the same thing as JOB_HANDLERS's own key set: JOB_HANDLERS answers
+# "which function processes this job_type" (a worker-dispatch concern,
+# and today also includes "noop"/"sleep", pure loop-mechanics test
+# scaffolding with no real caller and no place in this vocabulary) while
+# VALID_JOB_TYPES answers "may a real caller ever enqueue this at all" (a
+# write-boundary concern). The relationship going forward: JOB_HANDLERS
+# must register a handler for every value here (so a real job never hits
+# the worker's own "unknown job_type" permanent-failure path) but may
+# always have additional test-only entries this vocabulary never lists.
+# Matches the `urls`/`crawl` config shapes already decided at the Step
+# 2.6 breakdown (`sources.config = {"urls": [...]}` / `{"seed_url": ...}`)
+# -- "ingest_" prefix distinguishes a job_type string from a sources.type
+# string, since the two are deliberately not required to match 1:1
+# (Step 2.9's own reconcile/refresh-scheduling jobs, 2.1.a's own decision
+# entry, are not tied to one source row at all).
+VALID_JOB_TYPES: frozenset[str] = frozenset({"ingest_url", "ingest_crawl"})
+
 
 class CredentialEncryptionError(Exception):
     """Raised by create_db_connection()/get_decrypted_credentials() for any
@@ -86,6 +109,26 @@ class DomainRevokedError(Exception):
     directly: a plain chained `raise ... from None` is not even needed
     here since there is no underlying exception to chain -- this is a
     normal state-check, not a caught database error.
+    """
+
+
+class UnknownJobTypeError(Exception):
+    """Raised by enqueue() when `job_type` is not in VALID_JOB_TYPES --
+    checked UP FRONT, before any database interaction at all (see
+    enqueue()'s own comment for why this ordering, relative to the
+    source_id FK check below, is deliberate). Not a caught database
+    error (no IntegrityError involved) -- a plain pre-check, matching
+    DomainRevokedError's own shape: no chaining needed.
+    """
+
+
+class UnknownSourceError(Exception):
+    """Raised by enqueue() when `source_id` does not reference a real row
+    in `sources` -- the application-level translation of jobs.source_id's
+    own `jobs_source_id_fkey` foreign key rejecting the insert. Matches
+    DomainAlreadyClaimedError's own shape: `source_id` is not a secret
+    (the caller just supplied it), so the original IntegrityError stays
+    chained via a plain `raise ... from exc`.
     """
 
 
@@ -299,6 +342,23 @@ class IngestRepository:
         # see PROJECT_SPEC.md's Step 2.1.c decision entry for why (the
         # column default stays only as an inert defensive floor for any
         # insert that bypasses this method).
+        #
+        # Task 2.6.b: job_type validated FIRST, before any database
+        # interaction at all -- deliberately this order, not the reverse,
+        # relative to the source_id FK check below. Checking job_type
+        # membership in VALID_JOB_TYPES is a plain, free, in-process
+        # lookup (no query needed either way); checking whether source_id
+        # exists has NO equivalent cheap pre-check -- the only ways to
+        # know are a redundant SELECT before the insert (an extra round
+        # trip, paid on every call, including the overwhelming majority
+        # that already pass a real id) or letting the database's own FK
+        # constraint be the single source of truth (what this method
+        # already does below). Cheapest, fastest-failing check first.
+        if job_type not in VALID_JOB_TYPES:
+            raise UnknownJobTypeError(
+                f"job_type {job_type!r} is not a registered job type "
+                f"(expected one of {sorted(VALID_JOB_TYPES)})"
+            )
         job = Job(
             tenant_id=self.tenant_id,
             source_id=source_id,
@@ -308,7 +368,26 @@ class IngestRepository:
             payload=payload or {},
         )
         self.session.add(job)
-        await self.session.flush()
+        try:
+            await self.session.flush()
+        except IntegrityError as exc:
+            # Task 2.6.b: the same catch+rollback+translate pattern
+            # already established twice (claim_domain()'s own original
+            # fix; create_site_key()'s matching fix, duplication check
+            # after 2.2.a/b/c, item D1) -- narrowed to the one specific
+            # constraint a caller-supplied source_id can actually violate
+            # (confirmed live against the real test database:
+            # "jobs_source_id_fkey"), not a blanket catch. tenant_id is
+            # this repository's own trusted identity and job_type is
+            # already validated above, so no other constraint on this
+            # table is reachable through this method's own inputs today;
+            # anything else re-raises completely unchanged, matching
+            # every sibling method's own precedent for an unexpected
+            # violation.
+            if violated_constraint_name(exc) != "jobs_source_id_fkey":
+                raise
+            await self.session.rollback()
+            raise UnknownSourceError(f"source {source_id} does not exist") from exc
         return job
 
     async def claim_domain(self, domain: str, method: str = "dns") -> VerifiedDomain:
