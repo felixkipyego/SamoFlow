@@ -72,6 +72,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 # and app/worker.py's header comments).
 from app import all_models, db, qdrant  # noqa: F401
 from app.config import POSTGRES_SCHEME, Settings, get_settings
+from app.ingest import embedding
 from app.ingest.models import Job
 from app.ingest.repository import IngestRepository
 from app.tenancy.models import Tenant
@@ -742,3 +743,42 @@ async def live_qdrant_collection(
         if await client.collection_exists(name):
             await client.delete_collection(name)
         await client.close()
+
+
+class _FakeEmbeddingItem:
+    def __init__(self, vector: list[float]) -> None:
+        self.embedding = vector
+
+
+class _FakeEmbeddingResponse:
+    def __init__(self, vectors: list[list[float]]) -> None:
+        self.data = [_FakeEmbeddingItem(v) for v in vectors]
+
+
+class _FakeEmbeddingsResource:
+    async def create(self, *, model, input):  # noqa: A002 -- matches the real SDK's own param name
+        return _FakeEmbeddingResponse([[0.0] * qdrant.DENSE_VECTOR_SIZE for _ in input])
+
+
+class _FakeClient:
+    def __init__(self) -> None:
+        self.embeddings = _FakeEmbeddingsResource()
+
+
+def patch_embed_dense(monkeypatch) -> None:
+    # Shared across test_qdrant_writer.py (2.5.d/e) and test_revocation_
+    # preserves_indexed_content.py (2.5.f) (duplication check after 2.5.d/
+    # e/f): both files had their own byte-identical copy of this exact
+    # stub. Monkeypatches embedding._get_client() directly (same mechanism
+    # as test_embedding.py's own _patch_client(), not a shared import of
+    # that file's own private helpers -- this one is simpler, with no
+    # error-simulation support, since no caller of this shared version
+    # needs that; test_qdrant_writer.py's own _patch_embed_dense_to_raise()
+    # stays local there, it has exactly one caller). Returns a
+    # deterministic fake dense vector -- the point-count/idempotency/
+    # isolation properties every caller of this helper proves depend on
+    # build_point_id()'s determinism and Qdrant's own upsert semantics,
+    # never on the actual dense vector VALUES (2.5.a's own established
+    # "verify live once, never a real OpenAI call in the committed suite"
+    # rule), so a fixed stub exercises everything that matters.
+    monkeypatch.setattr(embedding, "_get_client", lambda: _FakeClient())

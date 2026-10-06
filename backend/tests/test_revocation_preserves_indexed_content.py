@@ -21,50 +21,25 @@ import uuid
 import sqlalchemy as sa
 
 from app import qdrant
-from app.ingest import embedding
 from app.ingest.extract_html import extract_html
 from app.ingest.models import VerifiedDomain
 from app.ingest.qdrant_writer import embed_and_upsert
 from app.ingest.repository import IngestRepository, revoke_domain
 from app.tenancy.models import Tenant
-from tests.conftest import db_session, live_qdrant_collection
+from tests.conftest import db_session, live_qdrant_collection, patch_embed_dense
 
-# embed_dense() stubbed, matching 2.5.d/e's own established pattern and
-# this step's own confirmed design (real OpenAI calls never in the
-# committed suite). This is now the THIRD file with its own local copy of
-# this exact stub (test_qdrant_writer.py has two variants) -- noted
-# explicitly, strengthening the existing "candidate for a future
-# duplication check" note from 2.5.e, not silently repeating it unflagged.
-
-
-class _FakeEmbeddingItem:
-    def __init__(self, vector: list[float]) -> None:
-        self.embedding = vector
-
-
-class _FakeEmbeddingResponse:
-    def __init__(self, vectors: list[list[float]]) -> None:
-        self.data = [_FakeEmbeddingItem(v) for v in vectors]
-
-
-class _FakeEmbeddingsResource:
-    async def create(self, *, model, input):  # noqa: A002 -- matches the real SDK's own param name
-        return _FakeEmbeddingResponse([[0.0] * qdrant.DENSE_VECTOR_SIZE for _ in input])
-
-
-class _FakeClient:
-    def __init__(self) -> None:
-        self.embeddings = _FakeEmbeddingsResource()
-
-
-def _patch_embed_dense(monkeypatch) -> None:
-    monkeypatch.setattr(embedding, "_get_client", lambda: _FakeClient())
+# embed_dense() stubbed via the shared patch_embed_dense() fixture
+# (tests/conftest.py) -- extracted at the duplication check after
+# 2.5.d/e/f, since this file had grown a byte-identical copy of the same
+# stub test_qdrant_writer.py also carried. Matches 2.5.d/e's own
+# established pattern and this step's own confirmed design (real OpenAI
+# calls never in the committed suite).
 
 
 async def test_revoking_a_domain_leaves_already_indexed_chunks_answerable(
     monkeypatch, reset_test_database
 ):
-    _patch_embed_dense(monkeypatch)
+    patch_embed_dense(monkeypatch)
     tenant_id = uuid.uuid4()
     async with db_session() as session:
         session.add(Tenant(id=tenant_id, name="Revocation Proof Tenant", status="active"))

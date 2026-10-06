@@ -30,7 +30,7 @@ from app.ingest.qdrant_writer import (
     embed_and_upsert,
     upsert_points,
 )
-from tests.conftest import live_qdrant_collection
+from tests.conftest import live_qdrant_collection, patch_embed_dense
 
 
 def test_build_point_id_same_inputs_produce_the_same_id_every_time():
@@ -258,44 +258,19 @@ async def test_a_point_written_with_the_canonical_client_id_form_is_found_by_ten
 
 # --- Task 2.5.d: upsert_points() and the end-to-end idempotency proof ------
 #
-# embed_dense() is stubbed in every test below, mirroring test_embedding.py's
-# own _patch_client()/_FakeClient pattern exactly (monkeypatching embedding.
-# _get_client(), not a shared import across test files -- noted here, not
-# consolidated, since this is only the second file needing this exact
-# mechanism; a future duplication check can decide whether to extract a
-# shared helper -- a third file, test_revocation_preserves_indexed_content.py,
-# now has its own copy too, Task 2.5.f). Confirmed with the user before
-# building: 2.5.a's own established rule ("verify live once during
-# development, never a real OpenAI call in the committed suite") applies
-# here too -- the point-count/idempotency properties these tests prove
-# depend on build_point_id()'s determinism and Qdrant's own
+# embed_dense() is stubbed in every test below via the shared patch_embed_
+# dense() fixture (tests/conftest.py) -- extracted at the duplication check
+# after 2.5.d/e/f, since test_revocation_preserves_indexed_content.py (2.5.f)
+# had grown a byte-identical copy of this exact stub. Confirmed with the
+# user before building: 2.5.a's own established rule ("verify live once
+# during development, never a real OpenAI call in the committed suite")
+# applies here too -- the point-count/idempotency properties these tests
+# prove depend on build_point_id()'s determinism and Qdrant's own
 # upsert-overwrites-by-id semantics, not on what the actual dense vector
 # VALUES are, so a deterministic fake vector exercises everything that
 # matters at zero ongoing cost and no API-key dependency in CI.
 # embed_sparse() stays genuinely real (fastembed, free and local) in
 # every test below, like every other test in this file.
-class _FakeEmbeddingItem:
-    def __init__(self, vector: list[float]) -> None:
-        self.embedding = vector
-
-
-class _FakeEmbeddingResponse:
-    def __init__(self, vectors: list[list[float]]) -> None:
-        self.data = [_FakeEmbeddingItem(v) for v in vectors]
-
-
-class _FakeEmbeddingsResource:
-    async def create(self, *, model, input):  # noqa: A002 -- matches the real SDK's own param name
-        return _FakeEmbeddingResponse([[0.0] * qdrant.DENSE_VECTOR_SIZE for _ in input])
-
-
-class _FakeClient:
-    def __init__(self) -> None:
-        self.embeddings = _FakeEmbeddingsResource()
-
-
-def _patch_embed_dense(monkeypatch) -> None:
-    monkeypatch.setattr(embedding, "_get_client", lambda: _FakeClient())
 
 
 async def _run_full_pipeline(
@@ -350,7 +325,7 @@ def _html_with_sections(*section_bodies: str) -> str:
 async def test_upsert_points_batch_upserts_multiple_points_in_one_call_all_queryable(
     monkeypatch,
 ):
-    _patch_embed_dense(monkeypatch)
+    patch_embed_dense(monkeypatch)
     async with live_qdrant_collection("upsert_batch") as (client, name):
         await qdrant.ensure_collection(client, name)
         tenant_id, source_id, document_id = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
@@ -378,7 +353,7 @@ async def test_rerunning_the_identical_pipeline_overwrites_rather_than_duplicate
     # duplicating," proven through the FULL real pipeline end to end, not
     # just build_point_id()'s own isolated determinism (already proven at
     # 2.5.c).
-    _patch_embed_dense(monkeypatch)
+    patch_embed_dense(monkeypatch)
     async with live_qdrant_collection("idempotency") as (client, name):
         await qdrant.ensure_collection(client, name)
         tenant_id, source_id, document_id = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
@@ -441,7 +416,7 @@ async def test_rerunning_with_shrunk_content_leaves_the_removed_chunks_orphaned(
     # per tenant and deletes orphaned points" -- Step 2.9 ("Scheduler,
     # plans and reconcile"), not 2.5.d. See the matching Open marker in
     # PROJECT_SPEC.md, owned by Step 2.9.
-    _patch_embed_dense(monkeypatch)
+    patch_embed_dense(monkeypatch)
     async with live_qdrant_collection("shrink_orphan") as (client, name):
         await qdrant.ensure_collection(client, name)
         tenant_id, source_id, document_id = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
@@ -498,8 +473,8 @@ async def test_rerunning_with_shrunk_content_leaves_the_removed_chunks_orphaned(
 # step's own hostile tenant-isolation proof.
 #
 # embed_dense() stays stubbed, matching 2.5.d's own established pattern
-# (and this task's own confirmed design): reuses _patch_embed_dense() from
-# the 2.5.d section above. _run_full_pipeline() (2.5.d section, above) was
+# (and this task's own confirmed design): reuses the shared patch_embed_
+# dense() fixture. _run_full_pipeline() (2.5.d section, above) was
 # a test-only duplicate of what embed_and_upsert() does for real -- RESOLVED
 # at Task 2.5.f: that helper now delegates to this real function directly
 # instead of reimplementing the pipeline a second time (see its own
@@ -519,7 +494,7 @@ async def _patch_embed_dense_to_raise(monkeypatch, error: Exception) -> None:
 async def test_embed_and_upsert_a_real_document_lands_correct_points_with_correct_payloads(
     monkeypatch,
 ):
-    _patch_embed_dense(monkeypatch)
+    patch_embed_dense(monkeypatch)
     async with live_qdrant_collection("embed_and_upsert") as (client, name):
         await qdrant.ensure_collection(client, name)
         tenant_id, source_id, document_id = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
@@ -564,7 +539,7 @@ async def test_embed_and_upsert_hostile_isolation_proof_two_tenants_two_real_doc
     # real top-level callable, not synthetic points (test_qdrant_isolation.
     # py, Task 1.3.d) or an isolated sub-component (test_qdrant_writer.py's
     # own 2.5.c proof, one tenant through build_payload() alone).
-    _patch_embed_dense(monkeypatch)
+    patch_embed_dense(monkeypatch)
     async with live_qdrant_collection("hostile_isolation") as (client, name):
         await qdrant.ensure_collection(client, name)
         tenant_a, tenant_b = uuid.uuid4(), uuid.uuid4()
@@ -668,7 +643,7 @@ async def test_embed_and_upsert_nearly_empty_content_is_a_clean_no_op(monkeypatc
     # handling at every layer below (embed_dense/embed_sparse/
     # upsert_points) composes into a clean no-op with no error and no
     # network call -- proven here, not merely assumed from the pieces.
-    _patch_embed_dense(monkeypatch)
+    patch_embed_dense(monkeypatch)
     async with live_qdrant_collection("nearly_empty") as (client, name):
         await qdrant.ensure_collection(client, name)
         content = extract_html("<html><head><title>Empty</title></head><body></body></html>")
@@ -694,7 +669,7 @@ async def test_embed_and_upsert_rerun_on_the_same_document_overwrites_not_duplic
     # The idempotency property (docs/SPEC.md §5.3), now proven through
     # THIS exact top-level function too -- not just upsert_points()
     # directly, as in 2.5.d.
-    _patch_embed_dense(monkeypatch)
+    patch_embed_dense(monkeypatch)
     async with live_qdrant_collection("embed_and_upsert_idempotency") as (client, name):
         await qdrant.ensure_collection(client, name)
         tenant_id, source_id, document_id = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
