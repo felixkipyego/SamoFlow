@@ -139,6 +139,15 @@ services:
     <<: [*app-build, *app-hardening]
     command: ["api"]
     environment: *app-env
+    volumes:
+      # Task 2.7.a: uploaded-file storage (app/ingest/upload_storage.py),
+      # shared with worker below at the identical path -- confirmed live
+      # before this task that api/worker shared no volume at all until
+      # now. Same path as Settings.upload_storage_path's own default, so
+      # no UPLOAD_STORAGE_PATH override is needed for this to line up.
+      # Not a bind mount: a named volume needs no host-side directory to
+      # pre-exist, matching postgres-data's/qdrant-data's own precedent.
+      - upload-storage:/data/uploads
     ports:
       # Host side fixed at 8000, bound to loopback only: nothing outside
       # this machine can reach the API directly (a reverse proxy is a later
@@ -170,6 +179,11 @@ services:
     <<: [*app-build, *app-hardening]
     command: ["worker"]
     environment: *app-env
+    volumes:
+      # Task 2.7.a: same shared volume as api's own above, same path --
+      # see that comment for why. This is what makes it SHARED: both
+      # services mount the identical named volume at the identical path.
+      - upload-storage:/data/uploads
     depends_on:
       postgres:
         condition: service_healthy
@@ -272,3 +286,7 @@ services:
 volumes:
   postgres-data:
   qdrant-data:
+  # Task 2.7.a: shared between api and worker only (not migrate -- it
+  # never touches uploads); named, not bind-mounted, matching the two
+  # volumes above.
+  upload-storage:

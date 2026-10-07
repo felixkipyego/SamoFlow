@@ -109,6 +109,20 @@ COPY --chmod=0755 entrypoint.sh /usr/local/bin/entrypoint.sh
 COPY --chmod=0644 alembic.ini ./alembic.ini
 COPY --chmod=0755 alembic/ ./alembic/
 
+# Task 2.7.a: pre-create the upload-storage mount point, owned by the app
+# user, while still root. Found live, not assumed: Docker seeds a brand
+# new named volume's content (including ownership) from whatever already
+# exists at the mount point in the image at the moment the volume is
+# first attached, but ONLY if that directory already exists there --
+# mounting a Compose named volume over a path that was never created in
+# the image leaves it root-owned, which the non-root USER below cannot
+# write to (confirmed live: a plain `echo > /data/uploads/x` from inside
+# the api container failed with "Permission denied" before this line was
+# added). Same fixed UID/GID as the `app` user declared above, matching
+# this Dockerfile's own existing "Compose must use this same UID
+# wherever it touches ownership of files from this image" rule.
+RUN mkdir -p /data/uploads && chown app:app /data/uploads
+
 USER 10001
 
 # Documentation only; Compose (1.1.i) publishes the real port mapping.

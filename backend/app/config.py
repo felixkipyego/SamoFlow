@@ -190,6 +190,36 @@ class Settings(BaseSettings):
     # crawl, not a tight business limit) -- retuned later with real
     # numbers, like every other estimate in this project.
     crawl_page_cap: int = Field(default=500, gt=0)
+    # Task 2.7.a: where the upload adapter's raw file bytes live on disk
+    # (docs/SPEC.md §5.6: "originals stored privately") -- a plain
+    # string, not pathlib.Path (matching every other path-like setting in
+    # this project so far, e.g. database_url's own string treatment);
+    # app/ingest/upload_storage.py turns it into a Path at the call site.
+    # Mounted as a Docker volume shared between `api` and `worker`
+    # (deploy/docker-compose.yml, Step 2.7 breakdown decision (b)) at the
+    # same path this default names, so no override is needed in a real
+    # deployment -- only tests override it (to a pytest tmp_path).
+    # ASSUMPTION: the literal path "/data/uploads" is this task's own
+    # choice (the Step 2.7 breakdown decision only approved "local disk,
+    # shared volume," not this exact spelling) -- mirrored exactly in
+    # deploy/docker-compose.yml's new upload-storage volume mount, so the
+    # default needs no override in a real deployment. Flag if a different
+    # convention is preferred.
+    upload_storage_path: str = Field(default="/data/uploads", min_length=1)
+    # Task 2.7.a: the upload adapter's own per-file size ceiling
+    # (docs/SPEC.md §5.4: "upload storage and file size... from the
+    # plan") -- deliberately NOT sourced from `plans.limits` yet, same
+    # already-established reason as `crawl_page_cap` directly above
+    # (`plans.limits` is still an unstructured JSONB stub, Task 4.3's own
+    # job; see the matching Open marker). 20MB (20 * 1024 * 1024): a
+    # generous ceiling for a real PDF/DOCX/TXT/MD business document
+    # (including a scanned, image-heavy PDF), while still bounding a
+    # single upload job's worst-case parse time/memory -- distinct from,
+    # and not to be confused with, `safe_fetch.py`'s own 5MB-per-page web-
+    # fetch limit (2.3), which bounds a different thing (one HTML page
+    # fetched over the network) for a different reason. Retuned later
+    # with real numbers, like every other estimate in this project.
+    upload_max_size_bytes: int = Field(default=20 * 1024 * 1024, gt=0)
 
     @field_validator("database_url")
     @classmethod
