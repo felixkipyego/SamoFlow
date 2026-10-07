@@ -83,6 +83,10 @@ APP_DIR = BACKEND_DIR / "app"
 # client instance) to acquire the client it then forwards unmodified to
 # ingest_url() -- not added to READ_ALLOWLIST, matching web_adapter.py's
 # own identical reasoning exactly.
+# Task 2.6.e part 2: app/ingest/crawl.py added -- the identical shape
+# again (run_crawl() takes `client` as a bare pass-through parameter,
+# typed as the real AsyncQdrantClient, forwarded unmodified to
+# ingest_url()). Not added to READ_ALLOWLIST, same reasoning.
 CLIENT_ACCESS_ALLOWLIST: frozenset[str] = frozenset(
     {
         "app/qdrant.py",
@@ -91,6 +95,7 @@ CLIENT_ACCESS_ALLOWLIST: frozenset[str] = frozenset(
         "app/ingest/qdrant_writer.py",
         "app/ingest/web_adapter.py",
         "app/ingest/job_handlers.py",
+        "app/ingest/crawl.py",
     }
 )
 

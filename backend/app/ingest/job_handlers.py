@@ -87,13 +87,35 @@
 # progress-heartbeat mechanism here ahead of 2.6.e's own real one; revisit
 # if a real `urls` list is ever observed to run long enough in practice
 # for this to matter before 2.6.e lands.
+# Task 2.6.e part 2: handle_ingest_crawl() -- the `crawl` adapter's own
+# JOB_HANDLERS entry, added below. Thin by design, matching handle_
+# ingest_url()'s own shape exactly: session/client acquisition and the
+# sources.config read happen here; the real orchestration (robots.txt ->
+# sitemap-first discovery, otherwise BFS, the per-host throttle, the
+# per-page loop) lives in app.ingest.crawl.run_crawl() -- this function
+# is the thinnest possible glue between worker.py's own JOB_HANDLERS
+# calling convention and that real logic, not a second copy of it.
+#
+# Heartbeat: THIS is where it is genuinely built (the Step 2.6 decision's
+# own "the handler should write progress heartbeats periodically during
+# its own work" lean, deferred here from handle_ingest_url(), 2.6.d).
+# run_crawl()'s own `on_page_visited` callback is wired to worker.py's
+# write_heartbeat() -- confirmed live, by reading write_heartbeat()
+# directly, that no worker.py refactor is needed: it was always a plain,
+# side-effecting function writing to a path, never tied to run()'s own
+# loop structure. Imported here, not from app.ingest.crawl (which cannot
+# import worker.py itself -- worker.py imports this module, which imports
+# crawl.py; crawl.py importing worker.py back would be circular) --
+# exactly why run_crawl() takes a plain injected callback instead.
 import logging
 
 from qdrant_client import AsyncQdrantClient
 from sqlalchemy import select
 
 from app import qdrant
+from app.config import get_settings
 from app.db import _session_factory
+from app.ingest.crawl import run_crawl
 from app.ingest.models import Job, Source
 from app.ingest.web_adapter import ingest_url
 
@@ -151,3 +173,62 @@ async def handle_ingest_url(job: Job) -> None:
             logger.info(
                 "handle_ingest_url: job %s url %s -> %s", job.id, url, result.status
             )
+
+
+async def handle_ingest_crawl(job: Job) -> None:
+    """The `crawl` adapter's own `JOB_HANDLERS["ingest_crawl"]` entry.
+
+    Reads `sources.config["seed_url"]` for `job.source_id` (the Step 2.6
+    planning decision's own config shape for this adapter -- a single
+    seed URL, discovery finds the rest; `job.payload` is unused here too,
+    same reasoning as handle_ingest_url()'s own `urls` config). Delegates
+    all real orchestration to app.ingest.crawl.run_crawl() -- see that
+    function's own docstring for the sitemap-vs-BFS branching, the
+    per-host throttle, and the partial-failure/job-success policy (IDENTICAL
+    to handle_ingest_url()'s own, see this module's header comment).
+
+    The heartbeat write (worker.py's own write_heartbeat()) is wired as
+    run_crawl()'s `on_page_visited` callback -- fired once per page
+    actually visited, giving a real, busy crawl genuine mid-job progress
+    checkpoints, not just one heartbeat write at job start (the gap this
+    task closes, deferred from 2.6.d).
+    """
+    # Imported here, not at module level: see this module's own header
+    # comment for why (worker.py -> job_handlers.py -> crawl.py would be
+    # circular if crawl.py imported worker.py directly; importing
+    # worker.py FROM job_handlers.py, which worker.py itself already
+    # imports, is not circular -- Python resolves it fine since by the
+    # time this function is actually CALLED, worker.py's own module
+    # object is fully initialized).
+    from app.worker import HEARTBEAT_PATH, write_heartbeat
+
+    if job.source_id is None:
+        # Same defensive guard as handle_ingest_url()'s own, same
+        # reasoning -- structurally impossible through the real
+        # enqueue() path for this job_type, not a bespoke permanent-
+        # failure classification this edge case does not warrant.
+        raise ValueError(f"job {job.id} has job_type='ingest_crawl' but no source_id")
+
+    settings = get_settings()
+    client: AsyncQdrantClient = qdrant.get_qdrant_client()
+    async with _session_factory()() as session:
+        source = (
+            await session.execute(
+                select(Source).where(
+                    Source.id == job.source_id, Source.tenant_id == job.tenant_id
+                )
+            )
+        ).scalar_one()
+        seed_url = source.config["seed_url"]
+        await run_crawl(
+            session,
+            client,
+            qdrant.COLLECTION_NAME,
+            tenant_id=job.tenant_id,
+            source_id=job.source_id,
+            seed_url=seed_url,
+            page_cap=settings.crawl_page_cap,
+            user_agent=settings.crawl_user_agent,
+            delay_seconds=settings.crawl_request_delay_seconds,
+            on_page_visited=lambda: write_heartbeat(HEARTBEAT_PATH),
+        )

@@ -136,6 +136,47 @@ class Settings(BaseSettings):
     # third-party-issued key, not a self-chosen secret needing an
     # artificial entropy floor.
     openai_api_key: SecretStr
+    # Task 2.6.e: identifies the crawler on every robots.txt/sitemap/page
+    # request it makes, matching the Step 2.6 decision entry's own
+    # "Settings-configurable, not hardcoded" call -- a placeholder domain
+    # (samoflow.app), since the real production domain isn't decided yet;
+    # kept easy to change later rather than baked into a constant. Not a
+    # secret (no SecretStr): a User-Agent string is sent in plaintext on
+    # every outbound request by design, nothing to protect.
+    crawl_user_agent: str = Field(default="SamoFlowBot/1.0 (+https://samoflow.app/bot)")
+    # Task 2.6.e part 2: docs/SPEC.md §5.5 names "a delay" between
+    # requests to the same host but gives no specific number (unlike the
+    # fetch-limit numbers 2.3 owns, which §5.5 states exactly) -- same
+    # "Settings-configurable, no spec number given" treatment as crawl_
+    # user_agent above. 0.25s (250ms) matches ordinary polite-crawling
+    # convention; retuned later with real numbers, like every other
+    # estimate in this project (worker_poll_interval_seconds's own
+    # precedent). The "2 concurrent requests per host" half of this same
+    # §5.5 line IS spec-fixed (not described as configurable anywhere),
+    # so it stays a plain module constant in app/ingest/crawl.py
+    # (HostThrottle's own MAX_CONCURRENT_PER_HOST), not a Settings field.
+    crawl_request_delay_seconds: float = Field(default=0.25, ge=0)
+    # Task 2.6.e part 2: the "per-crawl safety cap" (docs/SPEC.md §5.5) --
+    # deliberately NOT read from `plans.limits` here. Investigated live
+    # before deciding, not assumed: `plans.limits` is confirmed (Task
+    # 1.2.b's own header comment) to be "an unstructured JSONB blob...
+    # until Phase 2/4 features define real limit fields," and `app/
+    # plans/service.py`'s own `get_plan_limits()` is an explicit stub
+    # (`raise NotImplementedError`, `TODO(4.3)`) -- real per-tenant plan-
+    # limit reading is Task 4.3's own documented job, not this one's.
+    # Building a real schema for `plans.limits` and a real "total
+    # currently indexed pages" counting query here would preempt that
+    # task's own design work and scope-creep well beyond "crawl wiring,
+    # concurrency, and the heartbeat mechanism" (this task's own stated
+    # scope). This Settings field is the smallest correct mechanism for
+    # NOW (matching job_max_attempts's own identical-shape precedent) --
+    # a single global safety ceiling, not yet per-plan. See the matching
+    # Open marker: Task 4.3 should revisit this crawl handler's own page-
+    # cap sourcing once real plan-limit reading exists. 500: a generous
+    # but bounded safety default (this is a CEILING against a runaway
+    # crawl, not a tight business limit) -- retuned later with real
+    # numbers, like every other estimate in this project.
+    crawl_page_cap: int = Field(default=500, gt=0)
 
     @field_validator("database_url")
     @classmethod

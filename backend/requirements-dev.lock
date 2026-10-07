@@ -1465,6 +1465,12 @@ portalocker==3.2.0 \
     # via
     #   -c backend/requirements.lock
     #   qdrant-client
+protego==0.7.0 \
+    --hash=sha256:2c032d9736a1f4f0c4318f3558353ae34da5cd038f1a5e064ded7548df315e5a \
+    --hash=sha256:944638aaee608f6c83fcad442695f3f9381a60be8d5007248f46b00f201fa5fc
+    # via
+    #   -c backend/requirements.lock
+    #   widgetplatform (backend/pyproject.toml)
 protobuf==7.36.2 \
     --hash=sha256:497d0463ff3316681da6c0b9e8d06cb465d61abce00b613ab42226175644d1bb \
     --hash=sha256:89f23aa53c24553a2416fd4fd1ec06f74fa42b14b546d8883128813f775bbfd2 \

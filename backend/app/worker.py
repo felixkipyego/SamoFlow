@@ -13,6 +13,15 @@
 # own header comment for the full design (the JOB_HANDLERS signature
 # widening this required, the partial-failure/job-success policy, the
 # heartbeat decision).
+#
+# Task 2.6.e part 2: `handle_ingest_crawl` registered too. It imports
+# write_heartbeat/HEARTBEAT_PATH from this module -- but does so INSIDE
+# its own function body (app/ingest/job_handlers.py), not at that
+# module's top level, since this module already imports FROM job_
+# handlers.py at ITS OWN top level (the line directly below); a
+# module-level import back would be a genuine circular import, resolved
+# by deferring it to call time instead (both modules are fully
+# initialized by then).
 import asyncio
 import logging
 import signal
@@ -24,7 +33,7 @@ from pathlib import Path
 from app import all_models  # noqa: F401
 from app.config import SettingsError, get_settings
 from app.db import _session_factory
-from app.ingest.job_handlers import handle_ingest_url
+from app.ingest.job_handlers import handle_ingest_crawl, handle_ingest_url
 from app.ingest.models import Job
 from app.ingest.queue import claim_next_job, mark_job_failed, mark_job_succeeded
 
@@ -66,20 +75,28 @@ HEARTBEAT_PATH = Path("/tmp/worker-heartbeat")  # noqa: S108 (not a shared/predi
 # is what actually decides "stale" here.
 HEARTBEAT_STALE_MULTIPLIER = 3
 
-# ASSUMPTION: a real, long-running handler (2.4-2.8) that runs for longer
-# than HEARTBEAT_STALE_MULTIPLIER * worker_poll_interval_seconds would make
-# the heartbeat go stale while the worker is still healthy, just busy --
-# the heartbeat is written once per iteration (at its start), not
-# progressively during a handler's own execution. Not a problem today:
-# every registered handler (noop, sleep -- both test/proof-only so far) is
-# either instant or a short, test-controlled duration. Revisit once a
-# genuinely long-running handler exists: either it must report its own
-# progress by writing the heartbeat periodically during its own work, or
-# this threshold must grow to cover the longest expected single-job
-# duration.
+# RESOLVED for handle_ingest_crawl() at Task 2.6.e part 2: this handler
+# calls write_heartbeat() itself, per discovered page, during its own
+# work (not just once per run()-loop iteration at job start) -- the
+# mechanism this ASSUMPTION originally called for, now built. Still an
+# open ASSUMPTION for any FUTURE long-running handler (2.7/2.8) that
+# does not yet exist: handle_ingest_url() (2.6.d) processes a tenant-
+# supplied, realistically-short URL list and was judged not yet the
+# trigger case at that task's own build time; this remains true for it
+# unless real-world usage proves otherwise.
 
 
-def _write_heartbeat(path: Path = HEARTBEAT_PATH) -> None:
+def write_heartbeat(path: Path = HEARTBEAT_PATH) -> None:
+    # Task 2.6.e part 2: renamed from _write_heartbeat() (no behavior
+    # change) -- a real handler (handle_ingest_crawl(), app/ingest/
+    # job_handlers.py) now calls this directly, mid-execution, per
+    # discovered page, per the Step 2.6 decision's own lean ("the handler
+    # should write progress heartbeats periodically during its own
+    # work"). No worker.py refactor needed for this: the heartbeat was
+    # always a plain, side-effecting function writing to a path, not
+    # something tied to run()'s own loop structure -- confirmed by
+    # reading this function directly before assuming a refactor was
+    # required.
     path.write_text(str(time.time()))
 
 
@@ -134,6 +151,7 @@ JOB_HANDLERS: dict[str, Callable[[Job], Awaitable[None]]] = {
     "noop": _noop_handler,
     "sleep": _sleep_handler,
     "ingest_url": handle_ingest_url,
+    "ingest_crawl": handle_ingest_crawl,
 }
 
 
@@ -245,13 +263,13 @@ async def run(stop: asyncio.Event | None = None, max_iterations: int | None = No
             # failure that block already exists to catch, and a worker
             # that cannot write its own heartbeat is arguably unhealthy in
             # a real sense too, not just logging-wise. HEARTBEAT_PATH is
-            # passed explicitly (not left to _write_heartbeat()'s own
+            # passed explicitly (not left to write_heartbeat()'s own
             # default parameter) so a test can monkeypatch the module-level
             # name and have it actually take effect here -- a default
             # argument's value is bound once, at function-definition time,
             # so monkeypatching the module attribute alone would not
             # otherwise reach this call.
-            _write_heartbeat(HEARTBEAT_PATH)
+            write_heartbeat(HEARTBEAT_PATH)
             claimed = await _claim_and_process_one_job()
         except Exception as exc:
             # A transient failure reaching the database (or claiming/

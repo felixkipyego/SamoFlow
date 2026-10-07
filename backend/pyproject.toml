@@ -123,6 +123,23 @@ dependencies = [
     # for exactly this entry, and the matching PROJECT_SPEC.md decision
     # entry for why a marker-scoped pin could not resolve this cleanly.
     "onnxruntime==1.23.2",
+    # Task 2.6.e. Version re-verified live on PyPI at this task's own
+    # build time. Escalated from stdlib urllib.robotparser, per the Step
+    # 2.6 decision entry's own pre-authorized escalation path, after
+    # confirming live (not assumed) that stdlib's robots.txt parser does
+    # not implement the de-facto `*`/`$` wildcard extensions most
+    # real-world robots.txt files rely on (Google/Bing's own convention,
+    # shipped by default by most major CMS platforms) -- it treats `*`/
+    # `$` inside a Disallow/Allow path as literal characters, confirmed
+    # to silently mis-classify common real patterns
+    # (`/*.pdf$`, `/search?*`, `/tmp*`) as non-matching ("allowed") when
+    # real site owners intend them to block. protego (Scrapy's own
+    # robots.txt library) correctly handles all of these, confirmed live
+    # in a throwaway venv before adding it here. Zero dependencies of its
+    # own (confirmed against PyPI's real metadata) and ships a single
+    # pure-Python py3-none-any wheel -- no new transitive package, no
+    # compiled-extension risk.
+    "protego==0.7.0",
 ]
 
 [project.optional-dependencies]
