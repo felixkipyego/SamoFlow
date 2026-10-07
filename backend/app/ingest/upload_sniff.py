@@ -47,6 +47,62 @@
 # extension") is about PDF/DOCX impersonation -- a binary-content risk a
 # parser could be exploited through -- not about telling two kinds of
 # inert prose apart, which carries no such risk either way.
+#
+# Task 2.7.b [SECURITY] -- the resource-exhaustion investigation 2.7.a
+# deferred to this task (its own now-resolved marker): confirmed LIVE,
+# not assumed, that python-docx has ZERO protection against a zip-bomb-
+# shaped `.docx` -- `_ZipPkgReader.blob_for()` calls plain
+# `zipfile.ZipFile.read(membername)`, decompressing a member fully into
+# memory with no size check of its own. Constructed a real PoC: a single
+# member whose TRUE decompressed size is 200MB compresses to ~204KB on
+# disk -- comfortably under `upload_max_size_bytes` (20MB) above, so that
+# check alone does NOT catch this; python-docx's `Document()` would
+# decompress the full 200MB (or far more, for a more extreme ratio)
+# before anything else ever looks at it. pypdf, by contrast, needed NO
+# new mitigation here -- confirmed live (see the Step 2.7.b decision log
+# entry for the full writeup) that it already bounds BOTH known PDF
+# pathologies internally: a circular page-tree reference raises
+# `PdfReadError("Detected cyclic page references.")`
+# (`page_tree_maximum_depth`, default 100), and ANY zlib-compressed
+# stream decompressing past `Configuration.zlib_maximum_output_length`
+# (default 75MB) raises `LimitReachedError` -- both real `PyPdfError`
+# subclasses, both proven end-to-end through this project's own
+# extract_pdf() with real constructed PDFs, not just read about.
+#
+# Mitigation chosen: check every ZIP member's own DECLARED uncompressed
+# size (`zipfile.ZipInfo.file_size`, read from the central directory,
+# itself requiring zero decompression) against a sane ceiling, in the
+# SAME already-open archive this function uses to confirm `word/
+# document.xml`'s presence -- no second zip-open, no new dependency,
+# matching the task's own suggested design exactly. A docx-shaped file
+# that fails this check returns "unknown", the SAME vocabulary already
+# used for "a ZIP without word/document.xml" and "a corrupt ZIP" --
+# deliberately not a new exception type: this function's own existing
+# contract (classify, never raise) stays exactly as it was, and "unknown"
+# already means "do not treat this as a usable docx," which is precisely
+# what a bomb-shaped file is. `max_docx_part_size_bytes` is a REQUIRED
+# keyword argument, not an optional one with a hidden default -- matching
+# upload_storage.save()'s own `max_size_bytes` precedent (2.7.a): the
+# safety check cannot be silently skipped by a caller who forgets to pass
+# it.
+#
+# A theoretical residual gap, considered and NOT closed here, recorded
+# rather than silently assumed away: this checks the DECLARED file_size
+# field, which a sufficiently adversarial zip could, in principle, make
+# inconsistent with the member's real compressed stream (lie about the
+# size while keeping a self-consistent CRC for a larger real payload).
+# Investigated live: Python's own zipfile DOES still catch many such
+# inconsistencies via its own CRC-32 validation during read() -- but only
+# AFTER decompressing, which would not prevent the resource cost. Closing
+# this fully would need a bounded, incremental decompressing read that
+# ignores declared metadata entirely (mirroring pypdf's own
+# `max_length=`-bounded zlib approach) -- a materially more complex,
+# custom mechanism for a materially more sophisticated attack than the
+# classic zip-bomb this task investigated. Declared-size checking is the
+# standard, well-known mitigation for the risk actually being defended
+# against here (rule 11); going further now would be exactly the kind of
+# custom security scheme rule 11 says to avoid building speculatively.
+# Revisit if ever shown to matter in practice.
 import zipfile
 from io import BytesIO
 from typing import Literal
@@ -57,32 +113,32 @@ _PDF_PREFIX = b"%PDF-"
 _ZIP_PREFIX = b"PK\x03\x04"
 _DOCX_MARKER_MEMBER = "word/document.xml"
 
-# TODO(2.7.b): this module's own ZIP check calls only namelist() (reads
-# the central directory's metadata) and never decompresses/reads any
-# member's actual content, so it is not itself exposed to a
-# decompression-bomb-style resource-exhaustion risk, and the overall
-# input is already bounded by upload_storage.save()'s own max_size_bytes
-# before this function ever sees it. The real investigation -- what
-# pypdf/python-docx guard against once they actually PARSE full content
-# (2.7.c's job, downstream of sniffing) -- is 2.7.b's, not addressed here.
 
-
-def sniff_file_type(data: bytes, filename: str) -> UploadKind:
+def sniff_file_type(data: bytes, filename: str, *, max_docx_part_size_bytes: int) -> UploadKind:
     """Determines the real type of `data` from its own bytes -- `filename`
     is consulted ONLY to break the txt/md tie once content has already
     confirmed the bytes are plain text (see this module's own header
-    comment); it is never trusted for pdf/docx."""
+    comment); it is never trusted for pdf/docx. `max_docx_part_size_bytes`
+    bounds a docx candidate's own internal ZIP members (the zip-bomb
+    defense, also described in the header comment) -- required, not
+    optional, so this safety check cannot be silently skipped; ignored
+    for every other candidate type."""
     if data.startswith(_PDF_PREFIX):
         return "pdf"
 
     if data.startswith(_ZIP_PREFIX):
         try:
             with zipfile.ZipFile(BytesIO(data)) as archive:
-                if _DOCX_MARKER_MEMBER in archive.namelist():
-                    return "docx"
+                if _DOCX_MARKER_MEMBER not in archive.namelist():
+                    return "unknown"
+                if any(
+                    member.file_size > max_docx_part_size_bytes
+                    for member in archive.infolist()
+                ):
+                    return "unknown"
+                return "docx"
         except zipfile.BadZipFile:
-            pass
-        return "unknown"
+            return "unknown"
 
     if b"\x00" in data:
         return "unknown"

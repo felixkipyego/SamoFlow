@@ -220,6 +220,26 @@ class Settings(BaseSettings):
     # fetched over the network) for a different reason. Retuned later
     # with real numbers, like every other estimate in this project.
     upload_max_size_bytes: int = Field(default=20 * 1024 * 1024, gt=0)
+    # Task 2.7.b: the per-member decompressed-size ceiling for a `.docx`
+    # upload's own internal ZIP structure (app/ingest/upload_sniff.py's
+    # sniff_file_type()) -- a zip-bomb defense, investigated live before
+    # building (see the decision log entry): python-docx itself (via
+    # `_ZipPkgReader.blob_for()` -> `zipfile.ZipFile.read()`) has ZERO
+    # protection against a tiny-on-disk `.docx` whose own internal XML
+    # part decompresses to gigabytes, confirmed live by constructing one
+    # (a 200MB payload compressing to ~204KB, well under
+    # `upload_max_size_bytes` above and so never caught by that check).
+    # NOT sourced from `plans.limits` -- this isn't a tenant-facing
+    # business limit at all (no docs/SPEC.md line names it), it is a pure
+    # internal safety ceiling, same treatment as `job_stuck_after_seconds`
+    # above (also Settings-configurable with no corresponding spec
+    # number). 100MB: generous for any real Word document's own largest
+    # single internal XML part (even a very large real document's own
+    # word/document.xml is realistically a few MB at most), while still
+    # meaningfully bounding a single decompression call's worst-case
+    # memory use. Retuned later with real numbers, like every other
+    # estimate in this project.
+    docx_max_part_size_bytes: int = Field(default=100 * 1024 * 1024, gt=0)
 
     @field_validator("database_url")
     @classmethod
