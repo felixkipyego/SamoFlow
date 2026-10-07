@@ -35,7 +35,7 @@ from app.config import SettingsError, get_settings
 from app.db import _session_factory
 from app.ingest.job_handlers import handle_ingest_crawl, handle_ingest_url
 from app.ingest.models import Job
-from app.ingest.queue import claim_next_job, mark_job_failed, mark_job_succeeded
+from app.ingest.queue import claim_next_job, mark_job_failed, mark_job_succeeded, reap_stuck_jobs
 
 # all_models above is imported for the side effect of registering every
 # domain's tables on Base.metadata -- without it, jobs.tenant_id's FK to
@@ -178,6 +178,25 @@ async def _mark_done(job_id, error: str | None, *, permanent: bool = False) -> N
         await session.commit()
 
 
+async def _reap_stuck_jobs() -> list:
+    # Task 2.6.f: its own separate transaction, same reasoning as
+    # _claim_one()/_mark_done() above. Run once per run() iteration,
+    # same cadence as the heartbeat write below -- reusing that already-
+    # established "cheap, safe to run redundantly often" precedent
+    # rather than inventing a second, separately-timed scheduling
+    # mechanism (a real scheduler with differently-timed background
+    # tasks is Step 2.9's own job, not built speculatively here). A
+    # single indexed-enough WHERE clause against this project's own
+    # current `jobs` table scale; revisit if that scale ever makes this
+    # genuinely expensive (not assumed a problem ahead of evidence).
+    async with _session_factory()() as session:
+        reaped = await reap_stuck_jobs(
+            session, stale_after_seconds=get_settings().job_stuck_after_seconds
+        )
+        await session.commit()
+    return reaped
+
+
 async def _claim_and_process_one_job() -> bool:
     # Returns True if a job was claimed (whether it went on to succeed,
     # fail, or hit an unknown job_type), False if nothing was ready.
@@ -270,6 +289,16 @@ async def run(stop: asyncio.Event | None = None, max_iterations: int | None = No
             # so monkeypatching the module attribute alone would not
             # otherwise reach this call.
             write_heartbeat(HEARTBEAT_PATH)
+            # Task 2.6.f: the stuck-job reaper, run once per iteration,
+            # same cadence as the heartbeat write directly above (see
+            # _reap_stuck_jobs()'s own comment for why no separate
+            # scheduling mechanism was built for this). Inside this same
+            # try/except, matching write_heartbeat()'s own reasoning
+            # exactly: a transient failure reaping jobs must not crash
+            # the worker either.
+            reaped = await _reap_stuck_jobs()
+            if reaped:
+                logger.info("worker: reaped %d stuck job(s): %s", len(reaped), reaped)
             claimed = await _claim_and_process_one_job()
         except Exception as exc:
             # A transient failure reaching the database (or claiming/

@@ -12,7 +12,7 @@ import sqlalchemy as sa
 
 from app.config import get_settings
 from app.ingest.models import Job
-from app.ingest.queue import claim_next_job, mark_job_failed, mark_job_succeeded
+from app.ingest.queue import claim_next_job, mark_job_failed, mark_job_succeeded, reap_stuck_jobs
 from tests.conftest import _fetch_job, db_session
 
 # _seeded_tenant (used as a bare fixture parameter below) comes from
@@ -22,7 +22,13 @@ from tests.conftest import _fetch_job, db_session
 
 
 async def _make_job(
-    session, tenant_id, *, next_run_at=None, status="pending", max_attempts=5
+    session,
+    tenant_id,
+    *,
+    next_run_at=None,
+    status="pending",
+    max_attempts=5,
+    updated_at=None,
 ) -> uuid.UUID:
     job = Job(
         tenant_id=tenant_id,
@@ -31,6 +37,13 @@ async def _make_job(
         max_attempts=max_attempts,
         payload={},
         **({"next_run_at": next_run_at} if next_run_at is not None else {}),
+        # Task 2.6.f: lets a reaper test backdate a "running" row's own
+        # updated_at to simulate a job whose worker crashed hard some
+        # time ago -- TIMESTAMP_NOW's own server_default only applies
+        # when the column is omitted from the INSERT, so passing a real
+        # value here overrides it cleanly, matching every other optional
+        # override this helper already supports.
+        **({"updated_at": updated_at} if updated_at is not None else {}),
     )
     session.add(job)
     await session.flush()
@@ -212,6 +225,136 @@ async def test_tenant_id_survives_the_claim_to_mark_succeeded_cycle_unchanged(_s
 
     row = await _fetch_job(job_id)
     assert row.tenant_id == tenant_id
+
+
+# --- Task 2.6.f: reap_stuck_jobs() ------------------------------------------
+# The stuck-job reaper -- the last of the four 2.4-2.8-range markers,
+# waiting since Task 2.1.e. "A row manually left in 'running' status with
+# a stale timestamp, as if its worker had crashed" (this task's own
+# wording) is exactly _make_job(status="running", updated_at=<stale>)
+# below -- no real crashed worker needed to prove this correctly.
+
+
+async def test_reap_stuck_jobs_reclaims_a_stale_running_job(_seeded_tenant):
+    tenant_id = _seeded_tenant
+    fixed_now = datetime(2026, 1, 1, tzinfo=UTC)
+    stale_after_seconds = 1800
+
+    async with db_session() as session:
+        stuck_id = await _make_job(
+            session,
+            tenant_id,
+            status="running",
+            updated_at=fixed_now - timedelta(seconds=stale_after_seconds + 1),
+        )
+        await session.commit()
+
+    async with db_session() as session:
+        reaped = await reap_stuck_jobs(
+            session, stale_after_seconds=stale_after_seconds, clock=lambda: fixed_now
+        )
+        await session.commit()
+
+    assert reaped == [stuck_id]
+    row = await _fetch_job(stuck_id)
+    # Reclaimed via mark_job_failed()'s own normal backoff path, not a
+    # bare reset -- attempts incremented, a real retry delay scheduled,
+    # not "pending" again with no consequence at all.
+    assert row.status == "pending"
+    assert row.attempts == 1
+    assert row.error == "stuck: no progress since claim or last update"
+    base_seconds = get_settings().job_retry_base_seconds
+    assert row.next_run_at == fixed_now + timedelta(seconds=base_seconds * (2**1))
+
+
+async def test_reap_stuck_jobs_leaves_a_genuinely_running_job_alone(_seeded_tenant):
+    # No false positives: a job that IS stale by wall-clock age but
+    # whose own updated_at is still within the threshold (a worker
+    # genuinely, actively working it) must not be touched.
+    tenant_id = _seeded_tenant
+    fixed_now = datetime(2026, 1, 1, tzinfo=UTC)
+    stale_after_seconds = 1800
+
+    async with db_session() as session:
+        fresh_id = await _make_job(
+            session,
+            tenant_id,
+            status="running",
+            updated_at=fixed_now - timedelta(seconds=stale_after_seconds - 1),
+        )
+        await session.commit()
+
+    async with db_session() as session:
+        reaped = await reap_stuck_jobs(
+            session, stale_after_seconds=stale_after_seconds, clock=lambda: fixed_now
+        )
+        await session.commit()
+
+    assert reaped == []
+    row = await _fetch_job(fresh_id)
+    assert row.status == "running"
+    assert row.attempts == 0
+    assert row.error is None
+
+
+async def test_reap_stuck_jobs_ignores_pending_and_succeeded_jobs(_seeded_tenant):
+    # Only "running" is ever a candidate -- a stale updated_at on any
+    # other status means nothing (e.g. a long-succeeded job that simply
+    # hasn't been touched since).
+    tenant_id = _seeded_tenant
+    fixed_now = datetime(2026, 1, 1, tzinfo=UTC)
+    stale_after_seconds = 1800
+    ancient = fixed_now - timedelta(seconds=stale_after_seconds * 10)
+
+    async with db_session() as session:
+        pending_id = await _make_job(session, tenant_id, status="pending", updated_at=ancient)
+        succeeded_id = await _make_job(
+            session, tenant_id, status="succeeded", updated_at=ancient
+        )
+        await session.commit()
+
+    async with db_session() as session:
+        reaped = await reap_stuck_jobs(
+            session, stale_after_seconds=stale_after_seconds, clock=lambda: fixed_now
+        )
+        await session.commit()
+
+    assert reaped == []
+    assert (await _fetch_job(pending_id)).status == "pending"
+    assert (await _fetch_job(succeeded_id)).status == "succeeded"
+
+
+async def test_reap_stuck_jobs_reuses_mark_job_failed_max_attempts_ceiling(_seeded_tenant):
+    # Live proof of real REUSE, not a second, parallel failure path: a
+    # stuck job already one attempt away from its own max_attempts is
+    # driven all the way to permanently "failed" by the reaper, via the
+    # exact same ceiling mark_job_failed() already enforces for any
+    # other failure.
+    tenant_id = _seeded_tenant
+    fixed_now = datetime(2026, 1, 1, tzinfo=UTC)
+    stale_after_seconds = 1800
+
+    async with db_session() as session:
+        stuck_id = await _make_job(
+            session,
+            tenant_id,
+            status="running",
+            updated_at=fixed_now - timedelta(seconds=stale_after_seconds + 1),
+        )
+        row = (await session.execute(sa.select(Job).where(Job.id == stuck_id))).scalar_one()
+        row.attempts = row.max_attempts - 1
+        await session.commit()
+
+    async with db_session() as session:
+        reaped = await reap_stuck_jobs(
+            session, stale_after_seconds=stale_after_seconds, clock=lambda: fixed_now
+        )
+        await session.commit()
+
+    assert reaped == [stuck_id]
+    row = await _fetch_job(stuck_id)
+    assert row.status == "failed"
+    assert row.attempts == row.max_attempts
 
 
 async def test_tenant_id_survives_the_claim_to_mark_failed_cycle_unchanged(_seeded_tenant):

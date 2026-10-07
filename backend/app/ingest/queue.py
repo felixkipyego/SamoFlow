@@ -143,3 +143,67 @@ async def mark_job_failed(
             job.next_run_at = now + timedelta(seconds=base_seconds * (2**job.attempts))
     job.updated_at = now
     await session.flush()
+
+
+# Task 2.6.f: the stuck-job reaper -- the last of the four 2.4-2.8-range
+# markers (recorded at 2.1.e, reassigned to Step 2.6 at 2.4.g's close-out).
+# A job stuck in "running" forever because its worker crashed hard
+# (SIGKILL/OOM -- no chance for graceful shutdown to apply, unlike 2.1.e's
+# own cooperative-SIGTERM path) must eventually become reclaimable again.
+#
+# No new column or migration needed, confirmed by reading the real schema
+# first, not assumed: `jobs.updated_at` (2.1.a) is already set to
+# func.now() by claim_next_job() itself at the moment of claim (status ->
+# "running") -- it already functions as this job's own "claimed_at" for
+# as long as it stays "running", genuinely reflecting the last time this
+# row was touched by a real worker. Reusing it is the smallest correct
+# mechanism (rule 11); inventing a parallel claimed_at column would be a
+# second, independently-maintained copy of information this column
+# already carries.
+#
+# Resolution choice: reclaim via mark_job_failed() (permanent=False), NOT
+# a bare reset straight back to "pending". A bare reset would make the
+# row immediately reclaimable with no backoff and no attempts increment
+# -- if the crash is caused by something about this specific job (a
+# pathological page, a corrupt upload), that would retry it in a tight,
+# immediate loop instead of the SAME backoff/max-attempts ceiling every
+# other failure already respects. Reusing mark_job_failed() means zero
+# new state-transition logic: attempts increments, the existing backoff
+# formula schedules the retry, and it only reaches "failed" once max_
+# attempts is exhausted -- identical treatment to any other failure,
+# not a second, parallel failure path.
+#
+# FOR UPDATE SKIP LOCKED on the candidate SELECT, matching claim_next_
+# job()'s own concurrency-safety precedent: this project's own real
+# deployment model can run multiple worker processes/containers, and
+# this lock (held until the caller's own commit) stops two of them from
+# both reaping the identical stuck row at once.
+async def reap_stuck_jobs(
+    session: AsyncSession,
+    *,
+    stale_after_seconds: float,
+    clock: DateTimeClock = lambda: datetime.now(UTC),
+) -> list[uuid.UUID]:
+    """Finds every job stuck in `"running"` whose `updated_at` is older
+    than `stale_after_seconds`, and reclaims each via mark_job_failed()
+    (permanent=False, the normal backoff/attempts treatment). Returns the
+    ids reclaimed, for logging/testing -- not itself a caller-visible
+    contract anything else depends on.
+    """
+    threshold = clock() - timedelta(seconds=stale_after_seconds)
+    stuck_ids = (
+        (
+            await session.execute(
+                select(Job.id)
+                .where(Job.status == "running", Job.updated_at < threshold)
+                .with_for_update(skip_locked=True)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    for job_id in stuck_ids:
+        await mark_job_failed(
+            session, job_id, "stuck: no progress since claim or last update", clock=clock
+        )
+    return list(stuck_ids)

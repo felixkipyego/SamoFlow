@@ -16,7 +16,7 @@ import os
 import signal
 import time
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import httpx2
 import pytest
@@ -79,6 +79,16 @@ async def test_run_logs_only_the_exception_type_never_the_message_on_unexpected_
     # issuing a query, so opening the session never attempts a real
     # connection (SQLAlchemy connects lazily, on first actual I/O).
     import app.worker as worker_module
+
+    # Task 2.6.f: reap_stuck_jobs() now runs every iteration too, BEFORE
+    # claim_next_job() -- stubbed to a real-DB-free no-op so this test
+    # keeps exercising claim_next_job()'s own raise specifically (its own
+    # stated intent), not reap_stuck_jobs()'s unrelated connection failure
+    # against this test's fake DATABASE_URL.
+    async def _reap_noop(*args, **kwargs):
+        return []
+
+    monkeypatch.setattr(worker_module, "_reap_stuck_jobs", _reap_noop)
 
     async def _raise_with_secret(session):
         raise ValueError("DISTINCTIVE-FAKE-SECRET-98765")
@@ -396,7 +406,21 @@ async def _run_one_idle_iteration(monkeypatch, heartbeat_path, iterations=1):
     async def _claim_nothing(session):
         return None
 
+    # Task 2.6.f: reap_stuck_jobs() now runs every iteration too, BEFORE
+    # claim_next_job() -- stubbed to a real-DB-free no-op for the exact
+    # same reason claim_next_job() is stubbed below (this helper's own
+    # fake DATABASE_URL must never be dialed for real). Found live, not
+    # assumed harmless: an earlier version without this stub passed
+    # standalone but failed inside the full suite with a real
+    # asyncio.TimeoutError -- a fake, unreachable "localhost:5432" can
+    # hang long enough to exceed this test's own 10s timeout rather than
+    # failing fast, unlike the mocked claim_next_job() raise the C1 test
+    # (above) relies on.
+    async def _reap_noop(*args, **kwargs):
+        return []
+
     monkeypatch.setattr(worker_module, "HEARTBEAT_PATH", heartbeat_path)
+    monkeypatch.setattr(worker_module, "_reap_stuck_jobs", _reap_noop)
     monkeypatch.setattr(worker_module, "claim_next_job", _claim_nothing)
     # 0.5s, not something tighter: check_heartbeat_fresh()'s own staleness
     # threshold is HEARTBEAT_STALE_MULTIPLIER * worker_poll_interval_seconds
@@ -469,3 +493,70 @@ def test_check_heartbeat_fresh_detects_a_stale_heartbeat(monkeypatch, tmp_path):
 
     missing_path = tmp_path / "does-not-exist"
     assert check_heartbeat_fresh(missing_path) is False
+
+
+# --- Task 2.6.f: the stuck-job reaper, run through the real loop -------------
+# test_queue.py's own test_reap_stuck_jobs_* prove reap_stuck_jobs() itself
+# directly; this proves it is genuinely WIRED into run()'s own loop, not
+# just a correct primitive nothing calls.
+
+
+async def test_run_reaps_a_stuck_job_during_its_own_loop(monkeypatch, _seeded_tenant):
+    tenant_id = _seeded_tenant
+    stale_after_seconds = 3600
+    async with db_session() as session:
+        job = Job(
+            tenant_id=tenant_id,
+            job_type="noop",
+            status="running",
+            payload={},
+            updated_at=datetime.now(UTC) - timedelta(seconds=stale_after_seconds + 1),
+        )
+        session.add(job)
+        await session.commit()
+        job_id = job.id
+
+    monkeypatch.setenv("JOB_STUCK_AFTER_SECONDS", str(stale_after_seconds))
+
+    await asyncio.wait_for(run(asyncio.Event(), max_iterations=1), timeout=10)
+
+    row = await _fetch_job(job_id)
+    # Reclaimed via the normal backoff path (mark_job_failed(), not a
+    # bare reset) -- same real consequence test_queue.py's own direct
+    # proof already establishes, now confirmed to actually fire from
+    # inside a real run() iteration.
+    assert row.status == "pending"
+    assert row.attempts == 1
+    assert "stuck" in row.error
+
+
+async def test_run_leaves_a_genuinely_running_job_alone_during_its_own_loop(
+    monkeypatch, _seeded_tenant
+):
+    tenant_id = _seeded_tenant
+    stale_after_seconds = 3600
+    async with db_session() as session:
+        job = Job(
+            tenant_id=tenant_id,
+            job_type="noop",
+            status="running",
+            payload={},
+            # Genuinely, comfortably fresh relative to the 3600s
+            # threshold -- NOT "threshold - 1 second", which real test/
+            # asyncio overhead between this insert and the reap sweep
+            # actually running (confirmed live: enough to exceed a
+            # 1-second margin) made flake on the exact boundary.
+            updated_at=datetime.now(UTC) - timedelta(seconds=10),
+        )
+        session.add(job)
+        await session.commit()
+        job_id = job.id
+
+    monkeypatch.setenv("JOB_STUCK_AFTER_SECONDS", str(stale_after_seconds))
+
+    await asyncio.wait_for(run(asyncio.Event(), max_iterations=1), timeout=10)
+
+    row = await _fetch_job(job_id)
+    assert row.status == "running"
+    assert row.attempts == 0
+    assert row.error is None

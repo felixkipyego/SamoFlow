@@ -104,6 +104,19 @@ class Settings(BaseSettings):
     # explicitly.
     job_retry_base_seconds: float = Field(default=60, gt=0)
     job_max_attempts: int = Field(default=5, gt=0)
+    # Task 2.6.f: the stuck-job reaper's own staleness threshold (the
+    # Step-2.1.e-owned marker, reassigned to Step 2.6 at 2.4.g's close-out)
+    # -- how long a job may sit in "running" with no `updated_at` progress
+    # before it's reclaimed. Same treatment as the two fields above (plain
+    # configurable number, gt=0). 1800s (30 minutes): generous enough to
+    # never false-positive on a genuinely long-running crawl at this
+    # project's own current scale (the 500-page default `crawl_page_cap`,
+    # 2.6.e, throttled at ~0.25s/request plus a real embedding call per
+    # page realistically totals single-digit minutes, not 30), while still
+    # bounding a genuinely crashed worker's own stuck row to "reclaimed
+    # within half an hour" rather than forever -- retuned later with real
+    # numbers, like every other estimate in this project.
+    job_stuck_after_seconds: float = Field(default=1800, gt=0)
     # Task 2.2.f: the temporary admin-key mechanism (docs/SPEC.md §12:
     # "during Phases 2 to 5 the admin endpoints... are protected by a
     # single secret from the environment"). Required, same discipline as
