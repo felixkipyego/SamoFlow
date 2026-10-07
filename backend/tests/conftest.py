@@ -664,6 +664,36 @@ def local_http_server(handler_cls: type[http.server.BaseHTTPRequestHandler]) -> 
         thread.join()
 
 
+class _IPv6HTTPServer(http.server.HTTPServer):
+    address_family = socket.AF_INET6
+
+
+@contextmanager
+def local_ipv6_http_server(
+    handler_cls: type[http.server.BaseHTTPRequestHandler],
+) -> Iterator[int]:
+    # Duplication check after 2.6.d/2.6.e/2.6.f: this exact IPv6-bound
+    # variant of local_http_server() above existed as two separate,
+    # byte-identical local copies -- test_web_adapter.py (2.6.d's own
+    # C1 redirect-to-unverified-domain fix, the original) and
+    # test_job_handlers.py (2.6.e, a confirmed second occurrence) --
+    # extracted here ahead of a plausible third call site in Step 2.7,
+    # rather than waiting for one. "::1" is a real, independently
+    # bindable IPv6 loopback address on both Linux and macOS with zero
+    # special setup, confirmed live at 2.6.d: a second IPv4 loopback
+    # alias fails there with "Can't assign requested address" -- this is
+    # the only portable way to stand up a second, genuinely different
+    # "host" for a test.
+    server = _IPv6HTTPServer(("::1", 0), handler_cls)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield server.server_address[1]
+    finally:
+        server.shutdown()
+        thread.join()
+
+
 def fake_is_unsafe_except_loopback(
     ip: ipaddress.IPv4Address | ipaddress.IPv6Address,
 ) -> bool:

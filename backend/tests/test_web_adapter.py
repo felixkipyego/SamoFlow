@@ -31,9 +31,7 @@
 # oversight.
 import http.server
 import socket
-import threading
 import uuid
-from contextlib import contextmanager
 
 import sqlalchemy as sa
 
@@ -50,6 +48,7 @@ from tests.conftest import (
     db_session,
     fake_is_unsafe_except_loopback,
     local_http_server,
+    local_ipv6_http_server,
     patch_embed_dense,
     scripted_handler,
 )
@@ -109,26 +108,6 @@ def _redirect_handler(location: str):
             pass
 
     return _Handler
-
-
-class _IPv6HTTPServer(http.server.HTTPServer):
-    address_family = socket.AF_INET6
-
-
-@contextmanager
-def _local_ipv6_http_server(handler_cls: type[http.server.BaseHTTPRequestHandler]):
-    # C1 [SECURITY] fix: a local variant of local_http_server()
-    # (tests/conftest.py) for the one test in this project that needs an
-    # IPv6-bound server -- kept local rather than widening that shared
-    # helper's own signature for a single caller's need (rule 11).
-    server = _IPv6HTTPServer((_IPV6_LOOPBACK_HOST, 0), handler_cls)
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    try:
-        yield server.server_address[1]
-    finally:
-        server.shutdown()
-        thread.join()
 
 
 def _unused_loopback_port() -> int:
@@ -398,7 +377,7 @@ async def test_redirect_to_an_unverified_host_is_rejected_with_nothing_persisted
     await qdrant.ensure_collection(client, collection_name)
     ids = await _seed_tenant_source_and_verified_domain(domain=_LOOPBACK_HOST)
 
-    with _local_ipv6_http_server(
+    with local_ipv6_http_server(
         scripted_handler({"/": (200, b"unverified host content")})
     ) as second_port:
         with local_http_server(

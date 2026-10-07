@@ -357,6 +357,65 @@ async def test_reap_stuck_jobs_reuses_mark_job_failed_max_attempts_ceiling(_seed
     assert row.attempts == row.max_attempts
 
 
+async def test_reap_stuck_jobs_concurrency_proof(_seeded_tenant):
+    # Duplication check after 2.6.d/2.6.e/2.6.f, item C2: reap_stuck_jobs()
+    # had no proof of its own concurrent-call safety, unlike claim_next_
+    # job()'s own test_claim_next_job_concurrency_proof above -- real
+    # overlapping asyncio.gather() calls, not a sequential simulation.
+    # reap_stuck_jobs() uses a structurally different pattern from claim_
+    # next_job() (a SELECT ... FOR UPDATE SKIP LOCKED followed by a loop of
+    # mark_job_failed() calls, rather than one atomic UPDATE ... WHERE),
+    # so this is a genuinely separate thing to prove, not a copy of the
+    # existing claim proof. Every stuck job must be reaped by exactly one
+    # caller -- no job double-processed (mark_job_failed() applied twice),
+    # no job silently skipped by every caller.
+    tenant_id = _seeded_tenant
+    fixed_now = datetime(2026, 1, 1, tzinfo=UTC)
+    stale_after_seconds = 1800
+    job_count = 10
+    caller_count = 5
+
+    async with db_session() as session:
+        stuck_ids = {
+            await _make_job(
+                session,
+                tenant_id,
+                status="running",
+                updated_at=fixed_now - timedelta(seconds=stale_after_seconds + 1),
+            )
+            for _ in range(job_count)
+        }
+        await session.commit()
+
+    async def _reap_and_commit():
+        async with db_session() as session:
+            reaped = await reap_stuck_jobs(
+                session, stale_after_seconds=stale_after_seconds, clock=lambda: fixed_now
+            )
+            await session.commit()
+            return reaped
+
+    results = await asyncio.gather(*(_reap_and_commit() for _ in range(caller_count)))
+
+    reaped_ids = [job_id for result in results for job_id in result]
+
+    assert len(reaped_ids) == job_count, "every stuck job should have been reaped by someone"
+    assert len(set(reaped_ids)) == job_count, "no job should have been reaped twice"
+    assert set(reaped_ids) == stuck_ids, "no job should have been silently skipped"
+
+    async with db_session() as session:
+        rows = (
+            (await session.execute(sa.select(Job).where(Job.tenant_id == tenant_id)))
+            .scalars()
+            .all()
+        )
+    assert {row.status for row in rows} == {"pending"}
+    # attempts == 1 on every row, not 2+ -- proves mark_job_failed()'s own
+    # backoff logic was applied exactly once per job, never double-applied
+    # by two callers racing on the same row.
+    assert {row.attempts for row in rows} == {1}
+
+
 async def test_tenant_id_survives_the_claim_to_mark_failed_cycle_unchanged(_seeded_tenant):
     tenant_id = _seeded_tenant
     async with db_session() as session:

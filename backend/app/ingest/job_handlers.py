@@ -107,10 +107,21 @@
 # import worker.py itself -- worker.py imports this module, which imports
 # crawl.py; crawl.py importing worker.py back would be circular) --
 # exactly why run_crawl() takes a plain injected callback instead.
+#
+# Duplication check after 2.6.d/2.6.e/2.6.f: handle_ingest_url() and
+# handle_ingest_crawl() shared a byte-identical setup preamble -- the
+# source_id guard, Qdrant client acquisition, session open, and Source
+# fetch -- not just a similarly-shaped one. Extracted into
+# _open_source_session() below; each handler's own per-item loop (a plain
+# URL list vs. run_crawl()'s own orchestration), which is genuinely
+# different, stays where it was, unchanged.
 import logging
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 
 from qdrant_client import AsyncQdrantClient
 from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app import qdrant
 from app.config import get_settings
@@ -122,24 +133,28 @@ from app.ingest.web_adapter import ingest_url
 logger = logging.getLogger(__name__)
 
 
-async def handle_ingest_url(job: Job) -> None:
-    """The `urls` adapter's own `JOB_HANDLERS["ingest_url"]` entry.
+@asynccontextmanager
+async def _open_source_session(
+    job: Job, job_type: str
+) -> AsyncIterator[tuple[AsyncQdrantClient, AsyncSession, Source]]:
+    """Shared handler setup: guard, Qdrant client, session, Source fetch.
 
-    Reads `sources.config["urls"]` for `job.source_id`, then calls
-    ingest_url() (2.6.c) once per URL, independently -- see this module's
-    own header comment for the full partial-failure/job-success reasoning
-    and the heartbeat decision.
+    Extracted from handle_ingest_url() and handle_ingest_crawl() (the
+    duplication check after 2.6.d/2.6.e/2.6.f) -- both handlers need
+    exactly this before diverging into their own, genuinely different,
+    per-item loop. `job_type` is only used to name the job_type in the
+    defensive-guard error message below.
     """
     if job.source_id is None:
         # Structurally impossible through the real enqueue() path for this
-        # job_type (a `urls` source always has a real source_id), but
+        # job_type (every source always has a real source_id), but
         # defensive rather than silently assuming a caller never passes a
         # malformed row -- a plain exception here takes the ordinary
         # non-permanent handler-raised path (worker.py's own
         # _claim_and_process_one_job()), not a bespoke permanent-failure
         # classification this one edge case does not warrant building
         # (rule 11).
-        raise ValueError(f"job {job.id} has job_type='ingest_url' but no source_id")
+        raise ValueError(f"job {job.id} has job_type={job_type!r} but no source_id")
 
     client: AsyncQdrantClient = qdrant.get_qdrant_client()
     async with _session_factory()() as session:
@@ -150,6 +165,18 @@ async def handle_ingest_url(job: Job) -> None:
                 )
             )
         ).scalar_one()
+        yield client, session, source
+
+
+async def handle_ingest_url(job: Job) -> None:
+    """The `urls` adapter's own `JOB_HANDLERS["ingest_url"]` entry.
+
+    Reads `sources.config["urls"]` for `job.source_id`, then calls
+    ingest_url() (2.6.c) once per URL, independently -- see this module's
+    own header comment for the full partial-failure/job-success reasoning
+    and the heartbeat decision.
+    """
+    async with _open_source_session(job, "ingest_url") as (client, session, source):
         urls = source.config.get("urls", [])
         for url in urls:
             result = await ingest_url(
@@ -202,23 +229,8 @@ async def handle_ingest_crawl(job: Job) -> None:
     # object is fully initialized).
     from app.worker import HEARTBEAT_PATH, write_heartbeat
 
-    if job.source_id is None:
-        # Same defensive guard as handle_ingest_url()'s own, same
-        # reasoning -- structurally impossible through the real
-        # enqueue() path for this job_type, not a bespoke permanent-
-        # failure classification this edge case does not warrant.
-        raise ValueError(f"job {job.id} has job_type='ingest_crawl' but no source_id")
-
     settings = get_settings()
-    client: AsyncQdrantClient = qdrant.get_qdrant_client()
-    async with _session_factory()() as session:
-        source = (
-            await session.execute(
-                select(Source).where(
-                    Source.id == job.source_id, Source.tenant_id == job.tenant_id
-                )
-            )
-        ).scalar_one()
+    async with _open_source_session(job, "ingest_crawl") as (client, session, source):
         seed_url = source.config["seed_url"]
         await run_crawl(
             session,

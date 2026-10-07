@@ -28,11 +28,8 @@
 # than using live_test_services()'s own random per-test collection name.
 import asyncio
 import http.server
-import socket
-import threading
 import time
 import uuid
-from contextlib import contextmanager
 
 import sqlalchemy as sa
 
@@ -49,6 +46,7 @@ from tests.conftest import (
     db_session,
     fake_is_unsafe_except_loopback,
     local_http_server,
+    local_ipv6_http_server,
     patch_embed_dense,
     require_test_qdrant,
     scripted_handler,
@@ -242,17 +240,20 @@ def _rich_page(title: str, word_prefix: str, extra_html: str = "") -> str:
     )
 
 
-def _tracking_handler(routes: dict, hits: list):
+def _tracking_handler(routes: dict, hits: list, delay_seconds: float = 0):
     # A local variant of scripted_handler() (tests/conftest.py) that also
     # records every requested path -- needed by tests (c)/(e) below to
     # prove a specific path was NEVER requested, not merely absent from
-    # the final result. A second near-duplicate of this handler shape
-    # (scripted_handler's own (status, body) routing); kept local rather
-    # than extracted, matching this project's own "flag, don't fix
-    # mid-task" discipline -- a candidate for the next duplication check.
+    # the final result. `delay_seconds` (duplication check after
+    # 2.6.d/2.6.e/2.6.f: collapsed from a separate _slow_tracking_handler(),
+    # which was this function plus one time.sleep() call) gives test (f)'s
+    # own multi-page crawl real, non-trivial elapsed time to prove the
+    # heartbeat is written WHILE busy, not just once at job start/end.
     class _Handler(http.server.BaseHTTPRequestHandler):
         def do_GET(self):
             hits.append(self.path)
+            if delay_seconds:
+                time.sleep(delay_seconds)
             status, body = routes.get(self.path, (404, b"not found"))
             self.send_response(status)
             self.end_headers()
@@ -262,51 +263,6 @@ def _tracking_handler(routes: dict, hits: list):
             pass
 
     return _Handler
-
-
-def _slow_tracking_handler(routes: dict, hits: list, delay_seconds: float):
-    # Task 2.6.e part 2, test (f): identical to _tracking_handler() but
-    # sleeps before responding -- gives a multi-page crawl real,
-    # non-trivial elapsed time to prove the heartbeat is written WHILE
-    # busy, not just once at job start/end.
-    class _Handler(http.server.BaseHTTPRequestHandler):
-        def do_GET(self):
-            hits.append(self.path)
-            time.sleep(delay_seconds)
-            status, body = routes.get(self.path, (404, b"not found"))
-            self.send_response(status)
-            self.end_headers()
-            self.wfile.write(body)
-
-        def log_message(self, *args):
-            pass
-
-    return _Handler
-
-
-class _IPv6HTTPServer(http.server.HTTPServer):
-    address_family = socket.AF_INET6
-
-
-@contextmanager
-def _local_ipv6_http_server(handler_cls: type[http.server.BaseHTTPRequestHandler]):
-    # A second occurrence of test_web_adapter.py's own identical shape
-    # (that file's own C1-fix test, 2.6.d's duplication check) -- the
-    # only portable way to stand up a second, genuinely different "host"
-    # without OS-level network configuration (confirmed live there: a
-    # second IPv4 loopback alias fails with "Can't assign requested
-    # address" on this machine; ::1 is a real, independently bindable
-    # loopback address on both Linux and macOS with zero special setup).
-    # Kept local rather than extracted, matching the identical "flag,
-    # don't fix mid-task" discipline as _tracking_handler() above.
-    server = _IPv6HTTPServer(("::1", 0), handler_cls)
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    try:
-        yield server.server_address[1]
-    finally:
-        server.shutdown()
-        thread.join()
 
 
 async def _seed_tenant_crawl_source_and_verified_domain(seed_url: str) -> dict:
@@ -533,7 +489,7 @@ async def test_an_out_of_scope_domain_link_is_never_fetched_mid_crawl(
     # merely the link's absence from the final result.
     client = await _prepare_env(monkeypatch, live_test_services)
     evil_hits: list[str] = []
-    with _local_ipv6_http_server(
+    with local_ipv6_http_server(
         _tracking_handler({"/evil": (200, b"should never be served")}, evil_hits)
     ) as evil_port:
         routes: dict = {}
@@ -598,7 +554,7 @@ async def test_heartbeat_is_written_mid_crawl_not_only_at_job_boundaries(
 
     routes: dict = {}
     page_delay_seconds = 0.08
-    with local_http_server(_slow_tracking_handler(routes, [], page_delay_seconds)) as port:
+    with local_http_server(_tracking_handler(routes, [], page_delay_seconds)) as port:
         seed = f"http://{_LOOPBACK_HOST}:{port}"
         links_html = "".join(f'<a href="/p{i}">p{i}</a>' for i in range(4))
         routes["/"] = (200, _rich_page("Home", "home", links_html).encode())
