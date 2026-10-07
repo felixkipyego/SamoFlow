@@ -7,6 +7,12 @@
 # crawl/upload/database-sync logic is 2.4-2.8's job (matching
 # ensure_collection()'s own precedent: a real, fully-tested function built
 # ahead of its eventual real callers).
+#
+# Task 2.6.d: `JOB_HANDLERS` registers its first REAL handler
+# (`handle_ingest_url`, app/ingest/job_handlers.py) -- see that module's
+# own header comment for the full design (the JOB_HANDLERS signature
+# widening this required, the partial-failure/job-success policy, the
+# heartbeat decision).
 import asyncio
 import logging
 import signal
@@ -18,6 +24,7 @@ from pathlib import Path
 from app import all_models  # noqa: F401
 from app.config import SettingsError, get_settings
 from app.db import _session_factory
+from app.ingest.job_handlers import handle_ingest_url
 from app.ingest.models import Job
 from app.ingest.queue import claim_next_job, mark_job_failed, mark_job_succeeded
 
@@ -90,31 +97,43 @@ def check_heartbeat_fresh(path: Path = HEARTBEAT_PATH) -> bool:
     return (time.time() - written_at) < threshold
 
 
-async def _noop_handler(payload: dict) -> None:
+async def _noop_handler(job: Job) -> None:
     # The one handler this task registers -- succeeds immediately, does
     # nothing. Proves the loop's own claim -> dispatch -> mark_succeeded
     # path end to end without any real adapter logic (2.4-2.8's job).
-    del payload
+    del job
 
 
-async def _sleep_handler(payload: dict) -> None:
+async def _sleep_handler(job: Job) -> None:
     # Task 2.1.e: exists solely so a test can reliably send a real SIGTERM
     # while a handler is actively running -- no other registered handler
     # (noop returns instantly) gives graceful-shutdown's own "finish the
     # in-flight job, don't claim a new one" behavior a window to prove
     # itself against. payload["seconds"] (default 0) keeps this inert by
     # default, same spirit as noop, just controllably slow when asked.
-    await asyncio.sleep(payload.get("seconds", 0))
+    await asyncio.sleep(job.payload.get("seconds", 0))
 
 
-# A plain dict, not a decorator-based registry: this is the smallest,
-# most standard shape for "one string maps to one function" (rule 11) --
-# a decorator-based registration mechanism would be real abstraction for
-# a registry that, as of this task, holds exactly one entry. Revisit if a
-# later step (2.4+) needs registration split across multiple files.
-JOB_HANDLERS: dict[str, Callable[[dict], Awaitable[None]]] = {
+# Task 2.6.d: widened from Callable[[dict], Awaitable[None]] to
+# Callable[[Job], Awaitable[None]] -- a real, necessary signature change
+# found before building, not assumed away. `noop`/`sleep` only ever
+# needed their own `payload`, matching the old shape exactly, but the
+# first REAL handler (handle_ingest_url(), app/ingest/job_handlers.py)
+# needs `job.tenant_id`/`job.source_id` too -- first-class Job columns,
+# not payload fields; duplicating them into every job_type's own payload
+# shape just to keep the old signature would be worse, not simpler (rule
+# 11). `noop`/`sleep` updated mechanically above (`payload` -> `job`,
+# `job.payload` where the body actually used it) -- no behavior change,
+# confirmed by the full existing test_worker.py suite passing unmodified.
+#
+# Still a plain dict, not a decorator-based registry: the smallest, most
+# standard shape for "one string maps to one function" (rule 11) --
+# still true now that it holds 3 entries, not a signal to add a registry
+# mechanism nothing here actually needs yet.
+JOB_HANDLERS: dict[str, Callable[[Job], Awaitable[None]]] = {
     "noop": _noop_handler,
     "sleep": _sleep_handler,
+    "ingest_url": handle_ingest_url,
 }
 
 
@@ -164,7 +183,7 @@ async def _claim_and_process_one_job() -> bool:
         return True
 
     try:
-        await handler(job.payload)
+        await handler(job)
     except Exception as exc:  # noqa: BLE001 -- any handler failure must not crash the loop
         # permanent=False (the default): a raising handler could be a
         # transient failure, unlike an unknown job_type above, so this

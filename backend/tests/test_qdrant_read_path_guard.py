@@ -75,6 +75,14 @@ APP_DIR = BACKEND_DIR / "app"
 # method on the client itself (it only ever forwards it), so it is NOT
 # added to READ_ALLOWLIST below, matching qdrant_writer.py's own identical
 # shape.
+# Task 2.6.d: app/ingest/job_handlers.py added -- the identical "pass-
+# through parameter typed as the real AsyncQdrantClient" shape as web_
+# adapter.py (confirmed live, by running this guard before deciding, that
+# it trips rule (a) the same way). Calls app.qdrant.get_qdrant_client()
+# (a plain factory function, not a classified read/write method on a
+# client instance) to acquire the client it then forwards unmodified to
+# ingest_url() -- not added to READ_ALLOWLIST, matching web_adapter.py's
+# own identical reasoning exactly.
 CLIENT_ACCESS_ALLOWLIST: frozenset[str] = frozenset(
     {
         "app/qdrant.py",
@@ -82,6 +90,7 @@ CLIENT_ACCESS_ALLOWLIST: frozenset[str] = frozenset(
         "app/main.py",
         "app/ingest/qdrant_writer.py",
         "app/ingest/web_adapter.py",
+        "app/ingest/job_handlers.py",
     }
 )
 
