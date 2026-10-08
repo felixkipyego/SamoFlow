@@ -1,6 +1,6 @@
 # backend/app/ingest/extract_docx.py
 # Task 2.4.e: DOCX extraction primitive -- shared logic (Step 2.4 decision
-# (b)'s own precedent), called by Step 2.6's upload adapter, not
+# (b)'s own precedent), called by Step 2.7's upload adapter, not
 # duplicated or rebuilt there. Reuses 2.4.b's own ExtractedContent/
 # ContentBlock shape unchanged -- confirmed this is the right shape here:
 # unlike PDF's plain text, a DOCX genuinely has semantic heading

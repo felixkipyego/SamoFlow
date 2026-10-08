@@ -87,6 +87,13 @@ APP_DIR = BACKEND_DIR / "app"
 # again (run_crawl() takes `client` as a bare pass-through parameter,
 # typed as the real AsyncQdrantClient, forwarded unmodified to
 # ingest_url()). Not added to READ_ALLOWLIST, same reasoning.
+# Task 2.7.c: app/ingest/upload_adapter.py added -- the identical shape
+# again (ingest_upload() takes `client` as a bare pass-through
+# parameter, typed as the real AsyncQdrantClient, forwarded unmodified
+# to embed_and_upsert()). Confirmed live, by running this guard before
+# deciding, that it trips rule (a) the same way web_adapter.py/job_
+# handlers.py/crawl.py already do. Calls NO method on the client itself,
+# so NOT added to READ_ALLOWLIST, same reasoning.
 CLIENT_ACCESS_ALLOWLIST: frozenset[str] = frozenset(
     {
         "app/qdrant.py",
@@ -96,6 +103,7 @@ CLIENT_ACCESS_ALLOWLIST: frozenset[str] = frozenset(
         "app/ingest/web_adapter.py",
         "app/ingest/job_handlers.py",
         "app/ingest/crawl.py",
+        "app/ingest/upload_adapter.py",
     }
 )
 

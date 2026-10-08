@@ -1,6 +1,6 @@
 # backend/app/ingest/extract_pdf.py
 # Task 2.4.d: PDF extraction primitive -- shared logic (Step 2.4 decision
-# (b)'s own precedent for extract_html.py), called by Step 2.6's upload
+# (b)'s own precedent for extract_html.py), called by Step 2.7's upload
 # adapter, not duplicated or rebuilt there. Reuses 2.4.b's own
 # ExtractedContent/ContentBlock shape unchanged, so chunk_text() (2.4.c)
 # and any future caller never need format-specific branching -- a PDF's
