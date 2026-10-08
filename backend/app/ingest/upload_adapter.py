@@ -2,27 +2,25 @@
 # Task 2.7.c [SECURITY]: the per-upload ingest primitive -- ties together
 # upload_storage.read() (2.7.a), sniff_file_type() (2.7.a/2.7.b), the four
 # format extractors (extract_pdf/extract_docx/extract_text/extract_markdown,
-# 2.4.d/e/f) and embed_and_upsert() (2.5.e). Mirrors ingest_url()'s own
-# shape exactly (web_adapter.py, 2.6.c): a plain function taking
+# 2.4.d/e/f) and qdrant_writer.py's own finish_ingest() (which itself
+# wraps embed_and_upsert(), 2.5.e -- shared with ingest_url() since the
+# duplication check after 2.7.a/b/c). Mirrors ingest_url()'s own
 # `session`/`client`/`tenant_id`/`source_id` as parameters, not an
 # IngestRepository method, for the identical reason ingest_url() gives --
 # IngestRepository has no Document methods, and this primitive's own real
 # caller (2.7.d's job handler) doesn't naturally hold a tenant-scoped
 # repository instance either.
 #
-# Design-wording correction, matching ingest_url()'s own already-made one:
-# the Step 2.7 design named "chunk_text() -> embed_and_upsert()" as two
-# steps. embed_and_upsert() already calls chunk_text() AND compute_
-# content_hash() internally (2.5.e) -- calling chunk_text() again here
-# would discard real chunking work and would not even match embed_and_
-# upsert()'s own signature (it takes `content: ExtractedContent`, not
-# `list[Chunk]`). compute_content_hash() IS called directly here too,
-# deliberately duplicating embed_and_upsert()'s own internal call, for the
-# identical reason ingest_url() does: a second call to a pure, cheap,
-# deterministic function over the same in-memory ExtractedContent is not
-# real duplicated work, and this function needs the hash for the
-# content_hash COMPARISON against the stored row, which embed_and_upsert()
-# has no reason to know about.
+# Everything from the content-hash comparison onward (the unchanged-
+# shortcut, embed_and_upsert()'s own atomicity, document_id reuse, the
+# `documents` row write) is qdrant_writer.py's own finish_ingest() --
+# shared with ingest_url() (web_adapter.py, 2.6.c) since the duplication
+# check after 2.7.a/b/c, once that structurally identical tail was
+# confirmed across both real callers. See that function's own docstring
+# for the full reasoning (including the IS NULL-producing `== None`
+# unification for the url/file_name lookup). This function does ONLY its
+# own genuinely distinct half: read, sniff, dispatch to the matching
+# extractor, then delegate.
 #
 # `source_type` is hardcoded "upload" here, NOT a parameter -- unlike
 # ingest_url(), which is shared by two job types (`urls`/`crawl`) and so
@@ -95,8 +93,9 @@
 # confirmed against 2.4.a's own schema: `ix_documents_source_id_file_
 # name_unique` is a partial unique index on (source_id, file_name) WHERE
 # file_name IS NOT NULL, the exact mirror of `ix_documents_source_id_url_
-# unique`'s own shape for `url` -- a single-row lookup on this pair is
-# exactly as safe as ingest_url()'s own (source_id, url) lookup.
+# unique`'s own shape for `url`. finish_ingest()'s own single-shape
+# lookup (`url=None, file_name=original_filename`) relies on exactly
+# this guarantee.
 #
 # A real gap found while building this, flagged rather than silently
 # left implicit: the mapping from a `documents` row to "which storage_id
@@ -125,18 +124,15 @@ from docx.opc.exceptions import PackageNotFoundError
 from lxml.etree import XMLSyntaxError
 from pypdf.errors import PyPdfError
 from qdrant_client import AsyncQdrantClient
-from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import DateTimeClock
 from app.ingest import upload_storage
-from app.ingest.chunking import compute_content_hash
 from app.ingest.extract_docx import extract_docx
 from app.ingest.extract_html import ExtractedContent
 from app.ingest.extract_pdf import extract_pdf
 from app.ingest.extract_text import extract_markdown, extract_text
-from app.ingest.models import Document
-from app.ingest.qdrant_writer import embed_and_upsert
+from app.ingest.qdrant_writer import finish_ingest
 from app.ingest.upload_sniff import UploadKind, sniff_file_type
 from app.ingest.web_adapter import EMBEDDING_VERSION
 
@@ -222,55 +218,17 @@ async def ingest_upload(
     except expected_exceptions as exc:
         return UploadIngestResult(status="failed", reason=f"{type(exc).__name__}: {exc}")
 
-    content_hash = compute_content_hash(content)
-
-    existing = (
-        await session.execute(
-            select(Document).where(
-                Document.source_id == source_id, Document.file_name == original_filename
-            )
-        )
-    ).scalar_one_or_none()
-
-    if existing is not None and existing.content_hash == content_hash:
-        existing.last_seen_at = clock()
-        await session.flush()
-        return UploadIngestResult(status="unchanged", document_id=existing.id)
-
-    document_id = existing.id if existing is not None else uuid.uuid4()
-
-    await embed_and_upsert(
+    status, document_id = await finish_ingest(
+        session,
+        client,
+        collection_name,
         content,
-        client=client,
-        collection_name=collection_name,
         tenant_id=tenant_id,
         source_id=source_id,
         source_type=_SOURCE_TYPE,
-        document_id=document_id,
-        source_url=None,
+        url=None,
         file_name=original_filename,
         embedding_version=EMBEDDING_VERSION,
+        clock=clock,
     )
-
-    if existing is None:
-        document = Document(
-            id=document_id,
-            tenant_id=tenant_id,
-            source_id=source_id,
-            url=None,
-            file_name=original_filename,
-            title=content.title,
-            content_hash=content_hash,
-            status="extracted",
-            is_nearly_empty=content.is_nearly_empty,
-            last_seen_at=clock(),
-        )
-        session.add(document)
-    else:
-        existing.title = content.title
-        existing.content_hash = content_hash
-        existing.status = "extracted"
-        existing.is_nearly_empty = content.is_nearly_empty
-        existing.last_seen_at = clock()
-    await session.flush()
-    return UploadIngestResult(status="ingested", document_id=document_id)
+    return UploadIngestResult(status=status, document_id=document_id)

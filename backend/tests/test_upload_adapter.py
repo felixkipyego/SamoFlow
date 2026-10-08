@@ -14,6 +14,7 @@ import pytest
 import sqlalchemy as sa
 
 from app import qdrant
+from app.ingest import qdrant_writer as qdrant_writer_module
 from app.ingest import upload_adapter as upload_adapter_module
 from app.ingest import upload_storage
 from app.ingest.models import Document, Source
@@ -27,6 +28,13 @@ from tests.conftest import (
     read_pdf_fixture,
     read_text_fixture,
 )
+
+# Duplication check after 2.7.a/b/c: reuses test_upload_sniff.py's own
+# zip-bomb-shaped-docx helper instead of duplicating its construction
+# inline -- matching this project's own established cross-test-file-
+# import precedent (test_env_consistency.py importing from test_env_
+# example.py; test_qdrant.py from test_qdrant_collection.py).
+from tests.test_upload_sniff import _docx_shaped_zip
 
 # Settings.docx_max_part_size_bytes's own default (2.7.b) -- a plain test
 # constant, not a Settings read, matching ingest_upload()'s own "plain
@@ -162,6 +170,12 @@ async def test_each_real_format_ingests_successfully(
 async def test_rerun_with_identical_content_skips_rechunk_and_reembed(
     monkeypatch, live_test_services, tmp_path
 ):
+    # Patched on qdrant_writer_module, not upload_adapter's own
+    # namespace: since the duplication check after 2.7.a/b/c,
+    # ingest_upload() no longer imports embed_and_upsert() directly -- it
+    # calls qdrant_writer.py's own finish_ingest(), which calls embed_
+    # and_upsert() from WITHIN that module's own namespace, so that is
+    # the real call site to intercept.
     client, collection_name, ids = await _setup(monkeypatch, live_test_services)
     data = read_pdf_fixture("multi_page.pdf")
     upload_id = upload_storage.save(data, storage_dir=tmp_path, max_size_bytes=_MAX_UPLOAD_SIZE)
@@ -179,13 +193,13 @@ async def test_rerun_with_identical_content_skips_rechunk_and_reembed(
     count_after_first = await client.count(collection_name=collection_name)
 
     calls = []
-    original = upload_adapter_module.embed_and_upsert
+    original = qdrant_writer_module.embed_and_upsert
 
     async def _counting(*args, **kwargs):
         calls.append(1)
         return await original(*args, **kwargs)
 
-    monkeypatch.setattr(upload_adapter_module, "embed_and_upsert", _counting)
+    monkeypatch.setattr(qdrant_writer_module, "embed_and_upsert", _counting)
 
     # Re-run against the SAME stored bytes (same upload_id) -- the
     # realistic shape of "nothing changed since the last run."
@@ -432,11 +446,8 @@ async def test_zip_bomb_shaped_docx_is_rejected_through_the_real_end_to_end_path
 
     monkeypatch.setattr(upload_adapter_module, "extract_docx", _must_not_be_called)
 
-    buffer = io.BytesIO()
     bomb = b"\x00" * (200 * 1024 * 1024)
-    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED, compresslevel=9) as archive:
-        archive.writestr("word/document.xml", bomb)
-    data = buffer.getvalue()
+    data = _docx_shaped_zip(bomb)
     assert len(data) < 1024 * 1024  # really is bomb-shaped: tiny on disk, huge if decompressed
 
     upload_id = upload_storage.save(data, storage_dir=tmp_path, max_size_bytes=_MAX_UPLOAD_SIZE)

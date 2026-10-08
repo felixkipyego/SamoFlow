@@ -29,13 +29,18 @@
 # because it is the first and only file under app/ that needs to import
 # qdrant_client at all before 2.5.d exists.
 import uuid
+from datetime import UTC, datetime
 
 from qdrant_client import AsyncQdrantClient
 from qdrant_client.http.models import PointStruct, SparseVector
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.db import DateTimeClock
 from app.ingest.chunking import chunk_text, compute_content_hash
 from app.ingest.embedding import EMBEDDING_MODEL, SparseVectorData, embed_dense, embed_sparse
 from app.ingest.extract_html import ExtractedContent
+from app.ingest.models import Document
 from app.qdrant import DENSE_VECTOR_NAME, SPARSE_VECTOR_NAME
 
 # Task 2.5.c: a project-specific constant, generated ONCE (uuid.uuid4(),
@@ -263,3 +268,106 @@ async def embed_and_upsert(
         for i, chunk in enumerate(chunks)
     ]
     await upsert_points(client, collection_name, points)
+
+
+async def finish_ingest(
+    session: AsyncSession,
+    client: AsyncQdrantClient,
+    collection_name: str,
+    content: ExtractedContent,
+    *,
+    tenant_id: uuid.UUID,
+    source_id: uuid.UUID,
+    source_type: str,
+    url: str | None,
+    file_name: str | None,
+    embedding_version: str,
+    clock: DateTimeClock = lambda: datetime.now(UTC),
+) -> tuple[str, uuid.UUID]:
+    """Duplication check after 2.7.a/b/c: the structurally identical TAIL
+    shared by ingest_url() (web_adapter.py, 2.6.c) and ingest_upload()
+    (upload_adapter.py, 2.7.c) -- everything from the content-hash
+    comparison onward, extracted here once both callers existed and the
+    overlap was confirmed, not built speculatively ahead of a second real
+    caller. Each caller's own earlier step (fetch-and-verify vs read-and-
+    sniff-and-extract) stays separate, genuinely different in shape, and
+    is NOT part of this function.
+
+    `url`/`file_name`: exactly one is a real string, the other `None`,
+    matching Document's own mutual-exclusivity convention (2.4.a) -- the
+    caller decides which. The existing-row lookup below queries BOTH
+    columns in one shape (`Document.url == url, Document.file_name ==
+    file_name`) rather than branching on which one is set: SQLAlchemy's
+    own `== None` overload produces `IS NULL`, not a literal `= NULL`
+    comparison that would never match, so this one shape is correct for
+    BOTH callers -- confirmed by reading SQLAlchemy's own documented
+    behavior, not assumed. The two partial unique indexes (2.4.a) already
+    guarantee each row has only one of the two columns populated, so this
+    can never ambiguously match the wrong row.
+
+    Returns `(status, document_id)` -- status is always `"unchanged"` or
+    `"ingested"`, never `"skipped"`/`"failed"` (each caller decides those
+    earlier, in its OWN adapter-specific step, before ever calling this
+    function) -- `document_id` is always a real `uuid.UUID`, never `None`.
+    Each caller wraps this pair into its own result type (`IngestResult`/
+    `UploadIngestResult`), deliberately NOT a value this shared function
+    returns itself: those two types' own docstrings describe genuinely
+    different adapter semantics (decided at 2.7.b, re-confirmed at the
+    2.7.a/b/c duplication check) -- unifying THEIR shape too would force
+    one of them to describe the other's own meanings inaccurately.
+    """
+    content_hash = compute_content_hash(content)
+
+    existing = (
+        await session.execute(
+            select(Document).where(
+                Document.source_id == source_id,
+                Document.url == url,
+                Document.file_name == file_name,
+            )
+        )
+    ).scalar_one_or_none()
+
+    if existing is not None and existing.content_hash == content_hash:
+        existing.last_seen_at = clock()
+        await session.flush()
+        return "unchanged", existing.id
+
+    document_id = existing.id if existing is not None else uuid.uuid4()
+
+    await embed_and_upsert(
+        content,
+        client=client,
+        collection_name=collection_name,
+        tenant_id=tenant_id,
+        source_id=source_id,
+        source_type=source_type,
+        document_id=document_id,
+        source_url=url,
+        file_name=file_name,
+        embedding_version=embedding_version,
+    )
+
+    if existing is None:
+        session.add(
+            Document(
+                id=document_id,
+                tenant_id=tenant_id,
+                source_id=source_id,
+                url=url,
+                file_name=file_name,
+                title=content.title,
+                content_hash=content_hash,
+                status="extracted",
+                is_nearly_empty=content.is_nearly_empty,
+                last_seen_at=clock(),
+            )
+        )
+    else:
+        existing.title = content.title
+        existing.content_hash = content_hash
+        existing.status = "extracted"
+        existing.is_nearly_empty = content.is_nearly_empty
+        existing.last_seen_at = clock()
+    await session.flush()
+    return "ingested", document_id

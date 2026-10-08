@@ -36,8 +36,8 @@ import uuid
 import sqlalchemy as sa
 
 from app import qdrant
+from app.ingest import qdrant_writer as qdrant_writer_module
 from app.ingest import safe_fetch as safe_fetch_module
-from app.ingest import web_adapter as web_adapter_module
 from app.ingest.ip_safety import is_unsafe_destination_ip as _real_is_unsafe_destination_ip
 from app.ingest.models import Document, Source
 from app.ingest.repository import IngestRepository
@@ -242,7 +242,12 @@ async def test_rerun_with_identical_content_skips_rechunk_and_reembed(
     # (b) the core idempotency property: re-running against IDENTICAL
     # content must NOT re-chunk or re-embed at all -- proven directly by
     # counting calls to embed_and_upsert() itself, not just by observing
-    # the end result.
+    # the end result. Patched on qdrant_writer_module, not web_adapter's
+    # own namespace: since the duplication check after 2.7.a/b/c, ingest_
+    # url() no longer imports embed_and_upsert() directly -- it calls
+    # qdrant_writer.py's own finish_ingest(), which calls embed_and_
+    # upsert() from WITHIN that module's own namespace, so that is the
+    # real call site to intercept.
     client, collection_name, ids = await _setup(monkeypatch, live_test_services)
 
     with local_http_server(scripted_handler({"/": (200, _RICH_BODY_V1.encode())})) as port:
@@ -255,13 +260,13 @@ async def test_rerun_with_identical_content_skips_rechunk_and_reembed(
         count_after_first = await client.count(collection_name=collection_name)
 
         calls = []
-        original = web_adapter_module.embed_and_upsert
+        original = qdrant_writer_module.embed_and_upsert
 
         async def _counting(*args, **kwargs):
             calls.append(1)
             return await original(*args, **kwargs)
 
-        monkeypatch.setattr(web_adapter_module, "embed_and_upsert", _counting)
+        monkeypatch.setattr(qdrant_writer_module, "embed_and_upsert", _counting)
 
         second = await _ingest(
             client, collection_name, tenant_id=ids["tenant_id"], source_id=ids["source_id"], url=url
