@@ -54,7 +54,7 @@ A production-ready, multi-tenant, embeddable AI widget platform: one website is 
 | 2.4 | Extraction and chunking | Done | Completed 2026-10-05; all subtasks 2.4.a–2.4.g done; see closure summary below the Step 2.4 task list |
 | 2.5 | Embedding and Qdrant upserts | Done | Completed 2026-10-06; all subtasks 2.5.a–2.5.f done; see closure summary below the Step 2.5 task list |
 | 2.6 | URL-list and crawl adapters | Done | Completed 2026-10-07; all subtasks 2.6.a–2.6.f done; see closure summary below the Step 2.6 task list |
-| 2.7 | Upload adapter [SECURITY] | Not started | – |
+| 2.7 | Upload adapter [SECURITY] | Done | Completed 2026-10-09; all subtasks 2.7.a–2.7.f done; see closure summary below the Step 2.7 task list |
 | 2.8 | Database sync adapter [SECURITY] | Not started | – |
 | 2.9 | Scheduler, plans and reconcile | Not started | – |
 | 2.10 | Phase 2 acceptance | Not started | – |
@@ -1638,7 +1638,125 @@ work — every adapter since has reused what already existed.
 | 2.7.c | [SECURITY] Fixed the extractor header-comment bug (mechanical); built the per-upload orchestration primitive (`ingest_upload()`) following `ingest_url()`'s own shape, writing `documents` rows keyed by `file_name` | Done |
 | 2.7.d | [SECURITY] `handle_ingest_upload()` job handler and `JOB_HANDLERS["ingest_upload"]` registration, reusing `_open_source_session()`; `sources.config["uploads"]` shape decided; `"ingest_upload"` added to `VALID_JOB_TYPES` | Done |
 | 2.7.e | End-to-end live tests through the real worker loop: all four file types succeeding, a corrupt file failing its job cleanly, an oversized file rejected, a mismatched-extension file correctly sniffed, an idempotent re-run | Done |
-| 2.7.f | Close-out: consistency review across 2.7.a–e, main components table and task-list row marked Done, closure summary, final sanity pass, PROJECT_SPEC.md update | Not started |
+| 2.7.f | Close-out: consistency review across 2.7.a–e, main components table and task-list row marked Done, closure summary, final sanity pass, PROJECT_SPEC.md update | Done |
+
+### Step 2.7 closure summary (2026-10-09)
+
+Built: the shared `upload-storage` Docker volume plus a path-traversal-
+resistant-by-construction storage primitive and hand-rolled, hostile-
+proof file-type sniffing (2.7.a); the resource-exhaustion investigation
+(pypdf already bounded; python-docx's own zip-bomb gap found and closed)
+(2.7.b); the per-upload orchestration primitive `ingest_upload()`,
+unifying with `ingest_url()`'s own document-lifecycle logic via
+`finish_ingest()` at the duplication check that followed (2.7.c); the
+`upload` adapter's own `JOB_HANDLERS["ingest_upload"]` registration and
+`sources.config["uploads"]` shape (2.7.d); the full end-to-end live test
+matrix proving 2.7.a–d hold together through the real worker loop,
+including a real content-search proof via `query_points()` and a
+previously-untested `KeyError` regression gap closed for the first time
+(2.7.e).
+
+Real findings, not glossed over: a Docker-volume-ownership permission bug
+found and fixed live (2.7.a); python-docx's zero native protection
+against a zip-bomb-shaped `.docx`, confirmed by actually exploiting it
+safely before mitigating (2.7.b); `extract_docx.py`'s own header comment
+confirmed incomplete against two real corrupt-docx constructions, one of
+which (`KeyError`) had never actually become a committed regression test
+anywhere before 2.7.e closed that gap (2.7.c/2.7.e); a real architectural
+boundary clarified with the user rather than built around silently —
+"oversized file rejected" cannot run through `worker.run()` as this
+system is built, since `Settings.upload_max_size_bytes` is enforced only
+at `upload_storage.save()`, strictly before a job can exist (2.7.e).
+
+**Upload adapter contract — the canonical reference, point future steps
+here rather than re-deriving it from the decision-log entries above:**
+
+- `sources.config` shape for `type="upload"` sources: `{"uploads":
+  [{"upload_id": "<uuid-as-string>", "original_filename": "<name>"},
+  ...]}` — a list, matching `urls`' own list shape (a tenant can upload
+  more than one file under one source); `upload_id` round-trips as a
+  plain string (JSON has no native UUID type) and is parsed back via
+  `uuid.UUID(...)` inside `handle_ingest_upload()`.
+- Partial-failure/job-success policy, identical to `handle_ingest_url()`'s
+  own: each entry in the list is independent. `ingest_upload()` returns a
+  definitive `UploadIngestResult` (`status` one of `"ingested"` /
+  `"unchanged"` / `"skipped"` / `"failed"`) for every EXPECTED outcome —
+  an unrecognized type, a corrupt/malformed file — never raising for
+  those. The JOB is marked succeeded if every entry received a recorded
+  outcome, regardless of how many came back `"skipped"`/`"failed"` — not
+  "every entry must succeed." Only an infrastructure-level failure
+  (`embed_and_upsert()` itself failing, or `upload_storage.read()` raising
+  `FileNotFoundError` for a missing/wrong `upload_id`) propagates
+  uncaught, taking the ordinary job-level backoff/retry path
+  (`mark_job_failed()`, non-permanent).
+- The full design reasoning (why this shape, why this policy, every real
+  finding made while building it) lives in `backend/app/ingest/job_
+  handlers.py`'s own module header comment — the primary, in-code source
+  — and the Task 2.7.c/2.7.d decision-log entries above, for the
+  historical trail. This paragraph is the one place to CITE the shape/
+  policy from a future step's own planning entry; do not restate or
+  re-derive it a third time.
+
+**Acceptance criteria confirmed against what's actually written** (docs/
+SPEC.md §5.6's own "Uploads" bullet, and §16's matching acceptance line
+— not just "tests pass"):
+
+- *"Content type checked by content, not just extension"* — met.
+  `sniff_file_type()` (2.7.a) never consults the filename for pdf/docx;
+  2.7.e's own mismatched-extension test proves this end to end for the
+  first time (a `.txt`-named file holding real PDF bytes is sniffed and
+  ingested AS pdf; a `.pdf`-named file holding plain text is sniffed and
+  ingested as plain text).
+- *"Size... limits from the plan"* — partially met, by design, not a
+  gap: a global `Settings.upload_max_size_bytes` ceiling exists and is
+  enforced (2.7.a, reconfirmed against the real production default at
+  2.7.e), but is not yet sourced from `plans.limits` (still an
+  unstructured JSONB stub) — already recorded as a Task-4.3-owned Open
+  marker, identical treatment to `crawl_page_cap`'s own.
+- *"Parsed in the worker, never in the API process"* — met, structurally:
+  extraction happens only inside `ingest_upload()`, called only from
+  `handle_ingest_upload()`, called only from `worker.py`'s own job loop;
+  no API route exists for uploads at all yet (Phase 6).
+- *"Originals stored privately so re-embedding needs no re-upload"* —
+  met: `upload_storage.py` stores raw bytes privately on disk;
+  `finish_ingest()`'s own content-hash unchanged-shortcut proves
+  re-embedding reuses the same stored bytes with no new upload needed,
+  now proven across two genuinely separate real job runs (2.7.e).
+- *"A corrupt file fails its job without crashing the worker"* — met in
+  substance, with one literal-wording nuance worth naming: docs/SPEC.md
+  §16 names "a corrupt PDF" specifically, and that exact case was proven
+  at the `ingest_upload()`-direct-call level (2.7.c, a truncated PDF) but
+  never through the real `worker.run()` loop specifically for PDF — 2.7.d/
+  2.7.e proved the LOOP-level per-item/job-success contract through the
+  real path using corrupt DOCX and an unrecognized-type file instead,
+  since the dispatch-table mechanism that catches a failure is identical
+  across all four formats, not format-specific. Judged genuinely met, not
+  reopened: the mechanism 2.7.d/2.7.e prove through the loop is the SAME
+  mechanism a corrupt PDF would hit, and 2.7.c already proves that exact
+  input against that exact mechanism directly. No new test added for this
+  (this close-out adds no tests, per its own instruction).
+- *§16's "Oversized or mislabelled uploads are rejected"* — met, with a
+  precise reading: "mislabelled" there means a claimed type whose REAL
+  content isn't any of the four supported types (rejected/`"skipped"`,
+  proven since 2.7.a/c/d with the PNG-bytes-under-`.bin`-name case).
+  2.7.e's own mismatched-extension test covers the complementary, equally
+  real case docs/SPEC.md §5.6 separately requires — a claimed type whose
+  real content IS one of the four, just a different one — which is
+  correctly NOT rejected, only reclassified and ingested under its real
+  type (see the content-type bullet above).
+- The database-connector half of §5.6 is Step 2.8's own scope, not
+  Step 2.7's — not assessed here.
+
+See Open markers below for what remains open after this review (the
+2.7.c-owned `extract_docx.py` stale-comment marker, confirmed still
+accurately scoped; the orphaned-storage-on-replace and source-deletion
+gaps, both owned by later steps; the Phase-6 tenant-scoping trust
+boundary; the residual declared-size zip-bomb variant and the no-timeout
+decision, both Phase-7-owned; `plans.limits` sourcing, owned by Task
+4.3) — not repeated here. The one inline `ASSUMPTION` this step left open
+(`app/config.py`'s `upload_storage_path` default) is now CONFIRMED and
+removed, per the user's direct confirmation at this close-out — see the
+2.7.f decision-log entry below.
 
 - 2026-10-07: Task 2.7.a [SECURITY] — storage and file-type-sniffing primitives, the upload adapter's own first real code (docs/SPEC.md §5.6). New modules `app/ingest/upload_storage.py` and `app/ingest/upload_sniff.py`; two new `Settings` fields; a new shared Docker volume. File-type sniffing is confirmed, live, to be this step's own primary new attack surface (per the Step 2.7 breakdown's own framing) — built and tested with that weight, not as an afterthought.
 
@@ -1742,6 +1860,61 @@ work — every adapter since has reused what already existed.
 
   Verified: `make lint` clean. New file run standalone without live services: 1 passed (the oversized-boundary test, which needs neither service), 5 skipped (the five worker-loop tests) — identical across 3 repeated runs. Full `backend/tests` without a test database: **562 passed, 215 skipped** (up from 561 passed, 210 skipped — exactly 1 new offline pass and 5 new skips, 0 change to any other test). New file run standalone against both real services, re-run 3 times for stability: **6 passed** every time (~9-12s each run). `make test-all` (both real services): **777 passed** (562 + 215, matching exactly), 0 skipped, both test services confirmed fully removed afterward (up from 771 passed at 2.7.d's own close-out — exactly the 6 new tests). `make hooks`: zero new markers of any kind introduced. `git status --short` named and cross-checked file by file: exactly one new file, `backend/tests/test_upload_e2e.py` — no production code touched, no other file modified, `.env` correctly absent.
 
+- 2026-10-09: Task 2.7.f — Step 2.7 close-out: consistency review across 2.7.a-e, the canonical upload-adapter contract consolidated into one place (the Step 2.7 closure summary above), docs/SPEC.md §5.6/§16 acceptance criteria confirmed against what's actually written, and Step 2.8's own task breakdown drafted for review. Documentation/consolidation only, as instructed — one production-file touch, explicitly flagged and user-confirmed before making it (below), no new tests.
+
+  **Marker-by-marker review, every Open/ASSUMPTION/UNCERTAIN/TODO marker raised across 2.7.a-e, each given a plain verdict:**
+
+  1. *Orphaned on-disk bytes when a re-upload replaces an `upload_id` under the same source/filename* (recorded at 2.7.c) — **STAYS OPEN, untouched.** 2.7.e's own idempotency test (scenario 5) re-ingests the SAME `upload_id` twice, proving the unchanged-shortcut; it never exercises a REPLACEMENT (a new `upload_id` superseding an old one), which is what this marker is about. Owner unchanged: Step 2.9.
+  2. *Nothing deletes an upload's on-disk bytes when its source is disabled/deleted* (recorded at 2.7.c) — **STAYS OPEN, untouched.** No source-deletion scenario exists anywhere in 2.7.e's matrix. Owner unchanged: whoever builds source-deletion side effects for uploads.
+  3. *`upload_storage.py`'s `read()`/`delete()` carry no tenant-scoping dimension of their own* (recorded at the duplication check after 2.7.a/b/c) — **STAYS OPEN, untouched.** 2.7.e's tests call `save()`/`read()` the same way 2.7.c/d's tests already did (as the trusted caller); nothing changes the trust-boundary analysis. Owner unchanged: whoever builds the real upload-receiving endpoint, Phase 6.
+  4. *`extract_docx.py`'s own header comment, confirmed incomplete (KeyError/XMLSyntaxError)* (recorded at 2.7.c) — **STAYS OPEN, justification reconfirmed current, not closed.** This marker's scope is narrow and unchanged: correcting that file's own comment text, owned by whoever next touches `app/ingest/extract_docx.py`. 2.7.e never touches that file (new tests only) — its precondition is still unmet. What's new: the underlying claim is now proven true through the FULL real worker-loop path too (2.7.e's own test (6), covering both named exception types, not just the one 2.7.d already exercised), not only at the dispatch-table level (2.7.c) — strictly more evidence for the same gap, not a reason to close it. Confirmed as asked.
+  5. *The declared-ZIP-size zip-bomb check could in principle be defeated by a size-lying adversarial archive* (recorded at 2.7.b) — **STAYS OPEN, untouched.** 2.7.e's own zip-bomb test (scenario 3) uses an honestly-declared large size, the classic case this marker already distinguishes from the more exotic one it describes. Owner unchanged: Phase 7 or whoever first has reason to doubt it.
+  6. *No per-extraction-call wall-clock timeout was built* (recorded at 2.7.b) — **STAYS OPEN, untouched.** A deliberate, reasoned decision at 2.7.b, not a gap pending test evidence; 2.7.e adds no timing/hang scenario. Owner unchanged: whoever first observes a real job hang near the 30-minute boundary, or Phase 7.
+  7. *`upload_max_size_bytes` not sourced from `plans.limits`* (recorded at the Step 2.7 breakdown) — **STAYS OPEN, untouched.** `plans.limits` is still the same unstructured JSONB stub; nothing in 2.7.e touches plan-limit reading. Owner unchanged: Task 4.3.
+  8. *`app/config.py`'s `upload_storage_path` default, "/data/uploads," flagged `ASSUMPTION` pending confirmation* (recorded at 2.7.a) — **CLOSED.** No test could ever resolve a naming-convention preference; raised directly to the user at this close-out. **Confirmed by the user (2026-10-09): "/data/uploads" is accepted as-is.** `app/config.py` updated (the ASSUMPTION comment replaced with a CONFIRMED one, zero behavior change) — the one production-file touch this task makes, flagged and confirmed before making it, not decided unilaterally.
+
+  Net result: of the eight markers in scope, 2.7.e's own live-test matrix closes or partially closes none of the seven Open markers in PROJECT_SPEC.md's own §9 — every one of those remains a genuine, forward-looking scope boundary owned by a later step or phase, exactly as each was already recorded; the matrix's job was proving the orchestration-correctness level works end to end, not retiring already-identified design gaps. The one closable item (the inline `ASSUMPTION`, a pure naming preference) is now closed, by direct user confirmation, not by any test.
+
+  **Canonical contract.** The `sources.config["uploads"]` shape and the per-item partial-failure/job-success policy are consolidated into a single new subsection of the Step 2.7 closure summary above ("Upload adapter contract — the canonical reference"), explicitly naming `job_handlers.py`'s own module header comment as the primary in-code source and itself as the one place to CITE from. No `.py` file was edited for this consolidation (`upload_adapter.py`/`job_handlers.py` were considered as the alternative location per the task's own framing, but PROJECT_SPEC.md alone keeps this task's production-code footprint to the one explicitly-flagged, user-confirmed line above, and nothing else).
+
+  **Acceptance criteria.** docs/SPEC.md §5.6's own five "Uploads" claims and §16's matching "Oversized or mislabelled uploads are rejected, and a corrupt PDF fails its job without crashing the worker" line were checked against what 2.7.a-e actually built and proved, not against "tests pass" alone — see the Step 2.7 closure summary above for the full, claim-by-claim confirmation. Two claims are met with a stated nuance rather than a flat "met," both recorded there rather than silently rounded up: the size-limit claim is correctly partial (plan-sourcing deferred to Task 4.3, by design); the corrupt-file claim's literal "a corrupt PDF" wording was proven through the real worker loop only via DOCX/unrecognized-type cases (2.7.d/e), with the PDF-specific case proven only at the direct-call level (2.7.c) — judged genuinely satisfied since the loop-level mechanism is format-agnostic, not re-opened with a new test (this task adds none, as instructed).
+
+  **A minor, out-of-scope observation, flagged not fixed.** `worker.py`'s own `HEARTBEAT_STALE_MULTIPLIER` comment (lines 86-91) still reads "any FUTURE long-running handler (2.7/2.8) that does not yet exist" — stale for "2.7" specifically, since `handle_ingest_upload()` now exists and was already judged "narrower but not reopened" at 2.7.d's own close-out. Not a tracked PROJECT_SPEC.md marker (the underlying ASSUMPTION it describes was already RESOLVED at Task 2.6.e) — a pure code-comment staleness nit, predating Step 2.7, in a completed task's file this task's own scope doesn't cover. Left untouched; worth a one-line fix whenever `worker.py` is next genuinely touched.
+
+  **Step 2.8's own task breakdown drafted** (see the new "### Step 2.8 task list (approved)" section below) — six subtasks, 2.8.a-f, matching this project's own established one-concern-per-subtask granularity and [SECURITY] tagging, based on docs/SPEC.md §5.6's "Database connector" bullets and what Step 2.1 already built (the `db_connections` schema, `create_db_connection()`/`get_decrypted_credentials()`, pgcrypto encryption — all reused, none rebuilt) plus `ip_safety.py`'s own `is_unsafe_destination_ip()` (2.3.a), which was deliberately built protocol-agnostic specifically anticipating this exact reuse (confirmed by reading that module's own header comment, which names Step 2.8 by number). Presented for review before any implementation starts, per direct instruction — not yet a researched-and-settled breakdown the way 2.6/2.7's own breakdowns were; several real decisions (a MySQL/MariaDB driver dependency, whether a new Compose test service is needed, the per-engine read-only-enforcement mechanism, the `documents` row-identity scheme for database-source rows) are named as open questions for 2.8.a's own research, not decided here.
+
+  ASSUMPTION: the one pre-existing marker (8, above) is now resolved and removed — confirmed via `make hooks` below. UNCERTAIN: none. TODO: none new. Current task set to 2.8.a, next to 2.8.b. **Counter reaches n=3.**
+
+  Verified: `make lint` clean (including after the `app/config.py` edit). Full `backend/tests` without a test database: **562 passed, 215 skipped** — unchanged from 2.7.e's own entry, confirming this task added no production code and no tests (the `app/config.py` comment-only edit changes no behavior). `make hooks`: the `app/config.py` ASSUMPTION marker confirmed gone; zero new markers of any kind introduced anywhere. `git status --short` named and cross-checked file by file: `PROJECT_SPEC.md` and `backend/app/config.py` (modified) — exactly the expected two, no new files, `.env` correctly absent. No new dependency.
+
+### Step 2.8 task list (approved)
+
+Six subtasks, 2.8.a–2.8.f, in build order — drafted at Task 2.7.f for
+review, not yet researched/settled the way the Step 2.6/2.7 breakdowns
+were (see that entry above for the open decisions named below). Based on
+docs/SPEC.md §5.6's own "Database connector" bullets. Reuses, rather than
+rebuilds, two things Step 2.1 already shipped specifically for this step:
+the `db_connections` schema (`host`, `allowlisted_tables`, `row_
+templates`, `encrypted_credentials` — the credential's own internal
+shape deliberately left undecided until now) and the pgcrypto-backed
+`create_db_connection()`/`get_decrypted_credentials()` pair
+(`app/ingest/repository.py`); and `app/ingest/ip_safety.py`'s
+`is_unsafe_destination_ip()` (2.3.a), which is explicitly protocol-
+agnostic by design, anticipating exactly this non-HTTP reuse (confirmed
+by reading that module's own header comment, which names Step 2.8 by
+number). "Approved live queries" (docs/SPEC.md §5.6's own last bullet) is
+out of scope for v1 (already listed under Project constraints) — this
+step is sync-only, never an on-demand tenant query path.
+
+| ID | Goal | Status |
+|----|------|--------|
+| 2.8.a | [SECURITY] Research and decide the real `credentials` dict shape now needed by a real adapter (engine, host, port, database, username, password, sslmode or equivalent) on top of the already-existing `create_db_connection()`/`get_decrypted_credentials()`; the outbound connection's own SSRF-equivalent host check — adapt `is_unsafe_destination_ip()` to a raw DB connection (resolve host, validate every resolved IP, connect pinned to the validated IP, matching `safe_fetch.py`'s own pin-after-validate discipline for a different protocol); the MySQL/MariaDB async driver dependency decision (rule 8 — Postgres already has one via the app's own stack, MySQL does not) | Not started |
+| 2.8.b | [SECURITY] Read-only enforcement — the connection-test that "warns if the account can write" (a real permission probe against each engine's own privilege system, decided per engine, not assumed to be the same query); a global per-query statement timeout and row-count cap (`Settings`-configurable, same global-default-pending-Task-4.3 pattern as `crawl_page_cap`/`upload_max_size_bytes`); confirms every connection only ever runs one allowlisted, read-only `SELECT` — never arbitrary tenant-supplied SQL | Not started |
+| 2.8.c | Table/column allowlisting and the row-to-text template: the real shape of `allowlisted_tables`/`row_templates` (JSONB columns already in the schema since 2.1.a, deliberately left unstructured until a real adapter needed them) and a template-rendering function (one row → one text block), matching this project's own "decide a JSONB shape only when the adapter that needs it is actually being built" precedent (`urls`/`crawl`/`uploads`' own `sources.config` shapes) | Not started |
+| 2.8.d | Row identity and the per-row ingest primitive — resolves the long-open "whoever first designs real identity/uniqueness for `database`-source documents" marker (recorded at 2.4.a / the duplication check after it): a `documents` row with neither `url` nor `file_name` needs its own identity key for this adapter specifically. The primitive itself: run the allowlisted query (2.8.b's own timeout/cap) → render each row via its template (2.8.c) → the same `finish_ingest()` document-lifecycle already shared by `ingest_url()`/`ingest_upload()` — a third real caller, not a new implementation | Not started |
+| 2.8.e | [SECURITY] The `database` adapter's own job_type/handler: `sources.config` shape (`{"db_connection_id": "<uuid>"}`, pointing at the existing `db_connections` row); `handle_ingest_db()`/`JOB_HANDLERS["ingest_db"]` registration (`VALID_JOB_TYPES` extended), following `handle_ingest_url()`/`handle_ingest_upload()`'s own established partial-failure/job-success shape (see the Step 2.7 closure summary's own canonical-contract section) per row; the max-synced-rows-per-plan limit, same global-Settings-default-pending-Task-4.3 pattern | Not started |
+| 2.8.f | Close-out: end-to-end live test matrix through the real worker loop against a real test database engine (decide: can PostgreSQL reuse the existing `test-db` Compose service as the "remote" tenant target, avoiding new infrastructure for that engine; does MySQL/MariaDB need a new Compose test service — a real new-infrastructure decision to confirm before building, not assumed); consistency review across 2.8.a–e; main components table and task-list row marked Done; closure summary; PROJECT_SPEC.md update | Not started |
+
 ### Estimates to measure
 
 - The default limits in §9 and the budgets in §17 are starting points.
@@ -1765,9 +1938,9 @@ work — every adapter since has reused what already existed.
 
 ## 7. Current task and next task
 
-Current: 2.7.f.
-Next: Plan Step 2.8 (no approved subtask breakdown exists yet — Step 2.8's own first task, matching Step 2.7's own precedent).
-Do not modify (completed tasks): 1.1.a, 1.1.b, 1.1.c, 1.1.d, 1.1.e, 1.1.f, 1.1.g, 1.1.h, 1.1.i, 1.1.j, 1.1.k, 1.1.l, 1.1.m, 1.1.n, 1.1.o.a, 1.1.o.b, 1.1.o.c, 1.1.o.d, 1.1.o.e, 1.1.o.f, 1.1.o.g, 1.1.o.h, 1.1b, 1.1c, 1.2.a, 1.2.b, 1.2.c, 1.2.d, 1.2.e, 1.2.f, 1.3.a1, 1.3.a2, 1.3.b, 1.3.c, 1.3.d, 1.3.e, 1.3.f, 1.4.a, 1.4.b, 1.4.c, 1.4.d, 1.4.e, 1.4.f, 1.4.g, 1.4.h, 1.4.i, 1.4.j, 1.4.k, 1.4.l, 1.5.a, 1.5.b, 1.5.c, 1.5.d, 1.5.e, 1.5.f, 1.6.a, 1.6.b, 1.6.c, 1.6.d, 1.6.e, 2.1.a, 2.1.b, 2.1.c, 2.1.d, 2.1.e, 2.1.f, 2.1.g, 2.1.h, 2.2.a, 2.2.b, 2.2.c, 2.2.d, 2.2.e, 2.2.f, 2.2.g, 2.2.h, 2.2.i, 2.3.a, 2.3.b, 2.3.c, 2.3.d, 2.3.e, 2.4.a, 2.4.b, 2.4.c, 2.4.d, 2.4.e, 2.4.f, 2.4.g, 2.5.a, 2.5.b, 2.5.c, 2.5.d, 2.5.e, 2.5.f, 2.6.a, 2.6.b, 2.6.c, 2.6.d, 2.6.e, 2.6.f, 2.7.a, 2.7.b, 2.7.c, 2.7.d, 2.7.e.
+Current: 2.8.a.
+Next: 2.8.b.
+Do not modify (completed tasks): 1.1.a, 1.1.b, 1.1.c, 1.1.d, 1.1.e, 1.1.f, 1.1.g, 1.1.h, 1.1.i, 1.1.j, 1.1.k, 1.1.l, 1.1.m, 1.1.n, 1.1.o.a, 1.1.o.b, 1.1.o.c, 1.1.o.d, 1.1.o.e, 1.1.o.f, 1.1.o.g, 1.1.o.h, 1.1b, 1.1c, 1.2.a, 1.2.b, 1.2.c, 1.2.d, 1.2.e, 1.2.f, 1.3.a1, 1.3.a2, 1.3.b, 1.3.c, 1.3.d, 1.3.e, 1.3.f, 1.4.a, 1.4.b, 1.4.c, 1.4.d, 1.4.e, 1.4.f, 1.4.g, 1.4.h, 1.4.i, 1.4.j, 1.4.k, 1.4.l, 1.5.a, 1.5.b, 1.5.c, 1.5.d, 1.5.e, 1.5.f, 1.6.a, 1.6.b, 1.6.c, 1.6.d, 1.6.e, 2.1.a, 2.1.b, 2.1.c, 2.1.d, 2.1.e, 2.1.f, 2.1.g, 2.1.h, 2.2.a, 2.2.b, 2.2.c, 2.2.d, 2.2.e, 2.2.f, 2.2.g, 2.2.h, 2.2.i, 2.3.a, 2.3.b, 2.3.c, 2.3.d, 2.3.e, 2.4.a, 2.4.b, 2.4.c, 2.4.d, 2.4.e, 2.4.f, 2.4.g, 2.5.a, 2.5.b, 2.5.c, 2.5.d, 2.5.e, 2.5.f, 2.6.a, 2.6.b, 2.6.c, 2.6.d, 2.6.e, 2.6.f, 2.7.a, 2.7.b, 2.7.c, 2.7.d, 2.7.e, 2.7.f.
 
 ### Step 1.1 task list (approved)
 
@@ -2189,7 +2362,7 @@ here.
 
 ## 8. Task counter since the last duplication check
 
-n = 2 — 2.7.d, 2.7.e counted (see their decision log entries above). Next duplication check will be requested separately, not run automatically.
+n = 3 — 2.7.d, 2.7.e, 2.7.f counted (see their decision log entries above). Next duplication check will be requested separately, not run automatically.
 
 ## 9. Open markers
 

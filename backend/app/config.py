@@ -199,12 +199,12 @@ class Settings(BaseSettings):
     # (deploy/docker-compose.yml, Step 2.7 breakdown decision (b)) at the
     # same path this default names, so no override is needed in a real
     # deployment -- only tests override it (to a pytest tmp_path).
-    # ASSUMPTION: the literal path "/data/uploads" is this task's own
-    # choice (the Step 2.7 breakdown decision only approved "local disk,
-    # shared volume," not this exact spelling) -- mirrored exactly in
-    # deploy/docker-compose.yml's new upload-storage volume mount, so the
-    # default needs no override in a real deployment. Flag if a different
-    # convention is preferred.
+    # CONFIRMED at Task 2.7.f (2026-10-09): "/data/uploads" is the real,
+    # accepted convention -- mirrored exactly in deploy/docker-compose.yml's
+    # upload-storage volume mount, so the default needs no override in a
+    # real deployment. (Resolves this field's own original ASSUMPTION,
+    # recorded at Task 2.7.a -- see PROJECT_SPEC.md's Step 2.7 closure
+    # summary.)
     upload_storage_path: str = Field(default="/data/uploads", min_length=1)
     # Task 2.7.a: the upload adapter's own per-file size ceiling
     # (docs/SPEC.md §5.4: "upload storage and file size... from the
