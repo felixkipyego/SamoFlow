@@ -115,9 +115,54 @@
 # _open_source_session() below; each handler's own per-item loop (a plain
 # URL list vs. run_crawl()'s own orchestration), which is genuinely
 # different, stays where it was, unchanged.
+#
+# Task 2.7.d: handle_ingest_upload() -- the `upload` adapter's own
+# JOB_HANDLERS entry, added below. A 3rd real use of _open_source_
+# session() (its own extraction, above, anticipated exactly this: "both
+# handlers" already meant "both existing handlers at the time," not "at
+# most two ever"). Follows handle_ingest_url()'s own exact shape, not
+# handle_ingest_crawl()'s: a plain per-item loop over a tenant-declared
+# list read from `sources.config`, each item independent, matching that
+# function's own already-documented partial-failure/job-success policy
+# word for word (see this module's own header comment above) -- ingest_
+# upload() (2.7.c) already returns a definitive UploadIngestResult for
+# every EXPECTED outcome ("skipped"/"unknown type", "failed"/corrupt
+# file), the identical shape ingest_url() already established, so no new
+# per-item exception handling is needed here either.
+#
+# Config shape, decided here, not inherited from `urls`/`crawl`: neither
+# existing shape transfers -- `urls` is a bare list of strings (one piece
+# of information per item); an upload needs TWO per item (which stored
+# file, and its own real filename for the `documents` row/content-
+# sniffing tiebreak, 2.7.a). `sources.config["uploads"]` is therefore a
+# list of `{"upload_id": "<uuid>", "original_filename": "<name>"}`
+# objects -- a list, not a single object, for the identical reason
+# `urls` is a list: a tenant can plausibly upload more than one file
+# under one source. `upload_id` is stored as its string form (JSON has
+# no native UUID type) and parsed back via `uuid.UUID(...)` here --
+# matching how every other JSONB config value in this codebase already
+# round-trips through its own plain-JSON-compatible representation (e.g.
+# `urls`' own plain strings).
+#
+# `storage_dir`/`max_docx_part_size_bytes` are read from Settings ONCE
+# here (this handler's own call site), then passed down to ingest_
+# upload() as plain parameters -- matching handle_ingest_crawl()'s own
+# `settings.crawl_page_cap`/etc. precedent exactly; ingest_upload() itself
+# stays Settings-free and fully testable with any value a test wants
+# (2.7.c's own design).
+#
+# Heartbeat: deliberately NOT built here, same reasoning as handle_
+# ingest_url()'s own (see this module's header comment above) -- a
+# tenant-supplied upload list is realistically short (pasting/selecting a
+# handful of files, not discovering hundreds of pages the way a crawl
+# does), so this stays the "narrower but not reopened" case the
+# HEARTBEAT_STALE_MULTIPLIER marker's own RESOLVED note (2.6.e) already
+# anticipated for handle_ingest_url() -- not a new, separate risk.
 import logging
+import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 from qdrant_client import AsyncQdrantClient
 from sqlalchemy import select
@@ -128,6 +173,7 @@ from app.config import get_settings
 from app.db import _session_factory
 from app.ingest.crawl import run_crawl
 from app.ingest.models import Job, Source
+from app.ingest.upload_adapter import ingest_upload
 from app.ingest.web_adapter import ingest_url
 
 logger = logging.getLogger(__name__)
@@ -244,3 +290,49 @@ async def handle_ingest_crawl(job: Job) -> None:
             delay_seconds=settings.crawl_request_delay_seconds,
             on_page_visited=lambda: write_heartbeat(HEARTBEAT_PATH),
         )
+
+
+async def handle_ingest_upload(job: Job) -> None:
+    """The `upload` adapter's own `JOB_HANDLERS["ingest_upload"]` entry.
+
+    Reads `sources.config["uploads"]` for `job.source_id` -- a list of
+    `{"upload_id": "<uuid>", "original_filename": "<name>"}` entries (see
+    this module's own header comment for why this shape, not a bare list
+    like `urls`'s own). Calls ingest_upload() (2.7.c) once per entry,
+    independently -- see this module's own header comment for the full
+    partial-failure/job-success reasoning, identical to handle_ingest_
+    url()'s own.
+    """
+    settings = get_settings()
+    storage_dir = Path(settings.upload_storage_path)
+    async with _open_source_session(job, "ingest_upload") as (client, session, source):
+        uploads = source.config.get("uploads", [])
+        for entry in uploads:
+            upload_id = uuid.UUID(entry["upload_id"])
+            original_filename = entry["original_filename"]
+            result = await ingest_upload(
+                session,
+                client,
+                qdrant.COLLECTION_NAME,
+                tenant_id=job.tenant_id,
+                source_id=job.source_id,
+                upload_id=upload_id,
+                original_filename=original_filename,
+                storage_dir=storage_dir,
+                max_docx_part_size_bytes=settings.docx_max_part_size_bytes,
+            )
+            # Committed per upload, not once at the end -- same reasoning
+            # as handle_ingest_url()'s own identical per-item commit (see
+            # that function's own comment above): embed_and_upsert()
+            # writes to Qdrant directly, with no rollback tie to this
+            # session, so a later item's own failure must never be able
+            # to roll back an earlier item's already-real Qdrant points
+            # along with its own now-vanished `documents` row.
+            await session.commit()
+            logger.info(
+                "handle_ingest_upload: job %s upload %s (%s) -> %s",
+                job.id,
+                upload_id,
+                original_filename,
+                result.status,
+            )

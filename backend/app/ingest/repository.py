@@ -63,7 +63,12 @@ from app.ingest.models import AuditLog, DbConnection, Job, VerifiedDomain
 # string, since the two are deliberately not required to match 1:1
 # (Step 2.9's own reconcile/refresh-scheduling jobs, 2.1.a's own decision
 # entry, are not tied to one source row at all).
-VALID_JOB_TYPES: frozenset[str] = frozenset({"ingest_url", "ingest_crawl"})
+#
+# Task 2.7.d: "ingest_upload" added -- `sources.config = {"uploads": [...]}`
+# (app/ingest/job_handlers.py's own header comment has the full shape and
+# reasoning for why a list of objects, not a bare list of strings like
+# `urls`'s own).
+VALID_JOB_TYPES: frozenset[str] = frozenset({"ingest_url", "ingest_crawl", "ingest_upload"})
 
 
 class CredentialEncryptionError(Exception):

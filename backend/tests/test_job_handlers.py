@@ -36,6 +36,7 @@ import sqlalchemy as sa
 from app import qdrant
 from app import worker as worker_module
 from app.ingest import safe_fetch as safe_fetch_module
+from app.ingest import upload_storage
 from app.ingest.models import Document, Source
 from app.ingest.repository import IngestRepository
 from app.tenancy.models import Tenant
@@ -48,10 +49,21 @@ from tests.conftest import (
     local_http_server,
     local_ipv6_http_server,
     patch_embed_dense,
+    read_docx_fixture,
+    read_markdown_fixture,
+    read_pdf_fixture,
+    read_text_fixture,
     require_test_qdrant,
     scripted_handler,
     set_valid_env,
 )
+
+# Task 2.7.d: reuses test_upload_adapter.py's own real corrupt-docx
+# construction instead of duplicating it -- matching this project's own
+# established cross-test-file-import precedent (test_env_consistency.py
+# importing from test_env_example.py; test_qdrant.py from test_qdrant_
+# collection.py; the duplication check after 2.7.a/b/c's own A2).
+from tests.test_upload_adapter import _docx_with_invalid_xml_content
 
 _LOOPBACK_HOST = "127.0.0.1"
 
@@ -65,13 +77,18 @@ _BODY_B = (
 )
 
 
-async def _prepare_env(monkeypatch, live_test_services) -> tuple:
+async def _prepare_env(monkeypatch, live_test_services, **extra_overrides) -> tuple:
     # Must be ONE set_valid_env() call carrying every override together:
     # it re-applies the full VALID_ENV dict plus only the overrides THIS
     # call names, so a second, separate call (e.g. just QDRANT_URL/
     # QDRANT_API_KEY) would silently reset DATABASE_URL back to VALID_
     # ENV's own fake placeholder -- confirmed by reading set_valid_env()
-    # directly before relying on it twice.
+    # directly before relying on it twice. `**extra_overrides` (Task
+    # 2.7.d): lets handle_ingest_upload()'s own tests add UPLOAD_STORAGE_
+    # PATH into the SAME single call, for the identical reason -- a
+    # second, separate set_valid_env() call just for that one variable
+    # would reset DATABASE_URL/QDRANT_URL/QDRANT_API_KEY right back to
+    # VALID_ENV's own fake placeholders.
     database_url, client, _unused_collection_name = live_test_services
     qdrant_url, qdrant_key = require_test_qdrant()
     set_valid_env(
@@ -80,6 +97,7 @@ async def _prepare_env(monkeypatch, live_test_services) -> tuple:
         DATABASE_URL=database_url,
         QDRANT_URL=qdrant_url,
         QDRANT_API_KEY=qdrant_key,
+        **extra_overrides,
     )
     qdrant.get_qdrant_client.cache_clear()
     monkeypatch.setattr(
@@ -577,3 +595,153 @@ async def test_heartbeat_is_written_mid_crawl_not_only_at_job_boundaries(
     # The real heartbeat file genuinely reflects this: fresh right now,
     # against the tightened staleness threshold.
     assert check_heartbeat_fresh(heartbeat_path) is True
+
+
+# --- Task 2.7.d: handle_ingest_upload() -----------------------------------
+# Same live-against-both-real-services methodology as handle_ingest_url()/
+# handle_ingest_crawl() above, run through the SAME real worker.py loop
+# (test (c)'s own requirement -- every test below uses run(), never calls
+# handle_ingest_upload() directly). No HTTP server anywhere in this
+# section -- uploads have no fetch step at all; upload_storage.save()
+# under a real tmp_path IS "the upload", matching test_upload_adapter.py's
+# own established pattern exactly. UPLOAD_STORAGE_PATH is folded into the
+# SAME _prepare_env() call as every other override (see that function's
+# own updated comment for why a second, separate set_valid_env() call
+# would silently undo DATABASE_URL/QDRANT_URL/QDRANT_API_KEY).
+
+_DOCX_MAX_PART_SIZE = 100 * 1024 * 1024
+_UPLOAD_MAX_SIZE = 50 * 1024 * 1024
+
+
+async def _seed_tenant_upload_source(storage_dir, uploads: list[tuple[bytes, str]]) -> dict:
+    tenant_id = uuid.uuid4()
+    async with db_session() as session:
+        session.add(Tenant(id=tenant_id, name="Upload Adapter Proof Tenant", status="active"))
+        await session.commit()
+
+    config_uploads = [
+        {
+            "upload_id": str(
+                upload_storage.save(data, storage_dir=storage_dir, max_size_bytes=_UPLOAD_MAX_SIZE)
+            ),
+            "original_filename": filename,
+        }
+        for data, filename in uploads
+    ]
+
+    async with db_session() as session:
+        source = Source(
+            tenant_id=tenant_id,
+            type="upload",
+            config={"uploads": config_uploads},
+            refresh_interval="daily",
+            status="active",
+        )
+        session.add(source)
+        await session.commit()
+        source_id = source.id
+
+    async with db_session() as session:
+        repo = IngestRepository(tenant_id=tenant_id, session=session)
+        job = await repo.enqueue(job_type="ingest_upload", source_id=source_id, payload={})
+        await session.commit()
+        job_id = job.id
+
+    return {"tenant_id": tenant_id, "source_id": source_id, "job_id": job_id}
+
+
+async def test_a_multi_format_upload_job_is_claimed_processed_and_succeeds_through_the_real_loop(
+    monkeypatch, live_test_services, tmp_path
+):
+    # (a)/(c): proves the FULL real path -- enqueue() -> the real worker
+    # run() loop (the SAME function 2.1.d/e's own tests exercise, not
+    # called in isolation here either) -> claim_next_job() -> dispatch ->
+    # handle_ingest_upload() -> ingest_upload() per entry (2.7.c) ->
+    # finish_ingest() (2.7's own duplication-check extraction) ->
+    # embed_and_upsert() -> mark_job_succeeded(). All four supported
+    # formats in ONE job, each a real fixture file, not a synthetic stub.
+    client = await _prepare_env(
+        monkeypatch, live_test_services, UPLOAD_STORAGE_PATH=str(tmp_path)
+    )
+
+    uploads = [
+        (read_pdf_fixture("multi_page.pdf"), "report.pdf"),
+        (read_docx_fixture("nested_headings.docx"), "report.docx"),
+        (read_text_fixture("sample.txt").encode("utf-8"), "notes.txt"),
+        (read_markdown_fixture("nested_headings.md").encode("utf-8"), "notes.md"),
+    ]
+    ids = await _seed_tenant_upload_source(tmp_path, uploads)
+
+    await asyncio.wait_for(run(asyncio.Event(), max_iterations=1), timeout=10)
+
+    job = await _fetch_job(ids["job_id"])
+    assert job.status == "succeeded"
+    assert job.attempts == 0
+    assert job.error is None
+
+    async with db_session() as session:
+        documents = (
+            await session.execute(
+                sa.select(Document).where(Document.source_id == ids["source_id"])
+            )
+        ).scalars().all()
+    assert {doc.file_name for doc in documents} == {
+        "report.pdf",
+        "report.docx",
+        "notes.txt",
+        "notes.md",
+    }
+    assert all(doc.url is None for doc in documents)  # keyed by file_name, never url
+    assert all(doc.status == "extracted" for doc in documents)
+
+    records, _ = await client.scroll(
+        collection_name=qdrant.COLLECTION_NAME,
+        scroll_filter=qdrant.tenant_filter(ids["tenant_id"]),
+        limit=20,
+    )
+    assert len(records) >= 4
+    assert all(record.payload["source_type"] == "upload" for record in records)
+    assert all(record.payload["source_url"] is None for record in records)
+    assert {record.payload["file_name"] for record in records} >= {
+        "report.pdf",
+        "report.docx",
+        "notes.txt",
+        "notes.md",
+    }
+
+
+async def test_a_mixed_outcome_upload_job_succeeds_with_each_item_independent(
+    monkeypatch, live_test_services, tmp_path
+):
+    # (b): the partial-failure/job-success policy, confirmed identical to
+    # handle_ingest_url()'s own -- a job whose upload list mixes a valid
+    # file with a corrupt one and an unrecognized-type one still succeeds
+    # overall (every entry got a recorded, definitive outcome -- not
+    # "every entry must succeed"); the valid file is really ingested, and
+    # neither the corrupt nor the unrecognized entry leaves a documents
+    # row at all.
+    await _prepare_env(monkeypatch, live_test_services, UPLOAD_STORAGE_PATH=str(tmp_path))
+
+    uploads = [
+        (read_pdf_fixture("multi_page.pdf"), "report.pdf"),
+        (_docx_with_invalid_xml_content(), "broken.docx"),
+        (b"\x89PNG\r\n\x1a\n" + b"some binary payload", "mystery.bin"),
+    ]
+    ids = await _seed_tenant_upload_source(tmp_path, uploads)
+
+    await asyncio.wait_for(run(asyncio.Event(), max_iterations=1), timeout=10)
+
+    job = await _fetch_job(ids["job_id"])
+    assert job.status == "succeeded"
+    assert job.attempts == 0
+    assert job.error is None
+
+    async with db_session() as session:
+        documents = (
+            await session.execute(
+                sa.select(Document).where(Document.source_id == ids["source_id"])
+            )
+        ).scalars().all()
+    # Exactly the one valid file persisted -- the corrupt and unrecognized
+    # entries left no row at all, not a row with some "failed" status.
+    assert {doc.file_name for doc in documents} == {"report.pdf"}
