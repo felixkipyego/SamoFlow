@@ -240,6 +240,30 @@ class Settings(BaseSettings):
     # memory use. Retuned later with real numbers, like every other
     # estimate in this project.
     docx_max_part_size_bytes: int = Field(default=100 * 1024 * 1024, gt=0)
+    # Task 2.8.b: the database-sync adapter's own per-query row cap
+    # (docs/SPEC.md §5.4: "maximum synced database rows... from the plan")
+    # -- deliberately NOT sourced from `plans.limits` yet, same
+    # already-established reason as `crawl_page_cap`/`upload_max_size_bytes`
+    # above (`plans.limits` is still an unstructured JSONB stub, Task 4.3's
+    # own job; see the matching Open marker). 10,000: generous for a real
+    # reporting-style sync query, while still bounding a single job's
+    # worst-case memory/transfer cost. Read ONCE by a real future caller
+    # (2.8.e's own job handler, not yet built) and passed to app/ingest/
+    # database_adapter.py's fetch_readonly_rows() as a plain parameter --
+    # that primitive itself stays Settings-free, matching run_crawl()'s/
+    # ingest_upload()'s own established precedent.
+    db_sync_row_cap: int = Field(default=10_000, gt=0)
+    # Task 2.8.b: the database-sync adapter's own per-query statement
+    # timeout (docs/SPEC.md §5.6: "statement timeouts... apply") --
+    # enforced via Postgres's own real `statement_timeout` mechanism
+    # (fetch_readonly_rows(), confirmed live), not an application-level
+    # asyncio.wait_for() race. NOT sourced from `plans.limits` -- this is
+    # a pure internal safety ceiling, same treatment as `docx_max_part_
+    # size_bytes` above (no corresponding per-tenant number in docs/
+    # SPEC.md). 30s: generous for a real synchronous reporting query
+    # against a tenant's own database, while still bounding a single
+    # job's worst-case time spent waiting on one query.
+    db_sync_statement_timeout_seconds: float = Field(default=30.0, gt=0)
 
     @field_validator("database_url")
     @classmethod
