@@ -107,7 +107,7 @@ services:
     # highest vX.Y.Z tag as of 2026-09-20, i.e. not a dev/preview/branch
     # tag) and then with `docker manifest inspect qdrant/qdrant:v1.19.1`
     # (returned a valid manifest list).
-    image: qdrant/qdrant:v1.19.1
+    image: qdrant/qdrant:v1.19.2
     environment:
       QDRANT__SERVICE__API_KEY: ${QDRANT_API_KEY:?QDRANT_API_KEY must be set in .env}
     volumes:
@@ -258,7 +258,7 @@ services:
     # there were one. Task 1.3.a2's guard test (backend/tests/
     # test_hardening_guard.py) is the actual drift protection, checking this
     # literal against qdrant's own literal above.
-    image: qdrant/qdrant:v1.19.1
+    image: qdrant/qdrant:v1.19.2
     profiles: ["test"]
     environment:
       # Test-only key, written literally (not from .env): this Qdrant is
