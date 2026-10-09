@@ -3,10 +3,14 @@
 #   docker build -t widgetplatform-backend:dev backend
 #
 # Base image pinned to an exact tag (never "latest", never a floating
-# "3.12" tag): python:3.12.14-slim-trixie is the latest 3.12 patch release
+# "3.12" tag): python:3.12.15-slim-trixie is the latest 3.12 patch release
 # published for Debian trixie (the current stable Debian release),
-# verified to exist with `docker manifest inspect python:3.12.14-slim-trixie`
-# before this file was written.
+# verified to exist with `docker manifest inspect python:3.12.15-slim-trixie`
+# and a real `docker pull` before this bump (out-of-band maintenance,
+# 2026-10-10 -- grype flagged CVE-2026-19445 (Critical) plus several High/
+# Medium CVEs against 3.12.14-slim-trixie, most fixed in 3.12.15+; see
+# PROJECT_SPEC.md's out-of-band maintenance entry for the full before/after
+# scan).
 #
 # Multi-stage: the builder stage has pip/hatchling and installs the package
 # into a venv; the final stage is the same pinned base image with only the
@@ -17,7 +21,7 @@
 # declared before the first FROM is visible to that first FROM only: the
 # second stage must re-declare it (empty, no default) to use the same
 # value -- otherwise it would silently fall back to being unset there.
-ARG PYTHON_IMAGE=python:3.12.14-slim-trixie
+ARG PYTHON_IMAGE=python:3.12.15-slim-trixie
 
 FROM ${PYTHON_IMAGE} AS builder
 
@@ -67,35 +71,6 @@ RUN groupadd --system --gid 10001 app \
 # ever bumped to a different Python minor version.
 RUN python3 -m pip uninstall --yes pip \
     && rm -rf "$(python3 -c 'import sysconfig; print(sysconfig.get_path("stdlib"))')/ensurepip"
-
-# Explicit, narrowly-scoped security-patch pins for exactly the five
-# Debian packages Grype flagged at High severity (not a blanket
-# "apt-get upgrade", which would pull in an unbounded, unreviewed set of
-# changes): CVE-2026-84782, CVE-2026-84784, CVE-2026-72897, CVE-2026-54873
-# (openssl/libssl3t64/openssl-provider-legacy) and CVE-2026-103111
-# (libpcre2-8-0). python:3.12.14-slim-trixie's own baked-in package
-# versions (...u2) have not yet picked up these trixie-security patches --
-# confirmed live, not assumed: `apt-get update && apt-cache policy` inside
-# this exact base image shows each ...u3 version already available from
-# deb.debian.org/debian-security, just not yet baked into this image
-# tag's own last build. Pinned to the exact patched version (not a bare
-# --only-upgrade with no version), so this step fails loudly if that
-# version ever disappears from the repo, rather than silently installing
-# whatever is newest. apt lists cleaned up in the same layer, the standard
-# Debian/Docker convention for not bloating the image with a stale index.
-#
-# Open marker owned by the Step 1.1.o manual maintenance routine
-# (PROJECT_SPEC.md, not a new TODO(<step>) here since this isn't a new
-# task): once a newer build of this same PYTHON_IMAGE tag bakes these
-# patches in natively, this entire block becomes redundant and must be
-# removed outright, not left in as a harmless no-op.
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends --only-upgrade \
-        openssl=3.5.7-1~deb13u3 \
-        libssl3t64=3.5.7-1~deb13u3 \
-        openssl-provider-legacy=3.5.7-1~deb13u3 \
-        libpcre2-8-0=10.46-1~deb13u3 \
-    && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 

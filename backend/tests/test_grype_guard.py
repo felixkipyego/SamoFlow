@@ -62,14 +62,25 @@ def _ignore_rules(lines):
     return rules
 
 
-def test_grype_yaml_has_exactly_one_fully_scoped_ignore_rule():
+def test_grype_yaml_has_at_most_one_fully_scoped_ignore_rule():
+    # At most one, not exactly one (out-of-band maintenance, 2026-10-10,
+    # PROJECT_SPEC.md): zero rules is a real, legitimate state -- it means
+    # no currently-investigated, currently-unfixable finding needs
+    # suppressing right now, not that this guard has gone unmaintained.
+    # The actual property this guard protects -- no silent, unreviewed
+    # SECOND (or more) rule ever gets added alongside an existing one, and
+    # whatever rule does exist is always fully scoped -- holds just as
+    # well at zero rules as it did at exactly one.
     lines = read_lines(GRYPE_YAML_PATH)
     rules = _ignore_rules(lines)
 
-    assert len(rules) == 1, (
-        f".grype.yaml must have exactly one ignore rule, found {len(rules)} "
+    assert len(rules) <= 1, (
+        f".grype.yaml must have at most one ignore rule, found {len(rules)} "
         "(an unreviewed second rule must not be added silently)"
     )
+
+    if not rules:
+        return
 
     fields = rules[0]
     missing = [f for f in _REQUIRED_FIELDS if f not in fields]

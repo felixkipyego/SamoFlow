@@ -1933,6 +1933,123 @@ step is sync-only, never an on-demand tenant query path.
 
   Verified: `make lint` clean. `make lock`: `asyncpg==0.32.0` added cleanly to both lockfiles, hash-pinned (confirmed via `git diff --stat`: only `asyncpg` itself added, zero new transitive packages — its own declared dependency, `async_timeout`, is conditional on `python_version < "3.11.0"` and resolves to nothing on this project's 3.12 pin, confirmed by reading the installed wheel's own METADATA). `make lock-check`: clean, exit 0, zero diff. New test file run standalone without a test database: **12 passed, 2 skipped** (the 2 live-service tests skip cleanly). Run standalone against the real test-db service, re-run 3 times for stability: **14 passed** every time, under 1s each run. Full `backend/tests` without a test database: **574 passed, 217 skipped** (up from 562 passed, 215 skipped — exactly 12 new offline passes and 2 new skips, 0 change to any other test). `make test-all` (both real services): **791 passed** (574 + 217, matching exactly), 0 skipped, both test services confirmed fully removed afterward (up from 777 at 2.7.f's own close-out — exactly the 14 new tests). `make hooks`: zero new markers of any kind introduced. `git status --short` named and cross-checked file by file: `backend/app/ingest/repository.py`, `backend/pyproject.toml`, `backend/requirements.lock`, `backend/requirements-dev.lock` (modified) plus `backend/app/ingest/database_adapter.py`, `backend/tests/test_database_adapter.py` (new) — exactly the expected six, no `.env`.
 
+### Out-of-band maintenance (2026-10-10)
+
+Not a numbered step — infrastructure/security maintenance triggered by a
+real CI failure on Step 2.8.a's own build, unrelated to `asyncpg` or any
+2.8.a code change. Recorded here, separately, so it doesn't get folded
+into or confused with Step 2.8's own task-by-task history.
+
+**Trigger**: CI's `image-scan` job (`.github/workflows/security.yml`)
+failed on the base image, `python:3.12.14-slim-trixie` — grype found
+`CVE-2026-19445` (Critical) plus several High/Medium CVEs, most fixed in
+`3.12.15` or later. Reproduced locally: `docker build -t widgetplatform-
+backend:scan backend` then `grype widgetplatform-backend:scan -o table
+--only-fixed` — 14 matches, `fixed-in` mostly pointing to 3.12.15+.
+
+**(1) Confirmed `python:3.12.15-slim-trixie` is a real, pullable tag**,
+not assumed from a changelog: the Docker Hub API (`GET /v2/repositories/
+library/python/tags?name=3.12.15-slim-trixie`) returned a real, active,
+multi-architecture manifest (amd64/arm64/others, pushed 2026-10-06), and
+a real `docker pull python:3.12.15-slim-trixie` succeeded. `backend/
+Dockerfile`'s `ARG PYTHON_IMAGE` default bumped from `3.12.14` to
+`3.12.15` (one line covers both the `builder` and runtime `FROM` lines,
+per this file's own existing one-ARG-for-both-stages design, Task 1.1.g)
+— the header comment's own "verified to exist" claim updated to match
+this task's own real verification, not left pointing at the old tag.
+
+**(2) Rebuilt and re-scanned, confirmed live, both named CVEs are fully
+gone — not merely re-scoped out of the fixed-image's own ignore rule.**
+`docker build -t widgetplatform-backend:scan backend` succeeded against
+the bumped image. `grype widgetplatform-backend:scan -o table` (fully
+unfiltered — every severity, every fix-status, no `.grype.yaml`) shows
+**zero** matches for `CVE-2026-19445` or `CVE-2026-82049` (the pre-
+existing, already-tracked marker's own CVE) — both are genuinely absent
+from grype's own vulnerability database for this new tag, not merely
+suppressed. **What's left, confirmed exactly, not approximated**: 7
+findings, ALL `python` (binary), ALL Medium or Negligible severity —
+`CVE-2025-12781`, `CVE-2026-6019`, `CVE-2025-15366`, `CVE-2025-15367`,
+`CVE-2026-3446`, `CVE-2026-12345`, `CVE-2026-3479` — every one's own
+`fixed-in` column names only 3.13.x/3.14.x/3.15.x releases, never a
+3.12.x one; none are fixable by any further 3.12.x patch bump, only by
+leaving the 3.12 line entirely (`requires-python = "==3.12.*"`,
+`backend/pyproject.toml` — out of scope for this maintenance). None
+reach CI's own `severity-cutoff: high` gate — `image-scan` goes green.
+(Local `grype` is v0.120.1 vs. CI's pinned v0.119.0 — close enough for
+this investigation; not re-pinned to match exactly, since this task is
+the base image, not the scanner.)
+
+**(3) The OS-package pins ARE now satisfied by the new base image —
+confirmed live, exactly as the pre-existing Open marker (recorded Task
+1.1.o, 2026-10-01) anticipated, and the whole pin block removed, per
+that marker's own explicit instruction.** `docker run --rm python:
+3.12.15-slim-trixie bash -c "dpkg -l openssl libssl3t64 openssl-
+provider-legacy libpcre2-8-0"` shows all four already at exactly
+`3.5.7-1~deb13u3`/`10.46-1~deb13u3` — the same versions the Dockerfile's
+own `apt-get --only-upgrade` block was force-installing. The whole `RUN
+apt-get update && apt-get install ... --only-upgrade ...` block (and its
+own now-inapplicable comment) removed outright from `backend/Dockerfile`
+— confirmed redundant, not merely optional, matching the marker's own
+"must be removed outright... not left in as a harmless no-op" wording.
+
+**A real, necessary consequence found while verifying (2), beyond the
+task's own literal file list, flagged here rather than silently done:**
+`.grype.yaml`'s own pre-existing ignore rule (`CVE-2026-82049`, scoped to
+`package.version: 3.12.14`) is now doubly dead — the CVE itself no
+longer appears in any scan of the new image at all (see (2) above), and
+even if it did, the rule's own `version: 3.12.14` field would no longer
+match the new `3.12.15` tag regardless. This is exactly the resolution
+the OTHER pre-existing Open marker (recorded Task 1.1.o.f, 2026-09-25)
+already anticipated ("must be actively re-evaluated and removed or
+updated then, not blindly kept or copied forward") — removed outright
+(`ignore: []`), not updated to a new version, since there is currently
+nothing left to suppress. **This forced one more, genuinely necessary
+file beyond the task's own expected list**: `test_grype_guard.py`'s own
+`test_grype_yaml_has_exactly_one_fully_scoped_ignore_rule` asserted
+`len(rules) == 1` — a hard requirement that was only ever true because
+exactly one real suppression happened to exist when that test was
+written (duplication check after 1.1.o.e/f/g), not a real semantic
+requirement that a rule must always exist. Relaxed to `<= 1` (renamed to
+`test_grype_yaml_has_at_most_one_fully_scoped_ignore_rule`), preserving
+the guard's own actual intent — no silent, unreviewed second rule, and
+whatever rule does exist must be fully scoped — which holds identically
+at zero rules. Flagged here plainly, not folded silently into the
+Dockerfile-only change the task expected.
+
+ASSUMPTION: none. UNCERTAIN: none. TODO: none new. Two pre-existing Open
+markers RESOLVED (below): the `...u3` OS-package-pin marker (Task 1.1.o,
+2026-10-01) and the `CVE-2026-82049` re-evaluation marker (Task 1.1.o.f,
+2026-09-25). This maintenance does not count toward Step 2.8's own task
+counter (n stays at 1, 2.8.a only) — it is not a numbered task.
+
+Verified: fresh `docker build -t widgetplatform-backend:scan backend`
+succeeded. `grype widgetplatform-backend:scan -o table --only-fixed`
+(with and without `.grype.yaml`): identical 7 Medium/Negligible findings
+either way (confirming the now-empty `.grype.yaml` changes nothing,
+exactly as intended), zero High/Critical with a fix available — CI's own
+`severity-cutoff: high`/`only-fixed: true` gate would pass. `make lint`
+clean. Full `backend/tests` without a test database: **574 passed, 217
+skipped** — byte-identical to Step 2.8.a's own baseline (this change is
+infrastructure-only; zero Python application logic touched). `make
+test-all` (both real services): first run showed `1 failed, 790 passed`
+— `test_safe_fetch.py::test_safe_fetch_against_a_real_public_https_url_
+succeeds_with_real_content`, a real outbound HTTPS call to `example.com`
+from inside the test process itself (nothing to do with the Docker image
+or this maintenance); re-ran standalone immediately after (1 passed in
+0.13s) and re-ran the FULL `make test-all` again fresh: **791 passed**,
+0 failed, 0 skipped — identical to 2.8.a's own baseline, confirming the
+first run's single failure was a transient external-network flake, not
+a real regression from this change. Both test services confirmed fully
+removed afterward on both runs. `make hooks`: 64 markers, unchanged
+count — zero new ASSUMPTION/UNCERTAIN/TODO markers introduced anywhere.
+`git status --short` named and cross-checked file by file: `backend/
+Dockerfile`, `.grype.yaml`, `backend/tests/test_grype_guard.py` (all
+modified, the last two a necessary consequence of (3) above, flagged
+rather than silently expanding scope) plus `PROJECT_SPEC.md` itself —
+exactly four, no `.env`. `asyncpg`/`backend/app/ingest/repository.py`/
+`backend/app/ingest/database_adapter.py` confirmed untouched, matching
+the task's own explicit instruction.
+
 ### Estimates to measure
 
 - The default limits in §9 and the budgets in §17 are starting points.
@@ -2394,9 +2511,9 @@ n = 1 — 2.8.a counted (see its decision log entry above; the count reset to a 
 - Owner Phase 7 (recorded at Task 1.3.a1, 2026-09-28): Qdrant traffic (api/worker to qdrant, and any operator access) is plain HTTP inside the Docker network, matching Postgres's own current state — TLS or a network policy for the internal network is a deployment concern, not addressed here.
 - Owner: next workflow touch or Phase 7 — `ci.yml`'s `test` job and `security.yml`'s `python-audit` job share ~15 byte-identical lines (checkout + setup-python + `make install`); the standard fix is a composite action (`.github/actions/...`), but `test_ci_guard.py`'s generic checks would then need a new pass over `.github/actions/*/action.yml` (they currently only scan `.github/workflows/*.yml`), making this medium effort, not small. Deferred per rule 11 until it's actually painful, not implemented as part of the 1.1.o.e/f/g duplication check.
 - Owner: to be scheduled, not tied to a task yet — image secret scanning (distinct from the vulnerability scanning `.github/workflows/security.yml` now does) is not covered by 1.1.o.
-- Owner: next Python base image bump (no task scheduled yet) — re-evaluate `.grype.yaml`'s `CVE-2026-82049` ignore rule: does a real 3.12.x/3.13.x (or whatever line is then current) patch release exist yet? Is `backend/Dockerfile`'s `PYTHON_IMAGE` still `python:3.12.14-*`? The rule is scoped to that exact package version and will simply stop matching (not silently stay wrong) once the version changes, but it must be actively re-evaluated and removed or updated then, not blindly kept or copied forward to a new version pin.
+- RESOLVED at the out-of-band maintenance entry, 2026-10-10: `backend/Dockerfile`'s `PYTHON_IMAGE` bumped to `python:3.12.15-slim-trixie`; a fresh, unfiltered `grype` scan confirmed `CVE-2026-82049` no longer appears at all (fixed upstream, not merely re-scoped) — the ignore rule removed outright (`.grype.yaml`'s `ignore: []`), not updated to a new version, since nothing remains to suppress. See that entry for the full verification.
 - **Owner Step 6.1 (recorded at Task 2.2.f, 2026-10-04): the temporary admin-key mechanism (`Settings.admin_api_key`, `app/admin/dependencies.py`'s `require_admin_key()`/`AdminKeyVerified`) must be replaced outright, not extended.** It is a deliberate stopgap with no concept of *which* admin acted — only that *a* valid key was presented — because no real admin-identity table exists yet. Step 6.1's real `platform_admin` role (the same login system tenant users use) replaces it entirely: do not add roles, scopes, per-admin identity, or any other feature on top of this mechanism between now and then. Every admin endpoint built against it in the meantime (2.2.g's `revoke_domain()` endpoint, and nothing else expected before Step 6.1) must be re-pointed at the real role when it lands, not left running on this key indefinitely.
-- Owner: the Step 1.1.o manual maintenance routine (recorded 2026-10-01, not a new task/subtask) — `backend/Dockerfile`'s explicit `apt-get --only-upgrade` pins for `openssl`/`libssl3t64`/`openssl-provider-legacy` (3.5.7-1~deb13u3) and `libpcre2-8-0` (10.46-1~deb13u3) are a workaround for `python:3.12.14-slim-trixie` not yet having picked up these `trixie-security` patches upstream. Whoever does the monthly review should check whether a newer build of this exact base image tag now includes these patches natively (`dpkg -l` inside a fresh pull, same check used to find this in the first place); if so, remove the whole pin block outright — it becomes redundant, not just optional, once the base image catches up, and leaving it in place risks a future version-pin mismatch once the base image ships something newer than `...u3`.
+- RESOLVED at the out-of-band maintenance entry, 2026-10-10: confirmed live (`dpkg -l` inside a fresh `python:3.12.15-slim-trixie` pull) that `openssl`/`libssl3t64`/`openssl-provider-legacy`/`libpcre2-8-0` are all already baked in at exactly the `...u3` versions the Dockerfile's own `apt-get --only-upgrade` block was force-installing — the whole block removed outright from `backend/Dockerfile`, exactly as this marker anticipated. See that entry for the full verification.
 - Owner: whichever of the three happens first (no task scheduled yet) — remove `.github/dependabot.yml`'s temporary `ignore: [{dependency-name: "postgres"}]` rule (docker-compose ecosystem entry) once any of: (1) dependabot-core fixes the YAML-anchor/alias file-updater bug (see the 1.1.o.g second follow-up decision), (2) the `x-postgres-image` anchor is manually removed from `deploy/docker-compose.yml`, or (3) the next scheduled review of Project constraints' manual image-tag routine. This is a silencing of a known Dependabot bug, not a decision to stop tracking Postgres updates.
 - Owner Phase 7: allowed Host header validation (currently any Host is accepted; decide with the proxy configuration). Not addressed by 1.1.i — that is app-level middleware, out of docker-compose.yml's scope.
 - Owner: to be scheduled — CORS and OPTIONS handling for the **dashboard and admin** endpoints specifically: decide with the widget and admin work (Phase 5 and 6); today OPTIONS returns 405. Narrowed at the Step 1.4 breakdown (2026-09-28): the public widget endpoints' own CORS/preflight handling is dynamic per site key, not a static allow-list, and moves into Task 1.4.g — this marker now covers only the dashboard/admin surface, which has a different, fixed-origin model.
