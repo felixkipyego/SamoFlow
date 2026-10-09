@@ -264,6 +264,39 @@ class IngestRepository:
         allowlisted_tables: dict | None = None,
         row_templates: dict | None = None,
     ) -> DbConnection:
+        """`credentials` is a fully opaque `dict[str, str]` as far as this
+        method is concerned (it only ever JSON-serializes and encrypts
+        whatever is passed) -- but Task 2.8.a decided its real shape for
+        the one engine Step 2.8 actually supports (Postgres; MySQL/MariaDB
+        explicitly deferred, see PROJECT_SPEC.md's Step 2.8 decision log).
+        This docstring is the ONE canonical place to look for that shape --
+        point future readers/callers here, don't re-derive it:
+
+        - `"database"`, `"user"`, `"password"` -- required, no defaults.
+        - `"port"` -- optional, defaults to `"5432"` if absent.
+        - `"sslmode"` -- optional, defaults to `"prefer"` if absent. One of
+          libpq's own standard vocabulary: `disable`/`allow`/`prefer`/
+          `require`/`verify-ca`/`verify-full` (confirmed live against the
+          installed `asyncpg`'s own `SSLMode.parse()`, which accepts these
+          exact strings).
+        - `"host"` is deliberately NOT a key in this dict -- `host` is
+          already this method's own separate parameter, stored unencrypted
+          on the `DbConnection` row itself (needed to run the SSRF-
+          equivalent guard, `app/ingest/database_adapter.py`'s
+          `validate_database_host()`, BEFORE any credential ever needs
+          decrypting). Storing it a second time inside the encrypted blob
+          too would create two sources of truth for the same fact, with no
+          mechanism to keep them in sync.
+        - No `"engine"` key: with exactly one supported engine, a field
+          with only one ever-written value would be a parameter this
+          step does not need (rule 11). Whoever adds a second engine later
+          must decide how it is distinguished then (a new column is the
+          likely shape, matching `host`'s own precedent of staying outside
+          the opaque blob) -- not decided speculatively here.
+
+        See `app/ingest/database_adapter.py`'s own `connect_safely()` for
+        the one real consumer of this shape today.
+        """
         # The encryption happens in Postgres itself (pgcrypto), computed
         # via a scalar SELECT before the row is constructed -- there is no
         # client-side implementation of pgp_sym_encrypt to call directly.

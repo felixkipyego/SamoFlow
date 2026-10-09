@@ -140,6 +140,20 @@ dependencies = [
     # pure-Python py3-none-any wheel -- no new transitive package, no
     # compiled-extension risk.
     "protego==0.7.0",
+    # Task 2.8.a. Version re-verified live on PyPI at this task's own
+    # build time (0.32.0 is current, confirmed via `pip index versions`).
+    # Postgres-only for Step 2.8 (MySQL/MariaDB explicitly deferred, see
+    # PROJECT_SPEC.md's Step 2.8 decision log) -- async-first, matching
+    # this project's own existing pattern (httpx/openai/fastembed are all
+    # async-capable; psycopg[binary] is the one exception, used only for
+    # this app's OWN internal database, a pre-2.3-SSRF-guard decision).
+    # Prebuilt wheels confirmed for cp312 on both macOS x86_64 and
+    # manylinux_2_28 x86_64 -- no C-compiler/build step needed in the
+    # Docker image. Its own declared dependency (async_timeout) is
+    # conditional on `python_version < "3.11.0"`, resolving to zero
+    # required dependencies on this project's 3.12 pin (confirmed by
+    # reading the installed wheel's own METADATA, not assumed).
+    "asyncpg==0.32.0",
 ]
 
 [project.optional-dependencies]
