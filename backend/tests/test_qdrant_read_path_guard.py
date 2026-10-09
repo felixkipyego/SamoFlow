@@ -33,7 +33,7 @@ from pathlib import Path
 
 from qdrant_client import AsyncQdrantClient
 
-from tests.conftest import BACKEND_DIR, called_name, iter_python_files
+from tests.conftest import BACKEND_DIR, called_name, iter_python_files, write_guard_tree_file
 
 APP_DIR = BACKEND_DIR / "app"
 
@@ -514,14 +514,8 @@ def test_read_path_guard_passes_against_the_real_backend_app():
 # --- Guard unit tests on synthetic trees (no Qdrant needed) -----------------
 
 
-def _write(tmp_path: Path, rel_path: str, content: str) -> None:
-    full = tmp_path / rel_path
-    full.parent.mkdir(parents=True, exist_ok=True)
-    full.write_text(content)
-
-
 def test_fails_on_qdrant_client_import_outside_the_allowlist(tmp_path):
-    _write(tmp_path, "app/other.py", "import qdrant_client\n")
+    write_guard_tree_file(tmp_path, "app/other.py", "import qdrant_client\n")
     violations = scan_read_path_guard(tmp_path)
     assert len(violations) == 1
     assert "app/other.py" in violations[0]
@@ -529,7 +523,7 @@ def test_fails_on_qdrant_client_import_outside_the_allowlist(tmp_path):
 
 
 def test_fails_on_get_qdrant_client_import_outside_the_allowlist(tmp_path):
-    _write(tmp_path, "app/other.py", "from app.qdrant import get_qdrant_client\n")
+    write_guard_tree_file(tmp_path, "app/other.py", "from app.qdrant import get_qdrant_client\n")
     violations = scan_read_path_guard(tmp_path)
     assert len(violations) == 1
     assert "app/other.py" in violations[0]
@@ -545,7 +539,7 @@ def test_fails_on_get_qdrant_client_import_outside_the_allowlist(tmp_path):
 
 
 def test_fails_on_plain_import_of_app_qdrant(tmp_path):
-    _write(tmp_path, "app/other.py", "import app.qdrant\n")
+    write_guard_tree_file(tmp_path, "app/other.py", "import app.qdrant\n")
     violations = scan_read_path_guard(tmp_path)
     assert len(violations) == 1
     assert "app/other.py" in violations[0]
@@ -553,7 +547,7 @@ def test_fails_on_plain_import_of_app_qdrant(tmp_path):
 
 
 def test_fails_on_from_app_import_qdrant(tmp_path):
-    _write(tmp_path, "app/other.py", "from app import qdrant\n")
+    write_guard_tree_file(tmp_path, "app/other.py", "from app import qdrant\n")
     violations = scan_read_path_guard(tmp_path)
     assert len(violations) == 1
     assert "app/other.py" in violations[0]
@@ -563,7 +557,7 @@ def test_fails_on_from_app_import_qdrant(tmp_path):
 def test_fails_on_from_app_qdrant_import_any_name(tmp_path):
     # Proves the check is no longer name-specific: ensure_collection (not
     # get_qdrant_client/build_qdrant_client) still trips it.
-    _write(tmp_path, "app/other.py", "from app.qdrant import ensure_collection\n")
+    write_guard_tree_file(tmp_path, "app/other.py", "from app.qdrant import ensure_collection\n")
     violations = scan_read_path_guard(tmp_path)
     assert len(violations) == 1
     assert "app/other.py" in violations[0]
@@ -573,7 +567,7 @@ def test_fails_on_from_app_qdrant_import_any_name(tmp_path):
 def test_fails_on_single_dot_relative_import_of_qdrant(tmp_path):
     # "from . import qdrant" inside a file whose own package is "app"
     # (i.e. any top-level app/ file) resolves to app.qdrant.
-    _write(tmp_path, "app/other.py", "from . import qdrant\n")
+    write_guard_tree_file(tmp_path, "app/other.py", "from . import qdrant\n")
     violations = scan_read_path_guard(tmp_path)
     assert len(violations) == 1
     assert "app/other.py" in violations[0]
@@ -581,7 +575,7 @@ def test_fails_on_single_dot_relative_import_of_qdrant(tmp_path):
 
 
 def test_fails_on_single_dot_relative_from_qdrant_import(tmp_path):
-    _write(tmp_path, "app/other.py", "from .qdrant import get_qdrant_client\n")
+    write_guard_tree_file(tmp_path, "app/other.py", "from .qdrant import get_qdrant_client\n")
     violations = scan_read_path_guard(tmp_path)
     assert len(violations) == 1
     assert "app/other.py" in violations[0]
@@ -591,7 +585,9 @@ def test_fails_on_single_dot_relative_from_qdrant_import(tmp_path):
 def test_fails_on_double_dot_relative_import_from_a_subpackage(tmp_path):
     # A file one level deeper (app/util/helper.py) reaching app.qdrant via
     # two dots -- proves the level>1 walk-up resolution, not just level 1.
-    _write(tmp_path, "app/util/helper.py", "from ..qdrant import get_qdrant_client\n")
+    write_guard_tree_file(
+        tmp_path, "app/util/helper.py", "from ..qdrant import get_qdrant_client\n"
+    )
     violations = scan_read_path_guard(tmp_path)
     assert len(violations) == 1
     assert "app/util/helper.py" in violations[0]
@@ -605,12 +601,12 @@ def test_passes_for_every_app_qdrant_import_form_inside_the_allowlisted_files(tm
             "from app import qdrant\n",
             "from app.qdrant import ensure_collection\n",
         ):
-            _write(tmp_path, rel_path, content)
+            write_guard_tree_file(tmp_path, rel_path, content)
             assert scan_read_path_guard(tmp_path) == [], (rel_path, content)
 
 
 def test_passes_for_imports_of_other_app_modules_not_app_qdrant(tmp_path):
-    _write(
+    write_guard_tree_file(
         tmp_path,
         "app/other.py",
         "from app.retrieval.service import retrieve\nfrom app.config import get_settings\n",
@@ -619,7 +615,7 @@ def test_passes_for_imports_of_other_app_modules_not_app_qdrant(tmp_path):
 
 
 def test_fails_on_a_client_access_file_outside_read_allowlist_calling_query_points(tmp_path):
-    _write(
+    write_guard_tree_file(
         tmp_path,
         "app/qdrant.py",
         "import qdrant_client\n\n\ndef f(client):\n    return client.query_points(1)\n",
@@ -633,7 +629,7 @@ def test_fails_on_a_client_access_file_outside_read_allowlist_calling_query_poin
 def test_fails_on_a_different_client_access_file_calling_scroll(tmp_path):
     # A distinct file/method from the query_points case above, proving rule
     # (b) is checked per call site, not just once.
-    _write(
+    write_guard_tree_file(
         tmp_path,
         "app/qdrant.py",
         "import qdrant_client\n\n\ndef f(client):\n    return client.scroll(1)\n",
@@ -651,7 +647,7 @@ def test_fails_when_the_client_access_allowlisted_file_itself_calls_a_read_metho
     # app.retrieval.service's own retrieve() function (see the module
     # header comment) -- to prove the attribute-call shape is still caught
     # correctly even for that exact name.
-    _write(
+    write_guard_tree_file(
         tmp_path,
         "app/qdrant.py",
         "import qdrant_client\n\n\ndef f(client):\n    return client.retrieve(1)\n",
@@ -663,7 +659,7 @@ def test_fails_when_the_client_access_allowlisted_file_itself_calls_a_read_metho
 
 
 def test_fails_on_the_raw_http_transport_surface(tmp_path):
-    _write(
+    write_guard_tree_file(
         tmp_path,
         "app/qdrant.py",
         "import qdrant_client\n\n\ndef f(client):\n    return client.http.points_api\n",
@@ -675,7 +671,7 @@ def test_fails_on_the_raw_http_transport_surface(tmp_path):
 
 
 def test_fails_on_the_raw_inner_client_surface(tmp_path):
-    _write(
+    write_guard_tree_file(
         tmp_path,
         "app/qdrant.py",
         "import qdrant_client\n\n\ndef f(client):\n    return client._client\n",
@@ -687,7 +683,7 @@ def test_fails_on_the_raw_inner_client_surface(tmp_path):
 
 
 def test_passes_for_the_read_allowlisted_file_calling_query_points(tmp_path):
-    _write(
+    write_guard_tree_file(
         tmp_path,
         "app/retrieval/service.py",
         "import qdrant_client\n\n\ndef f(client):\n    return client.query_points(1)\n",
@@ -696,7 +692,7 @@ def test_passes_for_the_read_allowlisted_file_calling_query_points(tmp_path):
 
 
 def test_passes_for_qdrant_py_calling_config_methods(tmp_path):
-    _write(
+    write_guard_tree_file(
         tmp_path,
         "app/qdrant.py",
         "import qdrant_client\n\n\n"
@@ -708,7 +704,7 @@ def test_passes_for_qdrant_py_calling_config_methods(tmp_path):
 
 
 def test_passes_for_a_bare_name_call_to_retrieve_with_no_client_access(tmp_path):
-    _write(
+    write_guard_tree_file(
         tmp_path,
         "app/chat/routes.py",
         "from app.retrieval.service import retrieve\n\n\ndef f():\n    return retrieve(1)\n",
@@ -717,7 +713,7 @@ def test_passes_for_a_bare_name_call_to_retrieve_with_no_client_access(tmp_path)
 
 
 def test_passes_for_an_attribute_call_to_service_retrieve_with_no_client_access(tmp_path):
-    _write(
+    write_guard_tree_file(
         tmp_path,
         "app/chat/routes.py",
         "from app.retrieval import service\n\n\ndef f():\n    return service.retrieve(1)\n",
@@ -734,7 +730,7 @@ def test_passes_for_an_unrelated_scroll_method_with_no_client_access(tmp_path):
     # is a deliberate, accepted false-negative surface: rule (a) already
     # guarantees this file cannot hold a real Qdrant client, so there is
     # nothing here for rule (b) to protect against.
-    _write(
+    write_guard_tree_file(
         tmp_path,
         "app/chat/routes.py",
         "class Paginator:\n    def scroll(self, n):\n        return n\n\n\n"
@@ -749,7 +745,7 @@ def test_passes_for_an_unrelated_scroll_method_with_no_client_access(tmp_path):
 
 
 def test_fails_on_create_snapshot_even_in_the_client_access_allowlisted_file(tmp_path):
-    _write(
+    write_guard_tree_file(
         tmp_path,
         "app/qdrant.py",
         "import qdrant_client\n\n\n"
@@ -763,7 +759,7 @@ def test_fails_on_create_snapshot_even_in_the_client_access_allowlisted_file(tmp
 
 
 def test_fails_on_delete_collection_even_in_the_client_access_allowlisted_file(tmp_path):
-    _write(
+    write_guard_tree_file(
         tmp_path,
         "app/qdrant.py",
         "import qdrant_client\n\n\n"
@@ -777,7 +773,7 @@ def test_fails_on_delete_collection_even_in_the_client_access_allowlisted_file(t
 
 
 def test_passes_for_get_collection_collection_exists_and_list_snapshots(tmp_path):
-    _write(
+    write_guard_tree_file(
         tmp_path,
         "app/qdrant.py",
         "import qdrant_client\n\n\n"

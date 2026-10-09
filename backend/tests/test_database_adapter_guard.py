@@ -31,7 +31,7 @@
 # checks for qdrant_client itself.
 import ast
 
-from tests.conftest import BACKEND_DIR, called_name, iter_python_files
+from tests.conftest import BACKEND_DIR, called_name, iter_python_files, write_guard_tree_file
 
 APP_DIR = BACKEND_DIR / "app"
 
@@ -111,14 +111,8 @@ def test_asyncpg_guard_passes_against_the_real_backend_app():
 # --- Guard unit tests on synthetic trees (no real database needed) -------
 
 
-def _write(tmp_path, rel_path: str, content: str) -> None:
-    full = tmp_path / rel_path
-    full.parent.mkdir(parents=True, exist_ok=True)
-    full.write_text(content)
-
-
 def test_fails_on_plain_import_of_asyncpg_outside_the_allowlist(tmp_path):
-    _write(tmp_path, "app/other.py", "import asyncpg\n")
+    write_guard_tree_file(tmp_path, "app/other.py", "import asyncpg\n")
     violations = scan_asyncpg_guard(tmp_path)
     assert len(violations) == 1
     assert "app/other.py" in violations[0]
@@ -126,7 +120,7 @@ def test_fails_on_plain_import_of_asyncpg_outside_the_allowlist(tmp_path):
 
 
 def test_fails_on_from_asyncpg_import_outside_the_allowlist(tmp_path):
-    _write(tmp_path, "app/other.py", "from asyncpg import connect\n")
+    write_guard_tree_file(tmp_path, "app/other.py", "from asyncpg import connect\n")
     violations = scan_asyncpg_guard(tmp_path)
     assert len(violations) == 1
     assert "app/other.py" in violations[0]
@@ -134,7 +128,7 @@ def test_fails_on_from_asyncpg_import_outside_the_allowlist(tmp_path):
 
 
 def test_fails_on_a_dynamic_import_of_asyncpg(tmp_path):
-    _write(
+    write_guard_tree_file(
         tmp_path,
         "app/other.py",
         "import importlib\n\n\ndef f():\n    return importlib.import_module('asyncpg')\n",
@@ -147,12 +141,12 @@ def test_fails_on_a_dynamic_import_of_asyncpg(tmp_path):
 
 def test_passes_for_the_allowlisted_file_importing_asyncpg(tmp_path):
     for content in ("import asyncpg\n", "from asyncpg import connect\n"):
-        _write(tmp_path, "app/ingest/database_adapter.py", content)
+        write_guard_tree_file(tmp_path, "app/ingest/database_adapter.py", content)
         assert scan_asyncpg_guard(tmp_path) == [], content
 
 
 def test_passes_for_imports_of_other_app_modules_not_asyncpg(tmp_path):
-    _write(
+    write_guard_tree_file(
         tmp_path,
         "app/other.py",
         "from app.config import get_settings\nimport app.ingest.database_adapter\n",

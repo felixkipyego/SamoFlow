@@ -156,6 +156,21 @@ def read_lines(path: Path) -> list[str]:
     return path.read_text().splitlines()
 
 
+def write_guard_tree_file(tmp_path: Path, rel_path: str, content: str) -> None:
+    # Duplication check after 2.8.a/b/c: this exact 3-line body existed as
+    # three separate, byte-identical local copies -- test_qdrant_read_
+    # path_guard.py (1.3.e, the original), test_audit_log_write_path_
+    # guard.py (a second, previously-unflagged occurrence), and test_
+    # database_adapter_guard.py (2.8.b, the confirmed 3rd) -- every
+    # AST-guard test's own synthetic-tree unit tests write one or more
+    # small .py files into a tmp_path tree before scanning it, and all
+    # three needed the identical "create parent dirs, write text" two-
+    # liner to do it. One shared helper instead of three copies.
+    full = tmp_path / rel_path
+    full.parent.mkdir(parents=True, exist_ok=True)
+    full.write_text(content)
+
+
 def iter_python_files(*roots: Path):
     # Shared by test_config_guard.py and test_qdrant_read_path_guard.py
     # (duplication check after 1.3.c/d/e): both walked their own scan

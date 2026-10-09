@@ -47,7 +47,13 @@ import ast
 from pathlib import Path
 
 from app.ingest.models import AuditLog
-from tests.conftest import BACKEND_DIR, called_name, check_call_allowlist, iter_python_files
+from tests.conftest import (
+    BACKEND_DIR,
+    called_name,
+    check_call_allowlist,
+    iter_python_files,
+    write_guard_tree_file,
+)
 
 APP_DIR = BACKEND_DIR / "app"
 REPOSITORY_FILE = APP_DIR / "ingest" / "repository.py"
@@ -98,14 +104,8 @@ def test_exactly_one_legitimate_audit_log_construction_site_exists_today():
 # instead of maintaining a second, near-duplicate local scan function.
 
 
-def _write(tmp_path: Path, rel_path: str, content: str) -> None:
-    full = tmp_path / rel_path
-    full.parent.mkdir(parents=True, exist_ok=True)
-    full.write_text(content)
-
-
 def test_fails_on_an_audit_log_construction_outside_the_allowlist(tmp_path):
-    _write(
+    write_guard_tree_file(
         tmp_path,
         "app/other.py",
         "from app.ingest.models import AuditLog\n\n\n"
@@ -121,7 +121,7 @@ def test_fails_on_an_audit_log_construction_outside_the_allowlist(tmp_path):
 
 
 def test_passes_for_an_audit_log_construction_inside_the_allowlisted_file(tmp_path):
-    _write(
+    write_guard_tree_file(
         tmp_path,
         "app/ingest/repository.py",
         "from app.ingest.models import AuditLog\n\n\n"
@@ -143,7 +143,7 @@ def test_fails_on_an_audit_log_construction_via_keyword_unpacking(tmp_path):
     # keyword, or **unpacked) cannot change whether this guard sees the
     # call at all. This test proves that directly rather than leaving it
     # as an inference from reading called_name()'s own implementation.
-    _write(
+    write_guard_tree_file(
         tmp_path,
         "app/other.py",
         "from app.ingest.models import AuditLog\n\n\n"
@@ -169,7 +169,7 @@ def test_fails_on_an_audit_log_construction_via_an_import_alias_evading_detectio
     # future change to called_name()/check_call_allowlist() that silently
     # starts resolving aliases would be caught here as a behavior change,
     # not just contradict a comment nobody re-reads.
-    _write(
+    write_guard_tree_file(
         tmp_path,
         "app/other.py",
         "from app.ingest.models import AuditLog as AL\n\n\n"

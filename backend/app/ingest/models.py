@@ -163,7 +163,11 @@ class DbConnection(Base):
     host: Mapped[str] = mapped_column(String, nullable=False)
     # Not the sensitive part -- which tables/columns a tenant has
     # allowlisted, and the row-to-text template (docs/SPEC.md §5.6).
-    # Unstructured JSONB, same precedent as sources.config above.
+    # Shape decided at Task 2.8.c, not here: see app/ingest/row_templates.py's
+    # own header comment for the canonical reference (both columns' real
+    # JSONB shape, and why) -- matching create_db_connection()'s own
+    # docstring precedent for `encrypted_credentials` below, point future
+    # readers at one place, don't restate it a third time here.
     allowlisted_tables: Mapped[dict] = mapped_column(
         JSONB, nullable=False, server_default=text("'{}'::jsonb")
     )

@@ -132,7 +132,7 @@
 # Confirmed live: a transaction with a 500ms timeout against `SELECT
 # pg_sleep(5)` raised QueryCanceledError after ~0.5s, not ~5s. The row cap
 # is enforced via a real server-side CURSOR (`conn.cursor(query)` +
-# `cursor.fetch(row_cap)`) -- confirmed live against a real 1000-row
+# `cursor.fetch(row_cap)`) -- confirmed live against a real 50-row
 # table that `cursor.fetch(5)` returns exactly 5 rows; by this mechanism's
 # own documented semantics, the server never sends more than the
 # requested count back to the client in the first place, so there is
@@ -308,6 +308,13 @@ async def ensure_read_only(conn: asyncpg.Connection) -> None:
     raises a PostgresError.
     """
     probe_table = f"_samoflow_write_probe_{uuid.uuid4().hex}"
+    # Manual start()/rollback(), not `async with conn.transaction():` (the
+    # style fetch_readonly_rows() uses below) -- deliberately different,
+    # not an inconsistency to "clean up": a bare `async with` block COMMITS
+    # on success and only rolls back on an exception, but this probe must
+    # roll back UNCONDITIONALLY, success or failure alike, since a
+    # successful probe is exactly the case where something was genuinely
+    # written and must never be allowed to persist.
     transaction = conn.transaction()
     await transaction.start()
     try:

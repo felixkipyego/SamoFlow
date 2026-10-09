@@ -248,16 +248,26 @@ async def test_connect_safely_never_attempts_a_connection_for_an_unsafe_host_eve
 # --- the one-query guard. All live against the real test-db service. ----
 
 
-async def _admin_connection() -> asyncpg.Connection:
-    url = require_test_database()
-    parts = urlsplit(url)
+async def _connect(user: str, password: str) -> asyncpg.Connection:
+    # Duplication check after 2.8.a/b/c: _admin_connection() and
+    # _connect_as() used to each parse require_test_database()'s own URL
+    # and call asyncpg.connect() with identical host/port/database,
+    # differing only in which user/password they passed -- this is that
+    # one shared shape, parameterized by the one thing that actually
+    # varies between them.
+    parts = urlsplit(require_test_database())
     return await asyncpg.connect(
         host=parts.hostname,
         port=parts.port,
-        user=parts.username,
-        password=parts.password,
+        user=user,
+        password=password,
         database=parts.path.lstrip("/"),
     )
+
+
+async def _admin_connection() -> asyncpg.Connection:
+    parts = urlsplit(require_test_database())
+    return await _connect(parts.username, parts.password)
 
 
 @pytest.fixture
@@ -303,15 +313,7 @@ async def readonly_and_writable_roles():
 
 
 async def _connect_as(role: dict) -> asyncpg.Connection:
-    url = require_test_database()
-    parts = urlsplit(url)
-    return await asyncpg.connect(
-        host=parts.hostname,
-        port=parts.port,
-        user=role["user"],
-        password=role["password"],
-        database=parts.path.lstrip("/"),
-    )
+    return await _connect(role["user"], role["password"])
 
 
 # --- (1) read-only enforcement -------------------------------------------
