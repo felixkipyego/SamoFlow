@@ -530,6 +530,23 @@ async def handle_ingest_db(job: Job) -> None:
                     timeout_seconds=settings.db_sync_statement_timeout_seconds,
                 )
                 for row in rows:
+                    # The same f"{table}:{pk_value}" shape derive_row_
+                    # identity() (row_templates.py) uses for the REAL
+                    # identity, recomputed here defensively for LOGGING
+                    # only (not by calling that function again) -- matching
+                    # handle_ingest_url()'s/handle_ingest_upload()'s own
+                    # convention of logging the thing that actually varies
+                    # per iteration (the url; the upload_id/filename pair),
+                    # so a many-row table doesn't produce identical log
+                    # lines for every row. Deliberately tolerant of a
+                    # missing/NULL primary key -- precisely the case
+                    # MissingPrimaryKeyError itself reports below -- so the
+                    # log line still shows a distinguishing value (e.g.
+                    # "products:None") instead of raising a second time or
+                    # silently falling back to nothing.
+                    pk_column = template_config["primary_key"]
+                    pk_value = row[pk_column] if pk_column in row else None
+                    row_identity_for_log = f"{table}:{pk_value}"
                     try:
                         result = await ingest_db_row(
                             session,
@@ -547,9 +564,9 @@ async def handle_ingest_db(job: Job) -> None:
                         TemplateRenderError,
                     ) as exc:
                         logger.error(
-                            "handle_ingest_db: job %s table %s row failed to render: %s",
+                            "handle_ingest_db: job %s row %s failed to render: %s",
                             job.id,
-                            table,
+                            row_identity_for_log,
                             exc,
                         )
                         continue
@@ -559,9 +576,9 @@ async def handle_ingest_db(job: Job) -> None:
                     # comment above).
                     await session.commit()
                     logger.info(
-                        "handle_ingest_db: job %s table %s -> %s",
+                        "handle_ingest_db: job %s row %s -> %s",
                         job.id,
-                        table,
+                        row_identity_for_log,
                         result.status,
                     )
         finally:

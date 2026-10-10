@@ -256,8 +256,12 @@
 # job" -- actually neither 2.8.c nor 2.8.d built it; this is where it
 # lands) -- build_table_select_query(), TableNotAllowlistedError,
 # InvalidIdentifierError. Composes is_table_allowlisted() (2.8.c, the
-# FOURTH defense layer that module's own header comment names) with a
-# strict allow-list identifier check (schema/table/column names must
+# FOURTH defense layer that module's own header comment named at the time
+# -- now the FIFTH, since the strict allow-list identifier check directly
+# below is itself a new, independent layer this same task adds; row_
+# templates.py's own header comment was updated at the duplication check
+# after 2.8.d/e/f to count both, not left to read as a contradiction) with
+# a strict allow-list identifier check (schema/table/column names must
 # match `^[A-Za-z_][A-Za-z0-9_]*$`) before ever interpolating any
 # configured name into a SQL string -- asyncpg has no bind-parameter
 # mechanism for identifiers (only for values), so this is the standard,
@@ -505,15 +509,16 @@ def build_table_select_query(
     `SELECT *`.
 
     Calls is_table_allowlisted() FIRST, before ever touching identifier
-    construction -- the FOURTH independent defense layer row_templates.py's
-    own header comment describes (alongside fetch_readonly_rows()'s own
-    textual one-query guard, ensure_read_only()'s write probe, and the
-    real `transaction(readonly=True)` wrapping), raising
-    TableNotAllowlistedError if `table` is not currently allowlisted.
-    Every identifier (both halves of the schema-qualified `table`, and
-    every column name) is then validated via the strict allow-list regex
-    and double-quoted, raising InvalidIdentifierError for anything that
-    does not look like a plain, ordinary SQL identifier.
+    construction -- one of FIVE independent defense layers this module and
+    row_templates.py together provide (alongside fetch_readonly_rows()'s
+    own textual one-query guard, ensure_read_only()'s write probe, and the
+    real `transaction(readonly=True)` wrapping -- the fifth being the
+    identifier allow-list check immediately below, in this same function),
+    raising TableNotAllowlistedError if `table` is not currently
+    allowlisted. Every identifier (both halves of the schema-qualified
+    `table`, and every column name) is then validated via the strict
+    allow-list regex and double-quoted, raising InvalidIdentifierError for
+    anything that does not look like a plain, ordinary SQL identifier.
     """
     if not is_table_allowlisted(allowlisted_tables, table):
         raise TableNotAllowlistedError(
@@ -574,15 +579,20 @@ class DbRowIngestResult:
     separate" precedent, re-confirmed here, not reused directly) -- but
     deliberately only TWO states, not four: `"ingested"`/`"unchanged"`,
     matching finish_ingest()'s own exact, non-nullable return contract.
-    Neither `"skipped"` nor `"failed"` applies here -- by the time
-    ingest_db_row() is ever called, the row has already been fetched
-    through 2.8.b's own full defense-in-depth chain and already rendered
-    through 2.8.c's own renderer; a genuine problem at either of those
-    earlier stages (a bad query, a stale template) is a configuration
-    problem that propagates UNCAUGHT from this function (matching row_
-    templates.py's own "surface loudly" philosophy for MissingColumnError/
-    MissingPrimaryKeyError/TemplateRenderError), not a per-row outcome
-    this result type needs to represent.
+    Neither `"skipped"` nor `"failed"` applies here. Clarified at the
+    duplication check after 2.8.d/e/f (the original wording below read as
+    though rendering happens before this function is ever called, which
+    is not what the code does -- ingest_db_row() calls row_templates.py's
+    own render_row_to_text()/derive_row_identity() ITSELF, internally, as
+    its own first two steps): by the time ingest_db_row() is called, the
+    row has already been fetched through 2.8.b's own full defense-in-depth
+    chain -- but rendering/identity-derivation happens INSIDE this very
+    function, via row_templates.py's renderer. A genuine problem there (a
+    bad query exposing a stale table shape, a stale template) is a
+    configuration problem that propagates UNCAUGHT from this function
+    (matching row_templates.py's own "surface loudly" philosophy for
+    MissingColumnError/MissingPrimaryKeyError/TemplateRenderError), not a
+    per-row outcome this result type needs to represent.
     """
 
     status: str

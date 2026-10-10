@@ -58,27 +58,38 @@
 # ambiguity -- keying `row_templates` any other way would silently
 # reintroduce it one dict over. `{"<schema.table>": {"columns": [...],
 # "template": "..."}}` -- `columns` is the list of column names this
-# table's own template actually uses (also the list a future query-builder,
-# 2.8.d, would SELECT, never `SELECT *`, a real `COLUMNS <<` least-
-# privilege property this step's own shape already enables, even though
-# building that query is not this step's job); `template` is a plain
-# `str.format()`-style string, deliberately NOT a templating DSL (rule 11
-# -- no evidence a real tenant row-to-text need is more complex than
-# substitution).
+# table's own template actually uses (also the list a future query-builder
+# -- confirmed, at the duplication check after 2.8.d/e/f, to have actually
+# been built at 2.8.e, NOT 2.8.d as this paragraph originally predicted
+# here; see that same check's own note on the paragraph below -- would
+# SELECT, never `SELECT *`, a real `COLUMNS <<` least-privilege property
+# this step's own shape already enables, even though building that query
+# is not this step's job); `template` is a plain `str.format()`-style
+# string, deliberately NOT a templating DSL (rule 11 -- no evidence a real
+# tenant row-to-text need is more complex than substitution).
 #
-# Composition with 2.8.b, stated plainly (not yet wired, 2.8.d's own job):
-# a real future query-builder must call is_table_allowlisted() BEFORE ever
-# constructing a SELECT string, as a FOURTH independent layer alongside
-# 2.8.b's own three (the one-query textual guard, ensure_read_only()'s own
-# write probe, and the real `transaction(readonly=True)` wrapping) --
+# Composition with 2.8.b, stated plainly (not yet wired -- originally
+# predicted here as "2.8.d's own job," confirmed WRONG at the duplication
+# check after 2.8.d/e/f, 2026-10-16: neither 2.8.c nor 2.8.d ever built a
+# query-builder; it was actually built at 2.8.e, build_table_select_query()
+# in database_adapter.py -- left here, corrected, rather than silently
+# fixed, matching the extract_docx.py/2.7.c precedent for a stale forward-
+# reference in a completed task's own file; see PROJECT_SPEC.md's own
+# tracked Open marker for this): a real future query-builder must call
+# is_table_allowlisted() BEFORE ever constructing a SELECT string, as a
+# FIFTH independent layer (FOURTH when this paragraph was first written,
+# at 2.8.c -- 2.8.e added a fifth, the strict SQL-identifier allow-list
+# check build_table_select_query() also performs, alongside 2.8.b's own
+# three (the one-query textual guard, ensure_read_only()'s own write
+# probe, and the real `transaction(readonly=True)` wrapping) --
 # table-level authorization is a genuinely different property from any of
 # those (none of them know or care WHICH table a query touches, only that
 # it is a single, real SELECT against a connection that cannot write).
 # fetch_readonly_rows() (2.8.b) takes an already-fully-formed query string
 # and has no idea what this module's own allowlist even is; the CALLER
-# (2.8.d) is responsible for building a query this allowlist, the textual
-# guard, AND the actual database's own real grants would all separately
-# accept.
+# (2.8.e, not 2.8.d) is responsible for building a query this allowlist,
+# the textual guard, AND the actual database's own real grants would all
+# separately accept.
 #
 # Task 2.8.d: each table's own config gains a THIRD field, `"primary_key"`
 # -- a plain column name (a string, matching `columns`'s own "just names,

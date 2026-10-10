@@ -119,23 +119,57 @@ async def _prepare_env(monkeypatch, live_test_services, **extra_overrides) -> tu
     return client
 
 
-async def _seed_tenant_source_and_verified_domain(urls: list[str]) -> dict:
+# Duplication check after 2.8.d/e/f: this file's own four `_seed_tenant_*`
+# helpers (urls/2.6.d, crawl/2.6.e, upload/2.7.d, db/2.8.e) each repeated a
+# byte-identical "create Tenant -> commit" block and a byte-identical
+# "create Source -> commit -> enqueue -> commit -> return {tenant_id,
+# source_id, job_id}" tail, differing only in the `type`/`config`/
+# `job_type` values passed in -- past this project's own established
+# 3rd-occurrence extraction threshold (the 4th occurrence, added by
+# 2.8.e's own `_seed_tenant_db_source`, is what crossed it). Extracted into
+# two small, separately-callable pieces rather than one combined helper,
+# since each adapter's own distinct middle step (a domain claim+verify;
+# `upload_storage.save()`; `create_db_connection()`) sits at a genuinely
+# different point relative to tenant/source creation for each adapter --
+# a single combined helper would need a hook/callback parameter to thread
+# that step through, which is more machinery than two plain, sequentially-
+# called functions need. Each of the four wrappers below keeps its own
+# exact middle step, unchanged in substance; only the surrounding
+# boilerplate moved.
+async def _create_tenant(name: str) -> uuid.UUID:
     tenant_id = uuid.uuid4()
     async with db_session() as session:
-        session.add(Tenant(id=tenant_id, name="Urls Adapter Proof Tenant", status="active"))
+        session.add(Tenant(id=tenant_id, name=name, status="active"))
         await session.commit()
+    return tenant_id
 
+
+async def _create_source_and_enqueue(
+    tenant_id: uuid.UUID, source_type: str, config: dict, job_type: str
+) -> dict:
     async with db_session() as session:
         source = Source(
             tenant_id=tenant_id,
-            type="urls",
-            config={"urls": urls},
+            type=source_type,
+            config=config,
             refresh_interval="daily",
             status="active",
         )
         session.add(source)
         await session.commit()
         source_id = source.id
+
+    async with db_session() as session:
+        repo = IngestRepository(tenant_id=tenant_id, session=session)
+        job = await repo.enqueue(job_type=job_type, source_id=source_id, payload={})
+        await session.commit()
+        job_id = job.id
+
+    return {"tenant_id": tenant_id, "source_id": source_id, "job_id": job_id}
+
+
+async def _seed_tenant_source_and_verified_domain(urls: list[str]) -> dict:
+    tenant_id = await _create_tenant("Urls Adapter Proof Tenant")
 
     async with db_session() as session:
         repo = IngestRepository(tenant_id=tenant_id, session=session)
@@ -156,13 +190,7 @@ async def _seed_tenant_source_and_verified_domain(urls: list[str]) -> dict:
         )
         await session.commit()
 
-    async with db_session() as session:
-        repo = IngestRepository(tenant_id=tenant_id, session=session)
-        job = await repo.enqueue(job_type="ingest_url", source_id=source_id, payload={})
-        await session.commit()
-        job_id = job.id
-
-    return {"tenant_id": tenant_id, "source_id": source_id, "job_id": job_id}
+    return await _create_source_and_enqueue(tenant_id, "urls", {"urls": urls}, "ingest_url")
 
 
 async def test_a_multi_url_job_is_claimed_processed_and_succeeds_through_the_real_loop(
@@ -295,22 +323,7 @@ def _tracking_handler(routes: dict, hits: list, delay_seconds: float = 0):
 
 
 async def _seed_tenant_crawl_source_and_verified_domain(seed_url: str) -> dict:
-    tenant_id = uuid.uuid4()
-    async with db_session() as session:
-        session.add(Tenant(id=tenant_id, name="Crawl Adapter Proof Tenant", status="active"))
-        await session.commit()
-
-    async with db_session() as session:
-        source = Source(
-            tenant_id=tenant_id,
-            type="crawl",
-            config={"seed_url": seed_url},
-            refresh_interval="daily",
-            status="active",
-        )
-        session.add(source)
-        await session.commit()
-        source_id = source.id
+    tenant_id = await _create_tenant("Crawl Adapter Proof Tenant")
 
     async with db_session() as session:
         repo = IngestRepository(tenant_id=tenant_id, session=session)
@@ -328,13 +341,9 @@ async def _seed_tenant_crawl_source_and_verified_domain(seed_url: str) -> dict:
         )
         await session.commit()
 
-    async with db_session() as session:
-        repo = IngestRepository(tenant_id=tenant_id, session=session)
-        job = await repo.enqueue(job_type="ingest_crawl", source_id=source_id, payload={})
-        await session.commit()
-        job_id = job.id
-
-    return {"tenant_id": tenant_id, "source_id": source_id, "job_id": job_id}
+    return await _create_source_and_enqueue(
+        tenant_id, "crawl", {"seed_url": seed_url}, "ingest_crawl"
+    )
 
 
 async def _documents_for(source_id: uuid.UUID) -> list[Document]:
@@ -625,10 +634,7 @@ _UPLOAD_MAX_SIZE = 50 * 1024 * 1024
 
 
 async def _seed_tenant_upload_source(storage_dir, uploads: list[tuple[bytes, str]]) -> dict:
-    tenant_id = uuid.uuid4()
-    async with db_session() as session:
-        session.add(Tenant(id=tenant_id, name="Upload Adapter Proof Tenant", status="active"))
-        await session.commit()
+    tenant_id = await _create_tenant("Upload Adapter Proof Tenant")
 
     config_uploads = [
         {
@@ -640,25 +646,9 @@ async def _seed_tenant_upload_source(storage_dir, uploads: list[tuple[bytes, str
         for data, filename in uploads
     ]
 
-    async with db_session() as session:
-        source = Source(
-            tenant_id=tenant_id,
-            type="upload",
-            config={"uploads": config_uploads},
-            refresh_interval="daily",
-            status="active",
-        )
-        session.add(source)
-        await session.commit()
-        source_id = source.id
-
-    async with db_session() as session:
-        repo = IngestRepository(tenant_id=tenant_id, session=session)
-        job = await repo.enqueue(job_type="ingest_upload", source_id=source_id, payload={})
-        await session.commit()
-        job_id = job.id
-
-    return {"tenant_id": tenant_id, "source_id": source_id, "job_id": job_id}
+    return await _create_source_and_enqueue(
+        tenant_id, "upload", {"uploads": config_uploads}, "ingest_upload"
+    )
 
 
 async def test_a_multi_format_upload_job_is_claimed_processed_and_succeeds_through_the_real_loop(
@@ -815,10 +805,7 @@ async def _probe_table_with_rows(rows: list[dict]):
                 decimal.Decimal(str(row["price"])),
                 row.get("external_id"),
             )
-        try:
-            yield {"role": role, "password": "dbsync-pw", "table": f"public.{table}"}
-        finally:
-            pass
+        yield {"role": role, "password": "dbsync-pw", "table": f"public.{table}"}
     finally:
         await admin.execute(f"DROP TABLE IF EXISTS public.{table}")
         await admin.execute(f"REVOKE ALL ON SCHEMA public FROM {role}")
@@ -831,10 +818,7 @@ async def _seed_tenant_db_source(
     *, role: str, password: str, allowlisted_tables: dict, row_templates: dict
 ) -> dict:
     url = urlsplit(require_test_database())
-    tenant_id = uuid.uuid4()
-    async with db_session() as session:
-        session.add(Tenant(id=tenant_id, name="Database Adapter Job Proof Tenant", status="active"))
-        await session.commit()
+    tenant_id = await _create_tenant("Database Adapter Job Proof Tenant")
 
     async with db_session() as session:
         repo = IngestRepository(tenant_id=tenant_id, session=session)
@@ -853,30 +837,11 @@ async def _seed_tenant_db_source(
         await session.commit()
         db_connection_id = db_connection.id
 
-    async with db_session() as session:
-        source = Source(
-            tenant_id=tenant_id,
-            type="database",
-            config={"db_connection_id": str(db_connection_id)},
-            refresh_interval="daily",
-            status="active",
-        )
-        session.add(source)
-        await session.commit()
-        source_id = source.id
-
-    async with db_session() as session:
-        repo = IngestRepository(tenant_id=tenant_id, session=session)
-        job = await repo.enqueue(job_type="ingest_db", source_id=source_id, payload={})
-        await session.commit()
-        job_id = job.id
-
-    return {
-        "tenant_id": tenant_id,
-        "source_id": source_id,
-        "job_id": job_id,
-        "db_connection_id": db_connection_id,
-    }
+    ids = await _create_source_and_enqueue(
+        tenant_id, "database", {"db_connection_id": str(db_connection_id)}, "ingest_db"
+    )
+    ids["db_connection_id"] = db_connection_id
+    return ids
 
 
 _PRODUCTS_TEMPLATE_CONFIG = {
