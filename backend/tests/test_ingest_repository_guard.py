@@ -20,7 +20,12 @@ REPOSITORY_FILE = APP_DIR / "ingest" / "repository.py"
 # NOTE: adding a file here is a deliberate decision: it means that file
 # receives a tenant's decrypted database credentials in plaintext. Review
 # it by hand.
-ALLOWED_DECRYPTED_CREDENTIALS_CALLERS: tuple[str, ...] = ()
+#
+# Task 2.8.e [SECURITY]: the first real caller -- handle_ingest_db()
+# (app/ingest/job_handlers.py) decrypts a db_connection's own credentials
+# immediately before connect_safely() (2.8.a), exactly the real need this
+# guard's own header comment anticipated.
+ALLOWED_DECRYPTED_CREDENTIALS_CALLERS: tuple[str, ...] = ("app/ingest/job_handlers.py",)
 
 
 def test_get_decrypted_credentials_guard():

@@ -27,14 +27,18 @@
 # (idempotent -- safe even if another test already created it), rather
 # than using live_test_services()'s own random per-test collection name.
 import asyncio
+import decimal
 import http.server
 import time
 import uuid
+from contextlib import asynccontextmanager
+from urllib.parse import urlsplit
 
 import sqlalchemy as sa
 
 from app import qdrant
 from app import worker as worker_module
+from app.ingest import database_adapter as database_adapter_module
 from app.ingest import safe_fetch as safe_fetch_module
 from app.ingest import upload_storage
 from app.ingest.models import Document, Source
@@ -53,10 +57,17 @@ from tests.conftest import (
     read_markdown_fixture,
     read_pdf_fixture,
     read_text_fixture,
+    require_test_database,
     require_test_qdrant,
     scripted_handler,
     set_valid_env,
 )
+
+# Task 2.8.e: reuses test_database_adapter.py's own _admin_connection() --
+# the shared shape the duplication check after 2.8.a/b/c already
+# extracted/consolidated there -- rather than a third, separate copy of
+# "parse TEST_DATABASE_URL and connect as the admin role" here.
+from tests.test_database_adapter import _admin_connection
 
 # Task 2.7.d: reuses test_upload_adapter.py's own real corrupt-docx
 # construction instead of duplicating it -- matching this project's own
@@ -745,3 +756,309 @@ async def test_a_mixed_outcome_upload_job_succeeds_with_each_item_independent(
     # Exactly the one valid file persisted -- the corrupt and unrecognized
     # entries left no row at all, not a row with some "failed" status.
     assert {doc.file_name for doc in documents} == {"report.pdf"}
+
+
+# --- Task 2.8.e [SECURITY]: handle_ingest_db() ----------------------------
+# Same live-against-both-real-services methodology, run through the SAME
+# real worker.py loop (test (d)'s own requirement -- every test below uses
+# run(), never calls handle_ingest_db() directly). The "remote" tenant
+# database being synced is a real Postgres role + a real table created on
+# the SAME test-db service this suite's own app tables already live on --
+# the quickest real target available; Step 2.8.f's own job is to decide
+# whether reusing test-db this way is the long-term convention for this
+# step's end-to-end matrix, not decided here. connect_safely()'s own guard
+# correctly treats 127.0.0.1 as unsafe by default (it's loopback) --
+# bypassed FOR TEST PURPOSES ONLY via the already-established
+# fake_is_unsafe_except_loopback() pattern, patched on database_adapter_
+# module directly (matching test_database_adapter.py's own identical
+# precedent -- the name is looked up there, not in job_handlers.py).
+
+
+@asynccontextmanager
+async def _probe_table_with_rows(rows: list[dict]):
+    """A real, fresh readonly Postgres role plus a real table (populated
+    with `rows`) on the real test-db service -- same `CREATE ROLE`/`GRANT`
+    shape as test_database_adapter.py's own `readonly_and_writable_roles`
+    fixture (not reused directly: that fixture creates a READONLY/WRITABLE
+    PAIR with no table of its own; this needs exactly one readonly role
+    plus a real data table, a genuinely different shape). Random suffix,
+    not a fixed name -- safe even if a prior run's own teardown was ever
+    interrupted mid-way.
+    """
+    suffix = uuid.uuid4().hex[:8]
+    role = f"probe_dbsync_{suffix}"
+    table = f"probe_products_{suffix}"
+    database_name = urlsplit(require_test_database()).path.lstrip("/")
+
+    admin = await _admin_connection()
+    try:
+        await admin.execute(f"CREATE ROLE {role} LOGIN PASSWORD 'dbsync-pw'")  # noqa: S106
+        await admin.execute(f'GRANT CONNECT ON DATABASE "{database_name}" TO {role}')
+        await admin.execute(f"GRANT USAGE ON SCHEMA public TO {role}")
+        await admin.execute(
+            f"CREATE TABLE public.{table} (id int, name text, price numeric, external_id text)"
+        )
+        await admin.execute(f"GRANT SELECT ON public.{table} TO {role}")
+        for row in rows:
+            await admin.execute(
+                f"INSERT INTO public.{table} (id, name, price, external_id) "  # noqa: S608
+                "VALUES ($1, $2, $3, $4)",
+                row["id"],
+                row["name"],
+                # Decimal, not a bare float: asyncpg encodes a Python float
+                # as its own imprecise IEEE754 double representation, which
+                # a `numeric` column then stores exactly (confirmed live --
+                # a bare 19.99 round-trips as
+                # Decimal('19.98999999999999843...')), breaking this test's
+                # own plain substring assertions below for no reason
+                # related to the code under test.
+                decimal.Decimal(str(row["price"])),
+                row.get("external_id"),
+            )
+        try:
+            yield {"role": role, "password": "dbsync-pw", "table": f"public.{table}"}
+        finally:
+            pass
+    finally:
+        await admin.execute(f"DROP TABLE IF EXISTS public.{table}")
+        await admin.execute(f"REVOKE ALL ON SCHEMA public FROM {role}")
+        await admin.execute(f'REVOKE ALL ON DATABASE "{database_name}" FROM {role}')
+        await admin.execute(f"DROP ROLE IF EXISTS {role}")
+        await admin.close()
+
+
+async def _seed_tenant_db_source(
+    *, role: str, password: str, allowlisted_tables: dict, row_templates: dict
+) -> dict:
+    url = urlsplit(require_test_database())
+    tenant_id = uuid.uuid4()
+    async with db_session() as session:
+        session.add(Tenant(id=tenant_id, name="Database Adapter Job Proof Tenant", status="active"))
+        await session.commit()
+
+    async with db_session() as session:
+        repo = IngestRepository(tenant_id=tenant_id, session=session)
+        db_connection = await repo.create_db_connection(
+            host=url.hostname,
+            credentials={
+                "database": url.path.lstrip("/"),
+                "user": role,
+                "password": password,
+                "port": str(url.port),
+                "sslmode": "disable",  # test-db runs plain TCP, no TLS configured at all
+            },
+            allowlisted_tables=allowlisted_tables,
+            row_templates=row_templates,
+        )
+        await session.commit()
+        db_connection_id = db_connection.id
+
+    async with db_session() as session:
+        source = Source(
+            tenant_id=tenant_id,
+            type="database",
+            config={"db_connection_id": str(db_connection_id)},
+            refresh_interval="daily",
+            status="active",
+        )
+        session.add(source)
+        await session.commit()
+        source_id = source.id
+
+    async with db_session() as session:
+        repo = IngestRepository(tenant_id=tenant_id, session=session)
+        job = await repo.enqueue(job_type="ingest_db", source_id=source_id, payload={})
+        await session.commit()
+        job_id = job.id
+
+    return {
+        "tenant_id": tenant_id,
+        "source_id": source_id,
+        "job_id": job_id,
+        "db_connection_id": db_connection_id,
+    }
+
+
+_PRODUCTS_TEMPLATE_CONFIG = {
+    "columns": ["name", "price"],
+    "template": "Product: {name}, priced at {price}",
+    "primary_key": "id",
+}
+
+
+async def test_a_multi_row_db_sync_job_is_claimed_processed_and_succeeds_through_the_real_loop(
+    monkeypatch, live_test_services
+):
+    # (a)/(d): the FULL real path -- enqueue() -> the real worker run()
+    # loop (the SAME function every other handler's own tests above
+    # exercise) -> claim_next_job() -> dispatch -> handle_ingest_db() ->
+    # fetch_readonly_rows() (2.8.b) per table -> ingest_db_row() (2.8.d)
+    # per row -> finish_ingest() -> embed_and_upsert() ->
+    # mark_job_succeeded(). Every row in a real allowlisted table lands as
+    # a real, queryable Qdrant chunk.
+    client = await _prepare_env(monkeypatch, live_test_services)
+    monkeypatch.setattr(
+        database_adapter_module, "is_unsafe_destination_ip", fake_is_unsafe_except_loopback
+    )
+
+    rows = [
+        {"id": 1, "name": "Widget", "price": 9.99},
+        {"id": 2, "name": "Gadget", "price": 19.99},
+        {"id": 3, "name": "Gizmo", "price": 29.99},
+    ]
+    async with _probe_table_with_rows(rows) as probe:
+        ids = await _seed_tenant_db_source(
+            role=probe["role"],
+            password=probe["password"],
+            allowlisted_tables={"tables": [probe["table"]]},
+            row_templates={probe["table"]: _PRODUCTS_TEMPLATE_CONFIG},
+        )
+
+        await asyncio.wait_for(run(asyncio.Event(), max_iterations=1), timeout=10)
+
+        job = await _fetch_job(ids["job_id"])
+        assert job.status == "succeeded"
+        assert job.attempts == 0
+        assert job.error is None
+
+        async with db_session() as session:
+            documents = (
+                await session.execute(
+                    sa.select(Document).where(Document.source_id == ids["source_id"])
+                )
+            ).scalars().all()
+        assert {doc.row_identity for doc in documents} == {
+            f"{probe['table']}:1",
+            f"{probe['table']}:2",
+            f"{probe['table']}:3",
+        }
+        assert all(doc.url is None and doc.file_name is None for doc in documents)
+        assert all(doc.status == "extracted" for doc in documents)
+
+        records, _ = await client.scroll(
+            collection_name=qdrant.COLLECTION_NAME,
+            scroll_filter=qdrant.tenant_filter(ids["tenant_id"]),
+            limit=20,
+        )
+        assert len(records) >= 3
+        assert all(record.payload["source_type"] == "database" for record in records)
+        assert all(
+            record.payload["source_url"] is None and record.payload["file_name"] is None
+            for record in records
+        )
+        rendered_texts = {record.payload["text"] for record in records}
+        assert any("Widget" in text and "9.99" in text for text in rendered_texts)
+        assert any("Gadget" in text and "19.99" in text for text in rendered_texts)
+        assert any("Gizmo" in text and "29.99" in text for text in rendered_texts)
+
+
+async def test_a_mixed_outcome_db_sync_job_succeeds_with_each_row_independent(
+    monkeypatch, live_test_services
+):
+    # (b): a table whose own rows mix one that fails row_templates
+    # rendering (a NULL value in the column configured as `primary_key`,
+    # raising MissingPrimaryKeyError, app/ingest/row_templates.py) with
+    # rows that succeed -- confirms per-row independence through the real
+    # handler: the bad row is logged and skipped, the good rows still
+    # ingest, and the JOB still succeeds overall (every row got a
+    # definitive outcome -- not "every row must succeed").
+    await _prepare_env(monkeypatch, live_test_services)
+    monkeypatch.setattr(
+        database_adapter_module, "is_unsafe_destination_ip", fake_is_unsafe_except_loopback
+    )
+
+    rows = [
+        {"id": 1, "name": "Widget", "price": 9.99, "external_id": "ext-1"},
+        {"id": 2, "name": "Gadget", "price": 19.99, "external_id": None},  # bad: NULL identity
+        {"id": 3, "name": "Gizmo", "price": 29.99, "external_id": "ext-3"},
+    ]
+    async with _probe_table_with_rows(rows) as probe:
+        # primary_key is "external_id" here (NOT the real `id` column) --
+        # a plain column name, per row_templates.py's own scheme, so a
+        # NULL in it is a per-ROW data condition, not a config problem.
+        template_config = {**_PRODUCTS_TEMPLATE_CONFIG, "primary_key": "external_id"}
+        ids = await _seed_tenant_db_source(
+            role=probe["role"],
+            password=probe["password"],
+            allowlisted_tables={"tables": [probe["table"]]},
+            row_templates={probe["table"]: template_config},
+        )
+
+        await asyncio.wait_for(run(asyncio.Event(), max_iterations=1), timeout=10)
+
+        job = await _fetch_job(ids["job_id"])
+        assert job.status == "succeeded"
+        assert job.attempts == 0
+        assert job.error is None
+
+        async with db_session() as session:
+            documents = (
+                await session.execute(
+                    sa.select(Document).where(Document.source_id == ids["source_id"])
+                )
+            ).scalars().all()
+        # Exactly the two good rows persisted -- the NULL-identity row left
+        # no row at all, not a row with some "failed" status.
+        assert {doc.row_identity for doc in documents} == {
+            f"{probe['table']}:ext-1",
+            f"{probe['table']}:ext-3",
+        }
+
+
+async def test_a_stale_row_templates_entry_for_a_removed_table_is_rejected_not_synced(
+    monkeypatch, live_test_services
+):
+    # (c): row_templates carries an entry for a table that is NOT (or no
+    # longer) in allowlisted_tables -- a real, reachable config-drift state
+    # (the two are independently-editable JSONB columns on the same
+    # db_connections row, Task 2.1.a). Confirms this is rejected cleanly
+    # (logged, not queried) rather than silently skipped (no trace at all)
+    # or silently synced (queried anyway) -- while a second, genuinely
+    # allowlisted table in the SAME job still processes normally.
+    client = await _prepare_env(monkeypatch, live_test_services)
+    monkeypatch.setattr(
+        database_adapter_module, "is_unsafe_destination_ip", fake_is_unsafe_except_loopback
+    )
+
+    allowed_rows = [{"id": 1, "name": "Widget", "price": 9.99}]
+    async with _probe_table_with_rows(allowed_rows) as allowed_probe:
+        stale_table = "public.this_table_was_removed_from_the_allowlist"
+        ids = await _seed_tenant_db_source(
+            role=allowed_probe["role"],
+            password=allowed_probe["password"],
+            # The stale entry is allowlisted nowhere -- only allowed_probe's
+            # own table is.
+            allowlisted_tables={"tables": [allowed_probe["table"]]},
+            row_templates={
+                allowed_probe["table"]: _PRODUCTS_TEMPLATE_CONFIG,
+                stale_table: _PRODUCTS_TEMPLATE_CONFIG,
+            },
+        )
+
+        await asyncio.wait_for(run(asyncio.Event(), max_iterations=1), timeout=10)
+
+        job = await _fetch_job(ids["job_id"])
+        # The job still succeeds -- one table's own stale config does not
+        # abort the rest of the job.
+        assert job.status == "succeeded"
+        assert job.attempts == 0
+        assert job.error is None
+
+        async with db_session() as session:
+            documents = (
+                await session.execute(
+                    sa.select(Document).where(Document.source_id == ids["source_id"])
+                )
+            ).scalars().all()
+        # Exactly the genuinely-allowlisted table's own row persisted --
+        # the stale table was never queried at all (not even an attempt),
+        # so it left no row, no partial row, nothing.
+        assert {doc.row_identity for doc in documents} == {f"{allowed_probe['table']}:1"}
+
+        records, _ = await client.scroll(
+            collection_name=qdrant.COLLECTION_NAME,
+            scroll_filter=qdrant.tenant_filter(ids["tenant_id"]),
+            limit=20,
+        )
+        assert len(records) >= 1
+        assert all(record.payload["source_type"] == "database" for record in records)

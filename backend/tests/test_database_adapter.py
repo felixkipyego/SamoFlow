@@ -31,9 +31,12 @@ from app import qdrant
 from app.ingest import database_adapter as database_adapter_module
 from app.ingest import qdrant_writer as qdrant_writer_module
 from app.ingest.database_adapter import (
+    InvalidIdentifierError,
     InvalidQueryError,
+    TableNotAllowlistedError,
     UnsafeDatabaseHostError,
     WritableConnectionError,
+    build_table_select_query,
     connect_safely,
     ensure_read_only,
     fetch_readonly_rows,
@@ -647,3 +650,63 @@ async def test_two_different_rows_never_collide_even_with_identical_content(
         "public.products:1",
         "public.products:2",
     }
+
+
+# --- Task 2.8.e: build_table_select_query() -------------------------------
+# Pure-function tests over plain dicts -- no live database needed, the
+# identical "no live-DB test needed" reasoning row_templates.py's own
+# 2.8.c decision-log entry already gives for is_table_allowlisted()/
+# render_row_to_text() (both pure functions this one composes with).
+
+_ALLOWLISTED_TABLES = {"tables": ["public.products"]}
+_TEMPLATE_CONFIG = {
+    "columns": ["name", "price"],
+    "template": "Product: {name}, priced at {price}",
+    "primary_key": "id",
+}
+
+
+def test_build_table_select_query_builds_the_expected_select():
+    query = build_table_select_query(_ALLOWLISTED_TABLES, "public.products", _TEMPLATE_CONFIG)
+    assert query == 'SELECT "id", "name", "price" FROM "public"."products"'
+
+
+def test_build_table_select_query_dedupes_a_primary_key_also_in_columns():
+    # "id" declared in BOTH columns and primary_key -- must appear exactly
+    # once in the SELECT list, not twice.
+    template_config = {**_TEMPLATE_CONFIG, "columns": ["id", "name", "price"]}
+    query = build_table_select_query(_ALLOWLISTED_TABLES, "public.products", template_config)
+    assert query == 'SELECT "id", "name", "price" FROM "public"."products"'
+
+
+def test_build_table_select_query_rejects_a_table_not_in_the_allowlist():
+    # The "stale config" scenario this task's own live end-to-end test (c)
+    # also proves through the real handler: a row_templates entry whose
+    # own table was since removed from allowlisted_tables.
+    with pytest.raises(TableNotAllowlistedError):
+        build_table_select_query(_ALLOWLISTED_TABLES, "public.not_allowlisted", _TEMPLATE_CONFIG)
+
+
+def test_build_table_select_query_rejects_a_non_schema_qualified_table():
+    with pytest.raises(InvalidIdentifierError):
+        build_table_select_query({"tables": ["products"]}, "products", _TEMPLATE_CONFIG)
+
+
+@pytest.mark.parametrize(
+    "unsafe_table",
+    [
+        'public.products"; DROP TABLE documents; --',
+        "public.products; DROP TABLE documents",
+        "public.a.b",  # a third dot-separated part is rejected, not silently truncated
+    ],
+)
+def test_build_table_select_query_rejects_an_unsafe_table_identifier(unsafe_table):
+    allowlisted_tables = {"tables": [unsafe_table]}
+    with pytest.raises(InvalidIdentifierError):
+        build_table_select_query(allowlisted_tables, unsafe_table, _TEMPLATE_CONFIG)
+
+
+def test_build_table_select_query_rejects_an_unsafe_column_identifier():
+    template_config = {**_TEMPLATE_CONFIG, "columns": ['name"; DROP TABLE documents; --']}
+    with pytest.raises(InvalidIdentifierError):
+        build_table_select_query(_ALLOWLISTED_TABLES, "public.products", template_config)

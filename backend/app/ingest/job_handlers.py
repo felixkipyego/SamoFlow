@@ -158,6 +158,130 @@
 # does), so this stays the "narrower but not reopened" case the
 # HEARTBEAT_STALE_MULTIPLIER marker's own RESOLVED note (2.6.e) already
 # anticipated for handle_ingest_url() -- not a new, separate risk.
+#
+# Task 2.8.e [SECURITY]: handle_ingest_db() -- the `database` adapter's own
+# JOB_HANDLERS entry, wiring 2.8.a/b/c/d together for the first time
+# through the real worker loop. A 4th real use of _open_source_session().
+#
+# Config shape, decided here: `sources.config["db_connection_id"]` is a
+# single UUID string (parsed via uuid.UUID(...), matching `ingest_upload`'s
+# own `upload_id` round-trip precedent) pointing at the already-encrypted
+# `db_connections` row (2.8.a) -- NOT a second copy of that row's own
+# `allowlisted_tables`/`row_templates` (2.8.c). Those two stay on
+# `db_connections` alone, the one real source of truth: `sources.config`
+# is kept exactly as minimal and pointer-only as `ingest_url()`'s/`ingest_
+# upload()`'s own configs already are (a bare url list; a list of
+# upload_id/filename pairs) -- neither duplicates data that already lives
+# somewhere else more authoritative, and this config doesn't either.
+#
+# Setup: `_open_source_session()` (the source/tenant guard, Qdrant client,
+# session) exactly as every other handler here, then a SECOND tenant-scoped
+# fetch for the full `DbConnection` row (not just its credentials --
+# `host`/`allowlisted_tables`/`row_templates` are needed too), inline via
+# `select(...).where(id=..., tenant_id=job.tenant_id).scalar_one()` --
+# matching `_open_source_session()`'s own identical inline-fetch-and-
+# tenant-check shape for `Source`, not a new repository method for a
+# single real call site (rule 11). `IngestRepository.get_decrypted_
+# credentials()` independently re-checks tenant_id a second time (its own
+# pre-existing, unmodified behavior) -- redundant with the fetch above by
+# design, not an oversight, matching this project's own established
+# "re-check a cheap safety property every time, don't trust a result from
+# the past" precedent (ensure_read_only()/write_heartbeat()).
+#
+# connect_safely() + an explicit, up-front ensure_read_only() call: the
+# connection is validated read-only ONCE, immediately after connecting,
+# before any table is ever touched -- a writable connection is an
+# INFRASTRUCTURE-level problem for the whole job (every table would be
+# equally affected), not a single table's own concern, so it propagates
+# UNCAUGHT here exactly like `UnsafeDatabaseHostError`/`CredentialEncryption
+# Error` do, taking the ordinary job-level backoff/retry path. This is
+# intentionally redundant with fetch_readonly_rows()'s own internal re-check
+# on every call (2.8.b's own documented "cheap, re-run every time" design) --
+# not a wasted duplicate: it fails fast before the first table's query
+# rather than mid-loop, and it is the only read-only check that would ever
+# run at all for a job whose `row_templates` happens to be empty.
+#
+# Per-table loop: iterates `db_connection.row_templates.items()` (not
+# `allowlisted_tables` directly) -- `row_templates` is what actually
+# carries each table's own column list/template/primary_key, so it is the
+# real per-table work list; `allowlisted_tables` is consulted PER TABLE,
+# inside build_table_select_query() (database_adapter.py, 2.8.e), as the
+# authoritative check. This is deliberate, not incidental: `row_templates`
+# and `allowlisted_tables` are two independently-editable JSONB columns on
+# the same `db_connections` row (2.1.a) with nothing tying them together
+# at the schema level, so a `row_templates` entry whose own table was since
+# REMOVED from `allowlisted_tables` is a real, reachable drift state, not a
+# hypothetical one -- exactly the "stale config" scenario this task's own
+# test (c) names. build_table_select_query() raises TableNotAllowlistedError
+# for that case (and InvalidIdentifierError for a malformed identifier) --
+# caught HERE, per table, logged at ERROR level (a definitive, visible
+# REJECTION, never a silent skip and never a silently-synced query), then
+# `continue` to the next table: one table's own stale/invalid config does
+# not abort the rest of the job, matching the per-item-independence policy
+# below.
+#
+# Row cap / statement timeout: `Settings.db_sync_row_cap`/`db_sync_
+# statement_timeout_seconds` (2.8.b) read ONCE here and passed to fetch_
+# readonly_rows() per table -- matching `settings.crawl_page_cap`'s own
+# established "handler reads Settings once, primitive stays Settings-free"
+# precedent. Max-synced-rows-per-plan, decided here: the SAME number as
+# 2.8.b's own per-query row cap, not a second, independent setting --
+# `db_sync_row_cap`'s own docstring (app/config.py) already cites docs/
+# SPEC.md's "maximum synced database rows... from the plan" line as ITS
+# OWN justification, written at 2.8.b before any job handler existed to
+# apply it; adding a second field with the same real-world meaning would
+# be a parameter this step does not need (rule 11). Composition, stated
+# plainly: because Step 2.8 is single-table-per-sync (2.8.c's own scope
+# decision, no joins, no cross-table query), there is no single aggregate
+# query a combined cap could apply to -- each table gets its own
+# fetch_readonly_rows() call, each independently bounded by this one
+# setting, so a job syncing N allowlisted tables can synchronize up to
+# N * db_sync_row_cap rows in total, not one shared ceiling across the
+# whole job. A true per-PLAN aggregate (capping one tenant's total synced
+# rows across every table/connection) still needs Task 4.3's own real
+# `plans.limits` mechanism to express and enforce correctly -- explicitly
+# NOT solved here, matching `crawl_page_cap`'s/`upload_max_size_bytes`'s own
+# identical "global Settings default, plans.limits sourcing deferred"
+# precedent, not newly resolved by this task.
+#
+# Per-row loop, per-item partial-failure policy -- matching the canonical
+# contract (Step 2.7 closure summary) in SPIRIT, but via a genuinely
+# different MECHANISM than handle_ingest_url()'s/handle_ingest_upload()'s
+# own, confirmed by reading ingest_db_row()'s real contract before building
+# this, not assumed identical. ingest_url()/ingest_upload() each already
+# return a definitive Result for every EXPECTED outcome, never raising --
+# this handler therefore needs no per-item try/except of its own.
+# ingest_db_row() (2.8.d) is deliberately NOT built that way: its own
+# header comment states a rendering/identity problem (MissingColumnError,
+# MissingPrimaryKeyError, TemplateRenderError, all app/ingest/row_
+# templates.py) "propagates UNCAUGHT from this function... not a per-row
+# outcome this result type needs to represent" -- a decision 2.8.d
+# correctly left to ITS caller (this handler, the first one to exist).
+# Catching exactly those three exception types here, per row -- the
+# IDENTICAL shape `ingest_upload()`'s own dispatch table already
+# established for a per-item EXTRACTOR failure (`pypdf.errors.PyPdfError`,
+# etc., job_handlers.py's own header comment above) -- is therefore the
+# correct, consistent way to achieve the SAME per-item-independence
+# contract through a lower primitive with a genuinely different shape, not
+# a deviation from it. A caught row is logged at ERROR level and skipped
+# (`continue`) -- no `session.commit()` for it, since ingest_db_row() raises
+# BEFORE ever touching the session (derive_row_identity()/render_row_to_
+# text() are both pure functions over the already-fetched row), so there is
+# nothing to roll back. A successfully-ingested row is committed
+# immediately, per row, not once at the end -- the identical reasoning
+# handle_ingest_url()'s/handle_ingest_upload()'s own per-item commit
+# comments already give (embed_and_upsert() writes to Qdrant with no
+# rollback tie to this session). The JOB succeeds if every table/row
+# received a recorded, definitive outcome (ingested/unchanged/rejected/
+# failed-and-logged), regardless of how many were rejected or failed --
+# not "every row must succeed" -- matching the canonical contract's own
+# "attempted, not guaranteed" framing exactly.
+#
+# Heartbeat: deliberately NOT built here, same reasoning as handle_ingest_
+# upload()'s own (see that function's own comment above) -- a tenant's own
+# allowlisted-table list is realistically bounded by Settings.db_sync_
+# row_cap per table and a small number of tables per connection, not an
+# open-ended discovery process the way a crawl is.
 import logging
 import uuid
 from collections.abc import AsyncIterator
@@ -172,7 +296,18 @@ from app import qdrant
 from app.config import get_settings
 from app.db import _session_factory
 from app.ingest.crawl import run_crawl
-from app.ingest.models import Job, Source
+from app.ingest.database_adapter import (
+    InvalidIdentifierError,
+    TableNotAllowlistedError,
+    build_table_select_query,
+    connect_safely,
+    ensure_read_only,
+    fetch_readonly_rows,
+    ingest_db_row,
+)
+from app.ingest.models import DbConnection, Job, Source
+from app.ingest.repository import IngestRepository
+from app.ingest.row_templates import MissingColumnError, MissingPrimaryKeyError, TemplateRenderError
 from app.ingest.upload_adapter import ingest_upload
 from app.ingest.web_adapter import ingest_url
 
@@ -336,3 +471,98 @@ async def handle_ingest_upload(job: Job) -> None:
                 original_filename,
                 result.status,
             )
+
+
+async def handle_ingest_db(job: Job) -> None:
+    """The `database` adapter's own `JOB_HANDLERS["ingest_db"]` entry.
+
+    Reads `sources.config["db_connection_id"]` for `job.source_id`, fetches
+    the real, tenant-scoped `db_connections` row (host, allowlisted_tables,
+    row_templates) plus its decrypted credentials, opens one real
+    connection via connect_safely() (2.8.a) and confirms it read-only via
+    ensure_read_only() (2.8.b) up front, then for each table named in
+    row_templates: builds its own SELECT via build_table_select_query()
+    (2.8.e, database_adapter.py -- checks is_table_allowlisted() first),
+    runs it via fetch_readonly_rows() (2.8.b), and calls ingest_db_row()
+    (2.8.d) once per returned row. See this module's own header comment
+    for the full config-shape, per-table-rejection and per-row-failure
+    reasoning, and why this handler's own partial-failure mechanism
+    (per-row/per-table try/except) is a deliberate, necessary difference
+    from handle_ingest_url()'s/handle_ingest_upload()'s own shape, not an
+    inconsistency.
+    """
+    settings = get_settings()
+    async with _open_source_session(job, "ingest_db") as (client, session, source):
+        db_connection_id = uuid.UUID(source.config["db_connection_id"])
+        db_connection = (
+            await session.execute(
+                select(DbConnection).where(
+                    DbConnection.id == db_connection_id,
+                    DbConnection.tenant_id == job.tenant_id,
+                )
+            )
+        ).scalar_one()
+        credentials = await IngestRepository(
+            tenant_id=job.tenant_id, session=session
+        ).get_decrypted_credentials(db_connection_id)
+
+        conn = await connect_safely(db_connection.host, credentials)
+        try:
+            await ensure_read_only(conn)
+            for table, template_config in db_connection.row_templates.items():
+                try:
+                    query = build_table_select_query(
+                        db_connection.allowlisted_tables, table, template_config
+                    )
+                except (TableNotAllowlistedError, InvalidIdentifierError) as exc:
+                    logger.error(
+                        "handle_ingest_db: job %s table %s rejected, not synced: %s",
+                        job.id,
+                        table,
+                        exc,
+                    )
+                    continue
+
+                rows = await fetch_readonly_rows(
+                    conn,
+                    query,
+                    row_cap=settings.db_sync_row_cap,
+                    timeout_seconds=settings.db_sync_statement_timeout_seconds,
+                )
+                for row in rows:
+                    try:
+                        result = await ingest_db_row(
+                            session,
+                            client,
+                            qdrant.COLLECTION_NAME,
+                            tenant_id=job.tenant_id,
+                            source_id=job.source_id,
+                            table=table,
+                            row=row,
+                            template_config=template_config,
+                        )
+                    except (
+                        MissingColumnError,
+                        MissingPrimaryKeyError,
+                        TemplateRenderError,
+                    ) as exc:
+                        logger.error(
+                            "handle_ingest_db: job %s table %s row failed to render: %s",
+                            job.id,
+                            table,
+                            exc,
+                        )
+                        continue
+                    # Committed per row, not once at the end -- same
+                    # reasoning as every other handler's own identical
+                    # per-item commit (see this module's own header
+                    # comment above).
+                    await session.commit()
+                    logger.info(
+                        "handle_ingest_db: job %s table %s -> %s",
+                        job.id,
+                        table,
+                        result.status,
+                    )
+        finally:
+            await conn.close()

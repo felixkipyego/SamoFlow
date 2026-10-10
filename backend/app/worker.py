@@ -27,6 +27,10 @@
 # import needed (that handler deliberately does not write one, matching
 # handle_ingest_url()'s own precedent; see job_handlers.py's own header
 # comment).
+#
+# Task 2.8.e [SECURITY]: `handle_ingest_db` registered too -- also no
+# heartbeat import needed, identical reasoning to `handle_ingest_upload`'s
+# own (see job_handlers.py's own header comment).
 import asyncio
 import logging
 import signal
@@ -38,7 +42,12 @@ from pathlib import Path
 from app import all_models  # noqa: F401
 from app.config import SettingsError, get_settings
 from app.db import _session_factory
-from app.ingest.job_handlers import handle_ingest_crawl, handle_ingest_upload, handle_ingest_url
+from app.ingest.job_handlers import (
+    handle_ingest_crawl,
+    handle_ingest_db,
+    handle_ingest_upload,
+    handle_ingest_url,
+)
 from app.ingest.models import Job
 from app.ingest.queue import claim_next_job, mark_job_failed, mark_job_succeeded, reap_stuck_jobs
 
@@ -158,6 +167,7 @@ JOB_HANDLERS: dict[str, Callable[[Job], Awaitable[None]]] = {
     "ingest_url": handle_ingest_url,
     "ingest_crawl": handle_ingest_crawl,
     "ingest_upload": handle_ingest_upload,
+    "ingest_db": handle_ingest_db,
 }
 
 

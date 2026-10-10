@@ -68,7 +68,17 @@ from app.ingest.models import AuditLog, DbConnection, Job, VerifiedDomain
 # (app/ingest/job_handlers.py's own header comment has the full shape and
 # reasoning for why a list of objects, not a bare list of strings like
 # `urls`'s own).
-VALID_JOB_TYPES: frozenset[str] = frozenset({"ingest_url", "ingest_crawl", "ingest_upload"})
+#
+# Task 2.8.e [SECURITY]: "ingest_db" added -- `sources.config =
+# {"db_connection_id": "<uuid-string>"}`, pointing at the already-encrypted
+# `db_connections` row (2.8.a) rather than duplicating its own
+# `allowlisted_tables`/`row_templates` (2.8.c) a second time here. Matches
+# `ingest_upload`'s own `upload_id`-round-trips-as-a-string precedent
+# exactly (JSON has no native UUID type); see app/ingest/job_handlers.py's
+# own header comment for the full shape/policy.
+VALID_JOB_TYPES: frozenset[str] = frozenset(
+    {"ingest_url", "ingest_crawl", "ingest_upload", "ingest_db"}
+)
 
 
 class CredentialEncryptionError(Exception):

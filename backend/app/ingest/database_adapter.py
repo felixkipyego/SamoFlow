@@ -250,6 +250,21 @@
 # don't invent a second one); only its DASHBOARD-FACING interpretation
 # ("may need JavaScript" makes no sense for a product row) would need
 # its own per-source-type wording, Phase 6's own job, not touched here.
+#
+# Task 2.8.e [SECURITY]: the real query-builder row_templates.py's own
+# header comment explicitly left unbuilt ("not yet wired... 2.8.d's own
+# job" -- actually neither 2.8.c nor 2.8.d built it; this is where it
+# lands) -- build_table_select_query(), TableNotAllowlistedError,
+# InvalidIdentifierError. Composes is_table_allowlisted() (2.8.c, the
+# FOURTH defense layer that module's own header comment names) with a
+# strict allow-list identifier check (schema/table/column names must
+# match `^[A-Za-z_][A-Za-z0-9_]*$`) before ever interpolating any
+# configured name into a SQL string -- asyncpg has no bind-parameter
+# mechanism for identifiers (only for values), so this is the standard,
+# well-known mitigation for that specific gap (rule 11), not a custom
+# scheme. See app/ingest/job_handlers.py's own header comment for the
+# real caller (handle_ingest_db()) and the full per-table/per-row
+# partial-failure policy built around this.
 import ipaddress
 import re
 import uuid
@@ -267,7 +282,11 @@ from app.ingest.extract_html import ContentBlock, ExtractedContent
 from app.ingest.host_safety import resolve_and_validate
 from app.ingest.ip_safety import is_unsafe_destination_ip
 from app.ingest.qdrant_writer import finish_ingest
-from app.ingest.row_templates import derive_row_identity, render_row_to_text
+from app.ingest.row_templates import (
+    derive_row_identity,
+    is_table_allowlisted,
+    render_row_to_text,
+)
 from app.ingest.web_adapter import EMBEDDING_VERSION
 
 
@@ -431,6 +450,92 @@ def _ensure_single_select_statement(query: str) -> None:
             "query must be exactly one statement -- a second, "
             "semicolon-separated statement is not allowed"
         )
+
+
+class TableNotAllowlistedError(Exception):
+    """Raised by build_table_select_query() when `table` is not in this
+    connection's own `allowlisted_tables` (app/ingest/row_templates.py's
+    `is_table_allowlisted()`) -- e.g. a `row_templates` entry whose own
+    table was since removed from `allowlisted_tables` (the two are
+    independently-editable JSONB columns on the same `db_connections` row,
+    Task 2.1.a, with nothing tying them together at the schema level, so
+    this drift is a real, reachable state, not a hypothetical one). Raised
+    rather than silently skipped or silently synced -- matching
+    WritableConnectionError's/UnsafeDatabaseHostError's own established
+    "a security-relevant rejection is definitive and loud" precedent
+    (rule 11): a stale/removed table must never be queried just because a
+    template for it still happens to exist.
+    """
+
+
+class InvalidIdentifierError(Exception):
+    """Raised by build_table_select_query() when `table` is not exactly
+    two dot-separated parts, or any schema/table/column name fails the
+    strict `^[A-Za-z_][A-Za-z0-9_]*$` allow-list check -- an admin-
+    configured JSONB value, but still treated as untrusted input for SQL-
+    identifier purposes (rule 11/engineering rule 30: treat all ingested
+    configuration as untrusted), since asyncpg (like every SQL driver) has
+    no bind-parameter mechanism for identifiers, only for values. Matches
+    ip_safety.py's own allow-list-not-deny-list philosophy: reject
+    anything that isn't a plain, ordinary identifier, rather than trying
+    to enumerate and escape every dangerous character.
+    """
+
+
+_SAFE_IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+def _quote_identifier(identifier: str) -> str:
+    if not _SAFE_IDENTIFIER.match(identifier):
+        raise InvalidIdentifierError(f"not a safe SQL identifier: {identifier!r}")
+    return f'"{identifier}"'
+
+
+def build_table_select_query(
+    allowlisted_tables: Mapping[str, Any], table: str, template_config: Mapping[str, Any]
+) -> str:
+    """Builds the single, already-fully-formed SELECT string `fetch_
+    readonly_rows()`'s own one-query guard will accept -- the real query-
+    builder row_templates.py's own header comment names as "not yet
+    wired" and explicitly assigns to whoever builds the real job handler
+    (Task 2.8.e). Requests exactly `template_config["columns"]` plus
+    `template_config["primary_key"]` (deduplicated, sorted for a
+    deterministic column order) -- the least-privilege column list
+    render_row_to_text()/derive_row_identity() both need, never
+    `SELECT *`.
+
+    Calls is_table_allowlisted() FIRST, before ever touching identifier
+    construction -- the FOURTH independent defense layer row_templates.py's
+    own header comment describes (alongside fetch_readonly_rows()'s own
+    textual one-query guard, ensure_read_only()'s write probe, and the
+    real `transaction(readonly=True)` wrapping), raising
+    TableNotAllowlistedError if `table` is not currently allowlisted.
+    Every identifier (both halves of the schema-qualified `table`, and
+    every column name) is then validated via the strict allow-list regex
+    and double-quoted, raising InvalidIdentifierError for anything that
+    does not look like a plain, ordinary SQL identifier.
+    """
+    if not is_table_allowlisted(allowlisted_tables, table):
+        raise TableNotAllowlistedError(
+            f"table {table!r} is not in this connection's own allowlisted_tables "
+            "-- refusing to build a query against it"
+        )
+    schema_part, dot, table_part = table.partition(".")
+    if not dot:
+        raise InvalidIdentifierError(
+            f"table must be schema-qualified as 'schema.table', got {table!r}"
+        )
+    qualified_table = f"{_quote_identifier(schema_part)}.{_quote_identifier(table_part)}"
+
+    columns = sorted({*template_config["columns"], template_config["primary_key"]})
+    select_list = ", ".join(_quote_identifier(column) for column in columns)
+    # noqa justified: every identifier above has already been validated by
+    # _quote_identifier() (a strict allow-list regex, raising
+    # InvalidIdentifierError for anything else) and is_table_allowlisted()
+    # -- there is no tenant/request-time value interpolated here, only
+    # already-checked, double-quoted identifiers, matching ensure_read_
+    # only()'s own identical noqa precedent above.
+    return f"SELECT {select_list} FROM {qualified_table}"  # noqa: S608
 
 
 async def fetch_readonly_rows(
