@@ -264,6 +264,19 @@ class Settings(BaseSettings):
     # against a tenant's own database, while still bounding a single
     # job's worst-case time spent waiting on one query.
     db_sync_statement_timeout_seconds: float = Field(default=30.0, gt=0)
+    # Task 2.9.a: how often each tenant's own self-re-enqueuing
+    # `scheduler_tick` job fires (docs/SPEC.md §5.4: the scheduler decides
+    # which sources are due) -- same treatment as `job_stuck_after_seconds`/
+    # `worker_poll_interval_seconds` above (plain configurable number,
+    # gt=0). The coarsest real refresh_interval is "daily" -- the smallest
+    # unit docs/SPEC.md §5.4 names -- so this does not need anywhere near
+    # `worker_poll_interval_seconds`'s own 2-second responsiveness; it only
+    # needs to be short enough that a source becoming due isn't noticeably
+    # delayed relative to a day-granularity schedule, and long enough not
+    # to add needless job-table churn per tenant. 300s (5 minutes):
+    # generous on both counts -- retuned later with real numbers, like
+    # every other estimate in this project.
+    scheduler_tick_interval_seconds: float = Field(default=300.0, gt=0)
 
     @field_validator("database_url")
     @classmethod

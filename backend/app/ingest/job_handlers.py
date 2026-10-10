@@ -282,15 +282,45 @@
 # allowlisted-table list is realistically bounded by Settings.db_sync_
 # row_cap per table and a small number of tables per connection, not an
 # open-ended discovery process the way a crawl is.
+#
+# Task 2.9.a: `sources.last_run_at` (schema since 2.1.a, confirmed live --
+# NOT a new column) is now written, at the END of each of the four adapter
+# handlers above, right before each one's own final `return` -- on BOTH
+# success and partial-failure outcomes alike, never only on a clean
+# success. Reasoning, stated once here rather than four times: a source
+# whose job completed with some items skipped/failed still genuinely RAN
+# -- it is not "never attempted," matching every one of these handlers'
+# own already-established canonical contract ("attempted, not
+# guaranteed," Step 2.7 closure summary). The single write point that
+# correctly captures this for free, with no new control flow: the last
+# line before each handler returns normally. An uncaught, infrastructure-
+# level exception (the ONLY thing that takes the job-level failure path
+# for any of these four) never reaches that line at all, so last_run_at
+# correctly stays unwritten/stale for an attempt that genuinely never
+# completed -- exactly the "ran" vs. "never completed" distinction this
+# task was asked to decide, resolved by where the write sits in the
+# control flow, not by a separate try/except around it.
+#
+# handle_scheduler_tick() -- the scheduler's own JOB_HANDLERS entry, added
+# below. A genuinely different shape from the four adapter handlers: no
+# Qdrant client, no _open_source_session() (job.source_id is always None
+# for this job type, the identical already-established nullable-source_id
+# precedent the Job model's own comment already names for "not tied to
+# one source row"). See app/ingest/scheduler.py's own header comment for
+# the full per-tenant design decision (confirmed with the user directly,
+# not assumed) and the bootstrap/self-healing sweep
+# (ensure_scheduler_ticks_seeded(), wired into worker.py's own run() loop).
 import logging
 import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from qdrant_client import AsyncQdrantClient
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.sql import func
 
 from app import qdrant
 from app.config import get_settings
@@ -308,6 +338,7 @@ from app.ingest.database_adapter import (
 from app.ingest.models import DbConnection, Job, Source
 from app.ingest.repository import IngestRepository
 from app.ingest.row_templates import MissingColumnError, MissingPrimaryKeyError, TemplateRenderError
+from app.ingest.scheduler import JOB_TYPE_FOR_SOURCE_TYPE, get_due_sources, is_tenant_active
 from app.ingest.upload_adapter import ingest_upload
 from app.ingest.web_adapter import ingest_url
 
@@ -381,6 +412,15 @@ async def handle_ingest_url(job: Job) -> None:
             logger.info(
                 "handle_ingest_url: job %s url %s -> %s", job.id, url, result.status
             )
+        # Task 2.9.a: last_run_at set only once every URL has received a
+        # definitive outcome -- i.e. the handler is about to return
+        # normally, matching "ran" exactly (see this module's own header
+        # comment's Task 2.9.a paragraph for the full "ran vs. never
+        # completed" reasoning). An uncaught exception from inside the
+        # loop above never reaches this line, so a genuinely interrupted
+        # attempt correctly leaves last_run_at unchanged.
+        source.last_run_at = func.now()
+        await session.commit()
 
 
 async def handle_ingest_crawl(job: Job) -> None:
@@ -425,6 +465,11 @@ async def handle_ingest_crawl(job: Job) -> None:
             delay_seconds=settings.crawl_request_delay_seconds,
             on_page_visited=lambda: write_heartbeat(HEARTBEAT_PATH),
         )
+        # Task 2.9.a: last_run_at set once run_crawl() returns normally --
+        # see handle_ingest_url()'s own identical comment above for the
+        # full reasoning.
+        source.last_run_at = func.now()
+        await session.commit()
 
 
 async def handle_ingest_upload(job: Job) -> None:
@@ -471,6 +516,11 @@ async def handle_ingest_upload(job: Job) -> None:
                 original_filename,
                 result.status,
             )
+        # Task 2.9.a: last_run_at set once every upload has received a
+        # definitive outcome -- see handle_ingest_url()'s own identical
+        # comment above for the full reasoning.
+        source.last_run_at = func.now()
+        await session.commit()
 
 
 async def handle_ingest_db(job: Job) -> None:
@@ -583,3 +633,102 @@ async def handle_ingest_db(job: Job) -> None:
                     )
         finally:
             await conn.close()
+
+        # Task 2.9.a: last_run_at set once every table/row has received a
+        # definitive outcome -- see handle_ingest_url()'s own identical
+        # comment above for the full reasoning. Deliberately after the
+        # try/finally above (the connection is already closed): a crash
+        # severe enough to skip conn.close() entirely would also skip this
+        # line, which is correct -- that is exactly the "never completed"
+        # case last_run_at must NOT reflect.
+        source.last_run_at = func.now()
+        await session.commit()
+
+
+async def handle_scheduler_tick(job: Job) -> None:
+    """The scheduler's own `JOB_HANDLERS["scheduler_tick"]` entry -- a
+    genuinely different shape from the four adapter handlers above: no
+    Qdrant client, no `_open_source_session()` (this job has no
+    `source_id` of its own -- `job.source_id` is always `None` here,
+    matching the Job model's own existing `source_id`-nullable precedent
+    for exactly this "not tied to one source row" case).
+
+    Per-tenant (app/ingest/scheduler.py's own header comment has the full
+    design reasoning for why, not a global job): re-enqueues its OWN next
+    occurrence `Settings.scheduler_tick_interval_seconds` in the future
+    FIRST, before finding and enqueueing this tenant's own due sources --
+    deliberately this order, not the reverse: if enqueueing a due source
+    were ever to raise an unexpected, uncaught exception (an
+    infrastructure-level problem, not a per-source one -- see below), the
+    self-re-enqueue has already committed by then, so this tenant's own
+    scheduling chain survives regardless of what happens afterward.
+    `ensure_scheduler_ticks_seeded()` (app/ingest/scheduler.py, wired into
+    worker.py's own run() loop) is the backstop if the chain is ever
+    broken anyway (e.g. this job itself eventually exhausts max_attempts).
+
+    Per-source enqueueing is NOT wrapped in its own try/except, unlike the
+    four adapter handlers' own per-item loops: `enqueue()`'s only two
+    expected exceptions (UnknownJobTypeError, UnknownSourceError) cannot
+    actually occur here -- `job_type` always comes from the fixed,
+    already-valid JOB_TYPE_FOR_SOURCE_TYPE mapping, and `source.id` was
+    just read from a real row in this same transaction. Anything else
+    really would be an infrastructure-level problem, correctly left to
+    propagate uncaught and take the ordinary job-level backoff/retry path.
+
+    Suspended-tenant check FIRST, before anything else (layer 2 of the
+    three described in scheduler.py's own header comment): if the tenant
+    is no longer `is_tenant_active()`, this handler returns immediately --
+    no self-re-enqueue, no `get_due_sources()` call. The job itself still
+    succeeds (a cheap check that correctly found nothing to do is not a
+    failure); the real effect is that this tenant's own self-perpetuating
+    chain stops HERE instead of ticking forever for a tenant with nothing
+    to check. `ensure_scheduler_ticks_seeded()`'s own identical check
+    (layer 1) only ever looks at tenants with NO pending/running tick at
+    all, so it would never touch an ALREADY-RUNNING chain like this one --
+    this check is what actually stops a chain suspended mid-flight.
+    """
+    settings = get_settings()
+    async with _session_factory()() as session:
+        if not await is_tenant_active(session, job.tenant_id):
+            logger.info(
+                "handle_scheduler_tick: tenant %s is not active, letting its own "
+                "scheduler_tick chain end here",
+                job.tenant_id,
+            )
+            return
+
+        next_run_at = datetime.now(UTC) + timedelta(
+            seconds=settings.scheduler_tick_interval_seconds
+        )
+        await IngestRepository(tenant_id=job.tenant_id, session=session).enqueue(
+            job_type="scheduler_tick", next_run_at=next_run_at
+        )
+        await session.commit()
+
+        due_sources = await get_due_sources(session, tenant_id=job.tenant_id)
+        for source in due_sources:
+            job_type = JOB_TYPE_FOR_SOURCE_TYPE.get(source.type)
+            if job_type is None:
+                # Structurally impossible through the real schema --
+                # ck_sources_type already restricts source.type to exactly
+                # the four keys this mapping has -- but defensive rather
+                # than silently assuming, matching _open_source_session()'s
+                # own identical precedent for an analogous impossible case.
+                logger.error(
+                    "handle_scheduler_tick: tenant %s source %s has an "
+                    "unrecognized type %r, not enqueued",
+                    job.tenant_id,
+                    source.id,
+                    source.type,
+                )
+                continue
+            await IngestRepository(tenant_id=job.tenant_id, session=session).enqueue(
+                job_type=job_type, source_id=source.id, payload={}
+            )
+            await session.commit()
+            logger.info(
+                "handle_scheduler_tick: tenant %s enqueued %s for source %s",
+                job.tenant_id,
+                job_type,
+                source.id,
+            )

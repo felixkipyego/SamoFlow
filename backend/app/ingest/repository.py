@@ -76,8 +76,17 @@ from app.ingest.models import AuditLog, DbConnection, Job, VerifiedDomain
 # `ingest_upload`'s own `upload_id`-round-trips-as-a-string precedent
 # exactly (JSON has no native UUID type); see app/ingest/job_handlers.py's
 # own header comment for the full shape/policy.
+#
+# Task 2.9.a: "scheduler_tick" added -- a genuinely different kind of job
+# from the four `ingest_*` adapters above: it has no `source_id` (every
+# tenant's own scheduler_tick decides which SOURCES are due, it is not
+# itself about one source) and no real `sources.config` to read at all --
+# `payload` stays `{}`. See app/ingest/scheduler.py's own header comment
+# for the full design (per-tenant, self-re-enqueuing, the bootstrap/
+# self-healing sweep) and app/ingest/job_handlers.py's own header comment
+# for the real handler.
 VALID_JOB_TYPES: frozenset[str] = frozenset(
-    {"ingest_url", "ingest_crawl", "ingest_upload", "ingest_db"}
+    {"ingest_url", "ingest_crawl", "ingest_upload", "ingest_db", "scheduler_tick"}
 )
 
 
@@ -370,6 +379,7 @@ class IngestRepository:
         job_type: str,
         payload: dict | None = None,
         source_id: uuid.UUID | None = None,
+        next_run_at: datetime | None = None,
     ) -> Job:
         # Task 2.1.c: a method here, not a standalone function like
         # create_tenant()/get_site_key_by_key() (app/tenancy/repository.py)
@@ -390,6 +400,20 @@ class IngestRepository:
         # see PROJECT_SPEC.md's Step 2.1.c decision entry for why (the
         # column default stays only as an inert defensive floor for any
         # insert that bypasses this method).
+        #
+        # Task 2.9.a: `next_run_at` widened in -- a real, necessary
+        # consequence, not speculative. Every caller before this one wanted
+        # "eligible to claim right away", exactly the model's own
+        # TIMESTAMP_NOW default -- but `scheduler_tick`'s own self-re-
+        # enqueue (app/ingest/scheduler.py) genuinely needs the OPPOSITE: a
+        # job that is NOT yet claimable, due only `Settings.
+        # scheduler_tick_interval_seconds` in the future, or the tick would
+        # claim its own successor again immediately, in a tight loop with
+        # no real interval at all. Defaults to `None` -- passed through to
+        # `Job(...)` only when given, so every existing caller's own exact
+        # prior behavior (the model's TIMESTAMP_NOW default applying) is
+        # unchanged, byte for byte; only this new real caller ever passes a
+        # value.
         #
         # Task 2.6.b: job_type validated FIRST, before any database
         # interaction at all -- deliberately this order, not the reverse,
@@ -414,6 +438,7 @@ class IngestRepository:
             status="pending",
             max_attempts=get_settings().job_max_attempts,
             payload=payload or {},
+            **({"next_run_at": next_run_at} if next_run_at is not None else {}),
         )
         self.session.add(job)
         try:

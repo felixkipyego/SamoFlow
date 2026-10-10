@@ -31,6 +31,14 @@
 # Task 2.8.e [SECURITY]: `handle_ingest_db` registered too -- also no
 # heartbeat import needed, identical reasoning to `handle_ingest_upload`'s
 # own (see job_handlers.py's own header comment).
+#
+# Task 2.9.a: `handle_scheduler_tick` registered too -- no heartbeat import
+# needed (a per-tenant tick does a small, bounded amount of work per run,
+# not an open-ended discovery process). `ensure_scheduler_ticks_seeded()`
+# (app/ingest/scheduler.py) wired into run()'s own loop, same cadence as
+# `_reap_stuck_jobs()`/`write_heartbeat()` -- exactly the "a real
+# scheduler... is Step 2.9's own job, not built speculatively here"
+# comment `_reap_stuck_jobs()` already left for this task to find.
 import asyncio
 import logging
 import signal
@@ -47,9 +55,11 @@ from app.ingest.job_handlers import (
     handle_ingest_db,
     handle_ingest_upload,
     handle_ingest_url,
+    handle_scheduler_tick,
 )
 from app.ingest.models import Job
 from app.ingest.queue import claim_next_job, mark_job_failed, mark_job_succeeded, reap_stuck_jobs
+from app.ingest.scheduler import ensure_scheduler_ticks_seeded
 
 # all_models above is imported for the side effect of registering every
 # domain's tables on Base.metadata -- without it, jobs.tenant_id's FK to
@@ -168,6 +178,7 @@ JOB_HANDLERS: dict[str, Callable[[Job], Awaitable[None]]] = {
     "ingest_crawl": handle_ingest_crawl,
     "ingest_upload": handle_ingest_upload,
     "ingest_db": handle_ingest_db,
+    "scheduler_tick": handle_scheduler_tick,
 }
 
 
@@ -211,6 +222,22 @@ async def _reap_stuck_jobs() -> list:
         )
         await session.commit()
     return reaped
+
+
+async def _ensure_scheduler_ticks_seeded() -> list:
+    # Task 2.9.a: its own separate transaction, same reasoning as
+    # _reap_stuck_jobs() directly above. Run once per run() iteration, the
+    # same cadence -- this is BOTH the bootstrap for a tenant that has
+    # never had a scheduler_tick (a fresh database; a brand-new tenant
+    # created since the worker last checked) AND the self-healing
+    # recovery path if a tenant's own self-re-enqueuing chain was ever
+    # broken (see app/ingest/scheduler.py's own
+    # ensure_scheduler_ticks_seeded() docstring for the full reasoning).
+    async with _session_factory()() as session:
+        seeded = await ensure_scheduler_ticks_seeded(
+            session, interval_seconds=get_settings().scheduler_tick_interval_seconds
+        )
+    return seeded
 
 
 async def _claim_and_process_one_job() -> bool:
@@ -315,6 +342,15 @@ async def run(stop: asyncio.Event | None = None, max_iterations: int | None = No
             reaped = await _reap_stuck_jobs()
             if reaped:
                 logger.info("worker: reaped %d stuck job(s): %s", len(reaped), reaped)
+            # Task 2.9.a: the scheduler's own bootstrap/self-healing sweep,
+            # same cadence and same try/except as the two calls directly
+            # above -- a transient failure here must not crash the worker
+            # either.
+            seeded = await _ensure_scheduler_ticks_seeded()
+            if seeded:
+                logger.info(
+                    "worker: seeded scheduler_tick for %d tenant(s): %s", len(seeded), seeded
+                )
             claimed = await _claim_and_process_one_job()
         except Exception as exc:
             # A transient failure reaching the database (or claiming/

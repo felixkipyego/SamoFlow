@@ -32,6 +32,7 @@ import http.server
 import time
 import uuid
 from contextlib import asynccontextmanager
+from datetime import UTC, datetime, timedelta
 from urllib.parse import urlsplit
 
 import sqlalchemy as sa
@@ -41,7 +42,7 @@ from app import worker as worker_module
 from app.ingest import database_adapter as database_adapter_module
 from app.ingest import safe_fetch as safe_fetch_module
 from app.ingest import upload_storage
-from app.ingest.models import Document, Source
+from app.ingest.models import Document, Job, Source
 from app.ingest.repository import IngestRepository
 from app.tenancy.models import Tenant
 from app.worker import check_heartbeat_fresh, run
@@ -86,6 +87,17 @@ _BODY_B = (
     "<html><head><title>Page B</title></head><body>"
     "<h2>Section</h2><p>" + " ".join(f"beta{i}" for i in range(60)) + "</p></body></html>"
 )
+
+
+async def _fetch_source(source_id: uuid.UUID) -> Source:
+    # Task 2.9.a: matches _fetch_job()'s own identical one-line shape
+    # (tests/conftest.py) -- re-reads a Source row fresh from the real
+    # database after a handler has run, needed by this task's own
+    # last_run_at assertions (a value set inside the handler's own
+    # session/transaction, not visible on any Source object a test might
+    # still be holding from before the job ran).
+    async with db_session() as session:
+        return (await session.execute(sa.select(Source).where(Source.id == source_id))).scalar_one()
 
 
 async def _prepare_env(monkeypatch, live_test_services, **extra_overrides) -> tuple:
@@ -234,6 +246,14 @@ async def test_a_multi_url_job_is_claimed_processed_and_succeeds_through_the_rea
     assert len(records) >= 2
     assert {record.payload["source_url"] for record in records} == {url_a, url_b}
 
+    # Task 2.9.a: last_run_at set once the handler returns normally --
+    # the basic "does this one line fire at all" proof; the more subtle
+    # "still fires despite a per-item failure" case is proven separately
+    # below (test_one_unverified_url_is_skipped_...) and for a genuinely
+    # different handler shape (test_a_mixed_outcome_db_sync_job_...).
+    source_row = await _fetch_source(ids["source_id"])
+    assert source_row.last_run_at is not None
+
 
 async def test_one_unverified_url_is_skipped_while_valid_urls_in_the_same_job_still_ingest(
     monkeypatch, live_test_services
@@ -280,6 +300,14 @@ async def test_one_unverified_url_is_skipped_while_valid_urls_in_the_same_job_st
     )
     assert len(records) >= 2
     assert {record.payload["source_url"] for record in records} == {url_a, url_b}
+
+    # Task 2.9.a: the subtler, explicitly-named case -- a source whose own
+    # job had a real per-item failure (the unverified URL) still genuinely
+    # RAN, so last_run_at is set exactly the same as a clean, all-succeeded
+    # run (test_a_multi_url_job_... above) -- "attempted, not guaranteed"
+    # applies to last_run_at too, not only to the job's own final status.
+    source_row = await _fetch_source(ids["source_id"])
+    assert source_row.last_run_at is not None
 
 
 # --- Task 2.6.e part 2: handle_ingest_crawl() -----------------------------
@@ -969,6 +997,16 @@ async def test_a_mixed_outcome_db_sync_job_succeeds_with_each_row_independent(
             f"{probe['table']}:ext-3",
         }
 
+        # Task 2.9.a: proven here too (the identical handle_ingest_url()
+        # case above already covers the basic mechanism and a url-shaped
+        # partial failure) specifically because handle_ingest_db()'s own
+        # control flow is the most structurally different of the four
+        # handlers (the try/finally closing a real connection sits BEFORE
+        # this write) -- confirms the write point chosen still correctly
+        # fires after that, not skipped by the connection-cleanup path.
+        source_row = await _fetch_source(ids["source_id"])
+        assert source_row.last_run_at is not None
+
 
 async def test_a_stale_row_templates_entry_for_a_removed_table_is_rejected_not_synced(
     monkeypatch, live_test_services
@@ -1027,3 +1065,248 @@ async def test_a_stale_row_templates_entry_for_a_removed_table_is_rejected_not_s
         )
         assert len(records) >= 1
         assert all(record.payload["source_type"] == "database" for record in records)
+
+
+# --- Task 2.9.a [SECURITY]: handle_scheduler_tick() -----------------------
+# Same real-worker-loop methodology as every handler above (test (g)'s own
+# requirement -- every test below uses run(), never calls handle_scheduler_
+# tick() directly). No Qdrant needed at all -- this handler only ever
+# touches Postgres (enqueueing other jobs, never embedding/upserting
+# anything itself), so these tests use _seeded_tenant + a real test-db
+# connection only, matching test_worker.py's own reap-test precedent
+# (test_run_reaps_a_stuck_job_during_its_own_loop), not live_test_services().
+# get_due_sources()'s/ensure_scheduler_ticks_seeded()'s own pure-query
+# behavior is tested directly, offline-of-a-handler, in test_scheduler.py --
+# these tests only prove the HANDLER wires them correctly through the real
+# loop, matching every prior job-handler task's own proof requirement.
+
+
+async def test_scheduler_tick_enqueues_one_job_per_due_source_and_reschedules_itself(
+    monkeypatch, _seeded_tenant
+):
+    tenant_id = _seeded_tenant
+    set_valid_env(monkeypatch, VALID_ENV)
+
+    async with db_session() as session:
+        urls_source = Source(
+            tenant_id=tenant_id,
+            type="urls",
+            config={"urls": []},
+            refresh_interval="daily",
+            status="active",
+        )
+        crawl_source = Source(
+            tenant_id=tenant_id,
+            type="crawl",
+            config={"seed_url": "http://example.invalid/"},
+            refresh_interval="daily",
+            status="active",
+        )
+        upload_source = Source(
+            tenant_id=tenant_id,
+            type="upload",
+            config={"uploads": []},
+            refresh_interval="daily",
+            status="active",
+        )
+        db_source = Source(
+            tenant_id=tenant_id,
+            type="database",
+            config={"db_connection_id": str(uuid.uuid4())},
+            refresh_interval="daily",
+            status="active",
+        )
+        session.add_all([urls_source, crawl_source, upload_source, db_source])
+        await session.commit()
+        source_id_by_type = {
+            "urls": urls_source.id,
+            "crawl": crawl_source.id,
+            "upload": upload_source.id,
+            "database": db_source.id,
+        }
+
+        repo = IngestRepository(tenant_id=tenant_id, session=session)
+        tick_job = await repo.enqueue(job_type="scheduler_tick")
+        await session.commit()
+        tick_job_id = tick_job.id
+
+    await asyncio.wait_for(run(asyncio.Event(), max_iterations=1), timeout=10)
+
+    tick_job_after = await _fetch_job(tick_job_id)
+    assert tick_job_after.status == "succeeded"
+
+    async with db_session() as session:
+        enqueued = (
+            await session.execute(
+                sa.select(Job).where(
+                    Job.tenant_id == tenant_id, Job.job_type != "scheduler_tick"
+                )
+            )
+        ).scalars().all()
+    by_type = {job.job_type: job for job in enqueued}
+    assert set(by_type.keys()) == {"ingest_url", "ingest_crawl", "ingest_upload", "ingest_db"}
+    assert by_type["ingest_url"].source_id == source_id_by_type["urls"]
+    assert by_type["ingest_crawl"].source_id == source_id_by_type["crawl"]
+    assert by_type["ingest_upload"].source_id == source_id_by_type["upload"]
+    assert by_type["ingest_db"].source_id == source_id_by_type["database"]
+    assert all(job.status == "pending" for job in enqueued)
+
+    # The self-re-enqueue: a second, NOT-yet-claimable scheduler_tick now
+    # exists for this same tenant -- the original (succeeded) one plus the
+    # new one, never a third.
+    async with db_session() as session:
+        ticks = (
+            await session.execute(
+                sa.select(Job).where(
+                    Job.tenant_id == tenant_id, Job.job_type == "scheduler_tick"
+                )
+            )
+        ).scalars().all()
+    assert len(ticks) == 2
+    new_tick = next(job for job in ticks if job.id != tick_job_id)
+    assert new_tick.status == "pending"
+    assert new_tick.next_run_at > datetime.now(UTC) + timedelta(seconds=1)
+
+
+async def test_scheduler_tick_does_not_reenqueue_itself_once_its_tenant_is_suspended(
+    monkeypatch, _seeded_tenant
+):
+    # Resolves the suspended-tenant Open marker's own layer 2 (app/ingest/
+    # scheduler.py's header comment has the full three-layer design) --
+    # the layer that actually matters for a chain already in flight:
+    # ensure_scheduler_ticks_seeded() alone would never touch this tenant,
+    # since it only ever looks at tenants with NO pending/running tick,
+    # and this one already has a real, pending scheduler_tick job. A due
+    # source exists too, proving suspension stops BOTH the self-re-enqueue
+    # AND the per-source enqueueing, not merely one of the two.
+    tenant_id = _seeded_tenant
+    set_valid_env(monkeypatch, VALID_ENV)
+
+    async with db_session() as session:
+        source = Source(
+            tenant_id=tenant_id,
+            type="urls",
+            config={"urls": []},
+            refresh_interval="daily",
+            status="active",
+        )
+        session.add(source)
+        await session.commit()
+
+        repo = IngestRepository(tenant_id=tenant_id, session=session)
+        tick_job = await repo.enqueue(job_type="scheduler_tick")
+        await session.commit()
+        tick_job_id = tick_job.id
+
+        await session.execute(
+            sa.update(Tenant).where(Tenant.id == tenant_id).values(status="suspended")
+        )
+        await session.commit()
+
+    await asyncio.wait_for(run(asyncio.Event(), max_iterations=1), timeout=10)
+
+    tick_job_after = await _fetch_job(tick_job_id)
+    # The job itself still succeeds -- a cheap check that correctly found
+    # nothing to do is not a failure.
+    assert tick_job_after.status == "succeeded"
+
+    async with db_session() as session:
+        all_jobs_for_tenant = (
+            await session.execute(sa.select(Job).where(Job.tenant_id == tenant_id))
+        ).scalars().all()
+    # Exactly the one original tick (now succeeded) -- no new scheduler_
+    # tick re-enqueued, and no ingest_url job for the due source either.
+    assert len(all_jobs_for_tenant) == 1
+    assert all_jobs_for_tenant[0].id == tick_job_id
+
+
+async def test_scheduler_tick_never_touches_another_tenants_sources(monkeypatch, _seeded_tenant):
+    tenant_a = _seeded_tenant
+    tenant_b = uuid.uuid4()
+    set_valid_env(monkeypatch, VALID_ENV)
+
+    async with db_session() as session:
+        session.add(Tenant(id=tenant_b, name="Scheduler Isolation Proof Tenant B", status="active"))
+        await session.commit()
+
+        source_a = Source(
+            tenant_id=tenant_a,
+            type="urls",
+            config={"urls": []},
+            refresh_interval="daily",
+            status="active",
+        )
+        source_b = Source(
+            tenant_id=tenant_b,
+            type="urls",
+            config={"urls": []},
+            refresh_interval="daily",
+            status="active",
+        )
+        session.add_all([source_a, source_b])
+        await session.commit()
+
+        # Only tenant A gets a scheduler_tick job -- tenant B's own due
+        # source must still never be touched, proving the due-query and
+        # the enqueue loop are both genuinely scoped by job.tenant_id, not
+        # merely "no other tenant happened to have a tick running".
+        await IngestRepository(tenant_id=tenant_a, session=session).enqueue(
+            job_type="scheduler_tick"
+        )
+        await session.commit()
+
+    await asyncio.wait_for(run(asyncio.Event(), max_iterations=1), timeout=10)
+
+    async with db_session() as session:
+        tenant_b_non_tick_jobs = (
+            await session.execute(
+                sa.select(Job).where(
+                    Job.tenant_id == tenant_b, Job.job_type != "scheduler_tick"
+                )
+            )
+        ).scalars().all()
+    # Filtered to exclude "scheduler_tick" deliberately: tenant B has none
+    # of ITS OWN to begin with, so this same run() iteration's own
+    # bootstrap sweep (ensure_scheduler_ticks_seeded(), unrelated to
+    # handle_scheduler_tick() itself) correctly seeds one for tenant B too
+    # -- that is expected, separate behavior, not what this test is about.
+    # What must never happen, and is what this test actually checks: an
+    # "ingest_url" job for tenant B's own source, which would mean tenant
+    # A's own scheduler_tick leaked across the tenant boundary.
+    assert tenant_b_non_tick_jobs == []
+
+
+async def test_run_seeds_a_scheduler_tick_for_a_tenant_with_none_during_its_own_loop(
+    monkeypatch, _seeded_tenant
+):
+    # Confirms ensure_scheduler_ticks_seeded() (tested directly, offline-
+    # of-a-handler, in test_scheduler.py) genuinely fires from inside a
+    # real run() iteration -- matching test_run_reaps_a_stuck_job_during_
+    # its_own_loop's own identical "direct proof exists, confirm it also
+    # fires through the real loop" precedent.
+    tenant_id = _seeded_tenant
+    set_valid_env(monkeypatch, VALID_ENV)
+
+    await asyncio.wait_for(run(asyncio.Event(), max_iterations=1), timeout=10)
+
+    async with db_session() as session:
+        ticks = (
+            await session.execute(
+                sa.select(Job).where(
+                    Job.tenant_id == tenant_id, Job.job_type == "scheduler_tick"
+                )
+            )
+        ).scalars().all()
+    # Exactly one, still "pending", not yet claimed: seeded by this same
+    # iteration's own bootstrap sweep, with next_run_at deliberately
+    # `scheduler_tick_interval_seconds` in the future, NOT immediately
+    # claimable (see ensure_scheduler_ticks_seeded()'s own docstring for
+    # the real race this delay closes -- a freshly-bootstrapped tick must
+    # never be able to compete with this same tenant's own already-pending
+    # real work for the very next claim slot). This one iteration's own
+    # _claim_and_process_one_job() therefore finds nothing claimable for
+    # this tenant at all, correctly -- the tick will run on a LATER
+    # iteration, once its own delay elapses.
+    assert len(ticks) == 1
+    assert ticks[0].status == "pending"
+    assert ticks[0].next_run_at > datetime.now(UTC) + timedelta(seconds=1)

@@ -90,6 +90,16 @@ async def test_run_logs_only_the_exception_type_never_the_message_on_unexpected_
 
     monkeypatch.setattr(worker_module, "_reap_stuck_jobs", _reap_noop)
 
+    # Task 2.9.a: ensure_scheduler_ticks_seeded() now runs every iteration
+    # too, for the identical reason reap_stuck_jobs() is stubbed above --
+    # it would otherwise also hit this test's own fake DATABASE_URL before
+    # claim_next_job() is ever reached, masking the exception this test
+    # actually wants to exercise.
+    async def _seed_noop(*args, **kwargs):
+        return []
+
+    monkeypatch.setattr(worker_module, "_ensure_scheduler_ticks_seeded", _seed_noop)
+
     async def _raise_with_secret(session):
         raise ValueError("DISTINCTIVE-FAKE-SECRET-98765")
 
@@ -115,6 +125,29 @@ def _worker_subprocess_env(**overrides):
     return env
 
 
+# Task 2.9.a: widened from 10s to 20s for every real worker-subprocess
+# STARTUP wait below (the time from process spawn through every top-level
+# import, including this task's own new app.ingest.scheduler import, to
+# the first log line or process exit) -- a real, measured consequence,
+# not a blind bump. Confirmed live, not assumed: `import app.worker` under
+# a stripped environment already took ~8.7-9.1s BEFORE this task (already
+# 87-91% of the old 10s budget), confirmed via a direct, repeated
+# before/after comparison against the pre-task code. This task's own
+# small, legitimate addition to the import graph (app.ingest.scheduler,
+# needed by handle_scheduler_tick()) was then observed, live, to push
+# real `make test`/`make test-all` runs over that already-thin margin on
+# this shared machine -- once reproducing with a confirmed, completely
+# unrelated heavy CPU load present (a `pip install` compiling NumPy from
+# source for a different project), and once reproducing again with no
+# such load identifiable, meaning the ORIGINAL 10s budget was already too
+# tight for this project's own real import-graph size, with or without
+# extra external load, and this task's own legitimate growth is what
+# finally exposed it. NOT applied to timeouts measuring POST-startup
+# runtime behavior in the same tests (shutdown speed, job-claim speed) --
+# those are unaffected by import time and keep their own original 10s.
+_WORKER_SUBPROCESS_STARTUP_TIMEOUT = 20
+
+
 async def _wait_for_line_containing(stream, needle, timeout):
     async def _read():
         while True:
@@ -131,7 +164,7 @@ async def _wait_for_line_containing(stream, needle, timeout):
 async def test_sigterm_shuts_down_the_real_process_cleanly():
     async with spawn_module_subprocess("worker", _worker_subprocess_env(**VALID_ENV)) as process:
         startup_line = await _wait_for_line_containing(
-            process.stderr, "app_env=development", timeout=10
+            process.stderr, "app_env=development", timeout=_WORKER_SUBPROCESS_STARTUP_TIMEOUT
         )
         assert startup_line is not None, "worker never logged its startup line"
         process.send_signal(signal.SIGTERM)
@@ -141,7 +174,9 @@ async def test_sigterm_shuts_down_the_real_process_cleanly():
 
 async def test_worker_with_empty_environment_exits_nonzero_without_traceback():
     async with spawn_module_subprocess("worker", _worker_subprocess_env()) as process:
-        _, stderr = await asyncio.wait_for(process.communicate(), timeout=10)
+        _, stderr = await asyncio.wait_for(
+            process.communicate(), timeout=_WORKER_SUBPROCESS_STARTUP_TIMEOUT
+        )
     assert process.returncode != 0
     assert b"Traceback" not in stderr
 
@@ -374,7 +409,7 @@ async def test_sigterm_mid_handler_finishes_the_current_job_and_claims_no_other(
     env = _worker_subprocess_env(**{**VALID_ENV, "DATABASE_URL": database_url})
     async with spawn_module_subprocess("worker", env) as process:
         startup_line = await _wait_for_line_containing(
-            process.stderr, "app_env=development", timeout=10
+            process.stderr, "app_env=development", timeout=_WORKER_SUBPROCESS_STARTUP_TIMEOUT
         )
         assert startup_line is not None, "worker never logged its startup line"
 
@@ -419,8 +454,16 @@ async def _run_one_idle_iteration(monkeypatch, heartbeat_path, iterations=1):
     async def _reap_noop(*args, **kwargs):
         return []
 
+    # Task 2.9.a: ensure_scheduler_ticks_seeded() now runs every iteration
+    # too, for the identical real-DB-free reason reap_stuck_jobs() is
+    # stubbed above -- found live, not assumed: an earlier version without
+    # this stub hit this same helper's own fake, unreachable DATABASE_URL.
+    async def _seed_noop(*args, **kwargs):
+        return []
+
     monkeypatch.setattr(worker_module, "HEARTBEAT_PATH", heartbeat_path)
     monkeypatch.setattr(worker_module, "_reap_stuck_jobs", _reap_noop)
+    monkeypatch.setattr(worker_module, "_ensure_scheduler_ticks_seeded", _seed_noop)
     monkeypatch.setattr(worker_module, "claim_next_job", _claim_nothing)
     # 0.5s, not something tighter: check_heartbeat_fresh()'s own staleness
     # threshold is HEARTBEAT_STALE_MULTIPLIER * worker_poll_interval_seconds
