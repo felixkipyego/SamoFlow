@@ -277,6 +277,27 @@ class Settings(BaseSettings):
     # generous on both counts -- retuned later with real numbers, like
     # every other estimate in this project.
     scheduler_tick_interval_seconds: float = Field(default=300.0, gt=0)
+    # Task 2.9.b: the refresh-interval-vs-plan limit (docs/SPEC.md §5.4:
+    # "refresh frequency... from the plan") -- deliberately NOT sourced
+    # from `plans.limits` yet, same already-established reason as
+    # `crawl_page_cap`/`upload_max_size_bytes`/`db_sync_row_cap` above
+    # (`plans.limits` is still an unstructured JSONB stub, confirmed live:
+    # app/plans/service.py's own get_plan_limits() is a bare
+    # `raise NotImplementedError`, Task 4.3's own job; see the matching
+    # Open marker). Named as one of app/ingest/models.py's own
+    # REFRESH_INTERVAL_DELTAS keys, not a raw seconds count: this value is
+    # compared against a source's own `refresh_interval` by looking both
+    # up in that SAME dict (app/ingest/repository.py's
+    # _refresh_interval_violates_plan()), rather than inventing a second,
+    # parallel unit system for the identical four-value vocabulary (rule
+    # 11). "daily" (the shortest/most-frequent real interval that
+    # vocabulary names): the loosest possible floor, so every one of the
+    # four values is allowed by default -- matches this project's own
+    # "generous default, no real plan tiers exist yet" precedent
+    # (crawl_page_cap=500, upload_max_size_bytes=20MB, etc.) rather than
+    # arbitrarily restricting real usage before Task 4.3 gives this a real,
+    # per-plan answer.
+    refresh_interval_min_allowed: str = Field(default="daily")
 
     @field_validator("database_url")
     @classmethod

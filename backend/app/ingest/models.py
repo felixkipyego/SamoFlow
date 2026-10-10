@@ -18,13 +18,36 @@
 # extensions on the pinned postgres:18.2-trixie image; Postgres never
 # auto-indexes a foreign key column).
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from sqlalchemy import CheckConstraint, DateTime, ForeignKey, Index, LargeBinary, String, text
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db import TIMESTAMP_NOW, UUID_PK, Base
+
+# docs/SPEC.md §5.4's own four named refresh intervals -- a closed,
+# spec-fixed vocabulary, matching `sources.type`'s own CheckConstraint
+# precedent in spirit, but NOT enforced as a CheckConstraint (see
+# Source.refresh_interval's own comment below for why).
+#
+# Task 2.9.b: relocated here from app/ingest/scheduler.py (its original
+# home, Task 2.9.a) -- a real, necessary consequence, not a redesign:
+# app/ingest/repository.py's new create_source()/update_source() need this
+# exact same vocabulary for their own hard-reject validation, but
+# scheduler.py already imports IngestRepository from repository.py (its
+# own bootstrap-seeding call), so repository.py importing FROM scheduler.py
+# in the other direction would be a circular import. models.py is the one
+# place both already depend on (both import Source from here), and this
+# vocabulary is arguably more at home next to the column it describes
+# anyway. Values and behavior are completely unchanged -- scheduler.py
+# now imports this constant from here instead of defining it.
+REFRESH_INTERVAL_DELTAS: dict[str, timedelta] = {
+    "daily": timedelta(days=1),
+    "weekly": timedelta(weeks=1),
+    "monthly": timedelta(days=30),
+    "quarterly": timedelta(days=90),
+}
 
 
 class Source(Base):
@@ -48,10 +71,27 @@ class Source(Base):
     # nothing like a database source's), not yet needed as structured
     # columns (rule 11).
     config: Mapped[dict] = mapped_column(JSONB, nullable=False, server_default=text("'{}'::jsonb"))
+    # No CheckConstraint, unlike `type` above: REFRESH_INTERVAL_DELTAS (this
+    # module, above) is already the one real definition of this vocabulary
+    # (consumed directly by get_due_sources(), scheduler.py) -- a
+    # CheckConstraint here would be a SECOND, independently-maintained copy
+    # of the identical four strings (rule 11). Task 2.9.b's
+    # create_source()/update_source() (app/ingest/repository.py) validate
+    # against that same dict in Python instead, at creation/update time.
     refresh_interval: Mapped[str] = mapped_column(String, nullable=False)
     enabled: Mapped[bool] = mapped_column(nullable=False, server_default=text("true"))
     status: Mapped[str] = mapped_column(String, nullable=False)
     last_run_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Task 2.9.b: the downgrade-flagging primitive's own persisted state
+    # (flag_source_if_exceeds_plan(), app/ingest/repository.py) -- a plain
+    # boolean, not a timestamp: nothing in this task's own scope needs WHEN
+    # a source started/stopped exceeding its plan, only whether it
+    # currently does (the smallest correct mechanism, rule 11). Mirrors
+    # `enabled` above exactly in shape/style (server_default=false, the
+    # inverse of enabled's true -- a brand-new source never exceeds its own
+    # plan at creation time, since create_source() hard-rejects that case
+    # instead of ever persisting it).
+    exceeds_plan: Mapped[bool] = mapped_column(nullable=False, server_default=text("false"))
 
     __table_args__ = (
         CheckConstraint("type IN ('urls', 'crawl', 'upload', 'database')", name="ck_sources_type"),

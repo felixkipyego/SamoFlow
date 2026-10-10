@@ -40,7 +40,14 @@ from app.ingest.domain_verification import (
     check_file_verification,
     check_meta_tag_verification,
 )
-from app.ingest.models import AuditLog, DbConnection, Job, VerifiedDomain
+from app.ingest.models import (
+    REFRESH_INTERVAL_DELTAS,
+    AuditLog,
+    DbConnection,
+    Job,
+    Source,
+    VerifiedDomain,
+)
 
 # Task 2.6.b: the first REAL job-type vocabulary -- a real caller
 # (adapter, scheduler) could legitimately enqueue(). Deliberately real-
@@ -153,7 +160,124 @@ class UnknownSourceError(Exception):
     DomainAlreadyClaimedError's own shape: `source_id` is not a secret
     (the caller just supplied it), so the original IntegrityError stays
     chained via a plain `raise ... from exc`.
+
+    Task 2.9.b: also raised by update_source()/disable_source() (via
+    `IngestRepository._get_owned_source()` below) when `source_id` belongs
+    to no row at all, OR to a different tenant -- the two cases are
+    deliberately never distinguished (matching get_domain_by_id()'s own
+    enumeration-safety discipline below: a caller must not be able to tell
+    "wrong id" from "someone else's id" apart), just raised here instead of
+    returned as `None` -- update/disable are action verbs, not lookups, and
+    silently no-oping on a bad id would hide a real caller mistake.
     """
+
+
+class UnknownRefreshIntervalError(Exception):
+    """Raised by create_source()/update_source() when `refresh_interval` is
+    not one of REFRESH_INTERVAL_DELTAS's own keys (app/ingest/models.py) --
+    a plain pre-check, no database interaction involved, matching
+    UnknownJobTypeError's own shape exactly (checked up front, before
+    anything else). Distinct from RefreshIntervalExceedsPlanError below:
+    this is "not a real interval at all" (a typo/config-drift case),
+    whereas that one is "a real interval, just not one this plan allows."
+    """
+
+
+class RefreshIntervalExceedsPlanError(Exception):
+    """Raised by create_source()/update_source() when `refresh_interval` IS
+    one of REFRESH_INTERVAL_DELTAS's own keys, but is more frequent than
+    `Settings.refresh_interval_min_allowed` permits (app/config.py's own
+    Settings-stand-in for not-yet-built per-plan limit reading, Task 4.3).
+    A plain pre-check, same shape as UnknownRefreshIntervalError above --
+    see `_refresh_interval_violates_plan()`'s own comment for the exact
+    comparison, shared with `flag_source_if_exceeds_plan()` below (the
+    downgrade-flagging primitive uses the identical comparison, just reacts
+    to it differently: flags an EXISTING row instead of rejecting a new
+    write).
+    """
+
+
+def _refresh_interval_violates_plan(refresh_interval: str) -> bool:
+    # Task 2.9.b. The ONE comparison both create_source()/update_source()'s
+    # own hard-reject check (a NEW write exceeding the current plan) and
+    # flag_source_if_exceeds_plan() (an EXISTING row re-checked after some
+    # future plan downgrade) share -- written once here so the two call
+    # sites can never drift apart on what "exceeds the plan" even means
+    # (rule 11). Takes a plain string, not a Source object: this keeps the
+    # create_source() path trivial (checks the caller's own candidate
+    # value before ever constructing a row) and keeps update_source() from
+    # needing to mutate-then-maybe-undo an already-attached ORM attribute
+    # just to ask this question.
+    #
+    # "Exceeds the plan" means "refreshes MORE often than
+    # Settings.refresh_interval_min_allowed permits" -- a smaller
+    # timedelta is a more frequent refresh, so a real violation is
+    # `requested < floor`, not `>`. Both sides are looked up in the exact
+    # same REFRESH_INTERVAL_DELTAS dict (app/ingest/models.py) -- no
+    # separate ordering/comparison vocabulary invented for this.
+    #
+    # Assumes `refresh_interval` is already a recognized key -- every real
+    # caller below calls _validate_refresh_interval() first, which checks
+    # that separately and raises UnknownRefreshIntervalError before this
+    # function is ever reached with a bad value.
+    requested = REFRESH_INTERVAL_DELTAS[refresh_interval]
+    floor = REFRESH_INTERVAL_DELTAS[get_settings().refresh_interval_min_allowed]
+    return requested < floor
+
+
+def _validate_refresh_interval(refresh_interval: str) -> None:
+    # Task 2.9.b. Shared by create_source() and update_source() for
+    # "anything changed, applied consistently" (this task's own decision
+    # 1) -- one function, not two copies of the same two checks in two
+    # methods. Order matters: the vocabulary check first (a config-drift/
+    # typo case, same as UnknownJobTypeError's own up-front placement in
+    # enqueue()) before even asking whether a REAL interval is plan-
+    # exceeding -- an unrecognized string has no timedelta to compare at
+    # all.
+    if refresh_interval not in REFRESH_INTERVAL_DELTAS:
+        raise UnknownRefreshIntervalError(
+            f"refresh_interval {refresh_interval!r} is not one of "
+            f"{sorted(REFRESH_INTERVAL_DELTAS)}"
+        )
+    if _refresh_interval_violates_plan(refresh_interval):
+        raise RefreshIntervalExceedsPlanError(
+            f"refresh_interval {refresh_interval!r} is more frequent than "
+            f"this plan allows ({get_settings().refresh_interval_min_allowed!r} or coarser)"
+        )
+
+
+def flag_source_if_exceeds_plan(source: Source) -> bool:
+    """The downgrade-flagging primitive (Task 2.9.b, decision 2): checks
+    ONE already-existing `source` against the CURRENT plan limit (the same
+    Settings-stand-in `_refresh_interval_violates_plan()` uses) and sets
+    `source.exceeds_plan` to match -- never disables it, never touches
+    `last_run_at`/scheduling. Returns the new flag value for a caller that
+    wants to know without a second query.
+
+    Deliberately NOT a one-way "flag and never clear" latch: re-running
+    this after a later un-downgrade correctly clears a stale flag too (the
+    identical comparison, just now false) -- the same self-healing
+    "recurring check, not a one-time latch" shape this project already
+    uses for ensure_scheduler_ticks_seeded()'s own suspended/un-suspended
+    handling (app/ingest/scheduler.py).
+
+    Does NOT flush/commit -- matches every other method in this module
+    that mutates an already-attached row (revoke_domain() above): the
+    caller owns the transaction boundary. create_source()/update_source()
+    below never actually need this for their OWN writes (they hard-reject
+    a violation before it is ever persisted, see _validate_refresh_interval()
+    above) -- this function exists for a source that was fine when
+    written and only later stopped being fine, which neither of those two
+    methods' own code paths can ever produce by construction. Confirmed
+    live (not assumed): no code anywhere in this codebase currently reacts
+    to `tenants.plan_id` changing (grep across app/ finds that column only
+    in its own definition, app/tenancy/models.py) -- there is no
+    plan-change hook yet for this primitive to be wired into. It is built
+    here, unwired, exactly as Task 2.9.b's own instructions asked for.
+    """
+    exceeds = _refresh_interval_violates_plan(source.refresh_interval)
+    source.exceeds_plan = exceeds
+    return exceeds
 
 
 def _generate_verification_token() -> str:
@@ -348,6 +472,135 @@ class IngestRepository:
         self.session.add(db_connection)
         await self.session.flush()
         return db_connection
+
+    async def create_source(
+        self,
+        source_type: str,
+        config: dict,
+        refresh_interval: str,
+    ) -> Source:
+        """Task 2.9.b, the first real source-lifecycle primitive.
+        `refresh_interval` is hard-rejected up front (before any row is
+        ever constructed) by `_validate_refresh_interval()` above -- an
+        unrecognized value raises UnknownRefreshIntervalError, one more
+        frequent than `Settings.refresh_interval_min_allowed` allows raises
+        RefreshIntervalExceedsPlanError. `source_type` is NOT pre-validated
+        the same way: `ck_sources_type` (the model's own CheckConstraint)
+        already owns that closed vocabulary, matching claim_domain()'s own
+        established "trust the CheckConstraint, don't re-validate in
+        Python" precedent for `method` above -- an invalid value still
+        fails safely, just as an IntegrityError, not specially translated
+        here (no real caller constructs one today; this mirrors existing
+        practice, not a gap introduced by this task).
+
+        Deliberately does NOT call flag_source_if_exceeds_plan() or write
+        `exceeds_plan` at all: a row that violates the current plan is
+        rejected above before construction, so a freshly created source can
+        never start out already exceeding it -- the column's own
+        `server_default=false` (app/ingest/models.py) is correct as-is.
+
+        Deliberately does NOT seed any scheduler due-state of its own:
+        `scheduler_tick` is a per-TENANT job (Task 2.9.a), not a per-SOURCE
+        one, and get_due_sources() already selects every one of this
+        tenant's own enabled sources by `tenant_id` alone, with no
+        per-source registration step -- a brand-new source's own
+        `last_run_at IS NULL` already makes it due the very next time
+        this tenant's existing (or self-healing, see
+        ensure_scheduler_ticks_seeded()'s own docstring) scheduler_tick
+        chain runs. Inventing a second seeding mechanism here would
+        duplicate that already-working path (rule 11); proven live, not
+        assumed, by test_ingest_repository.py's own
+        test_create_source_is_immediately_due_with_no_extra_seeding_call.
+        """
+        _validate_refresh_interval(refresh_interval)
+        source = Source(
+            tenant_id=self.tenant_id,
+            type=source_type,
+            config=config,
+            refresh_interval=refresh_interval,
+            enabled=True,
+            status="active",
+        )
+        self.session.add(source)
+        await self.session.flush()
+        return source
+
+    async def _get_owned_source(self, source_id: uuid.UUID) -> Source:
+        # Shared by update_source()/disable_source() below -- the one real
+        # place both look up a source scoped to this repository's own
+        # tenant_id. A source_id belonging to a different tenant and one
+        # that doesn't exist at all are deliberately never distinguished
+        # (UnknownSourceError's own updated comment above has the full
+        # enumeration-safety reasoning), matching get_domain_by_id()'s own
+        # tenant-scoping precedent below, just raising instead of
+        # returning None (these two callers are actions, not lookups).
+        result = await self.session.execute(
+            select(Source).where(Source.id == source_id, Source.tenant_id == self.tenant_id)
+        )
+        source = result.scalar_one_or_none()
+        if source is None:
+            raise UnknownSourceError(f"source {source_id} does not exist")
+        return source
+
+    async def update_source(
+        self,
+        source_id: uuid.UUID,
+        *,
+        config: dict | None = None,
+        refresh_interval: str | None = None,
+    ) -> Source:
+        """Task 2.9.b. `config`/`refresh_interval` are both optional and
+        independently applied -- `None` means "leave unchanged," matching
+        this project's own partial-update convention elsewhere (e.g.
+        `create_db_connection()`'s own `allowlisted_tables=None` ->
+        "unchanged" shape, just applied here to an UPDATE instead of an
+        INSERT). `source_type`/`tenant_id` are deliberately not updatable
+        here at all: changing a source's own fundamental adapter type isn't
+        a real "edit an existing source" operation this task's own
+        instructions describe (create_source()/update_source()/
+        disable_source(), nothing about re-typing one) -- not built
+        speculatively.
+
+        `refresh_interval`, when provided, goes through the EXACT SAME
+        `_validate_refresh_interval()` hard-reject path as create_source()
+        above (this task's own decision 1: "applied consistently") --
+        checked against the plain candidate string BEFORE it ever touches
+        `source.refresh_interval`, so a rejected update leaves the
+        already-persistent row completely untouched (no dirty attribute to
+        roll back).
+        """
+        source = await self._get_owned_source(source_id)
+        if refresh_interval is not None:
+            _validate_refresh_interval(refresh_interval)
+            source.refresh_interval = refresh_interval
+        if config is not None:
+            source.config = config
+        await self.session.flush()
+        return source
+
+    async def disable_source(self, source_id: uuid.UUID) -> Source:
+        """Task 2.9.b, decision 3. Sets `enabled = False` -- NOT
+        `status` (confirmed live before building, not assumed:
+        get_due_sources()'s own real WHERE clause, app/ingest/scheduler.py,
+        already filters on `Source.enabled.is_(True)` alone; `status` has
+        no CheckConstraint and no vocabulary defined anywhere in this
+        codebase, and docs/SPEC.md's own dashboard wording (§6.3: "a table
+        with type, status, last and next refresh") describes `status` as a
+        separate, not-yet-built ingestion-health DISPLAY concern -- "ok" /
+        "syncing" / "error" -- unrelated to the enable/disable toggle this
+        task needs). This makes get_due_sources()'s own existing filter the
+        structural backstop with ZERO query changes needed: reusing that
+        filter exactly, per this task's own instruction, rather than
+        extending it or adding a second independent check. A disabled
+        source is proven live, via a real get_due_sources() call, to never
+        come back as due -- even with a NULL/stale `last_run_at` -- by
+        test_ingest_repository.py's own
+        test_disable_source_stops_it_from_being_returned_as_due.
+        """
+        source = await self._get_owned_source(source_id)
+        source.enabled = False
+        await self.session.flush()
+        return source
 
     async def get_decrypted_credentials(self, db_connection_id: uuid.UUID) -> dict[str, str]:
         # The one explicit call that unwraps the credential. Never log

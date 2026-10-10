@@ -16,7 +16,7 @@
 #     db_connection belonging to a different tenant, and a nonexistent id,
 #     must produce the identical outcome (both raise), never distinguished.
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import pytest
 import sqlalchemy as sa
@@ -32,10 +32,14 @@ from app.ingest.repository import (
     DomainAlreadyClaimedError,
     DomainRevokedError,
     IngestRepository,
+    RefreshIntervalExceedsPlanError,
     UnknownJobTypeError,
+    UnknownRefreshIntervalError,
     UnknownSourceError,
+    flag_source_if_exceeds_plan,
     revoke_domain,
 )
+from app.ingest.scheduler import get_due_sources
 from app.plans import models as plans_models  # noqa: F401 (registers "plans" on Base.metadata)
 from app.tenancy.models import Tenant
 from tests.conftest import (
@@ -1039,3 +1043,233 @@ async def test_revoke_domain_never_persists_the_status_change_alone_if_the_audit
     assert domain_row.status == "pending"
     assert domain_row.revoked_at is None
     assert audit_rows == []
+
+
+# --- Task 2.9.b: source lifecycle primitives -------------------------------
+# create_source()/update_source()/disable_source() and the downgrade-
+# flagging primitive, flag_source_if_exceeds_plan(). All live against the
+# real test-db -- disable_source()'s own proof in particular needs a REAL
+# get_due_sources() call (app/ingest/scheduler.py), not a mock, to actually
+# demonstrate the three-layer defense-in-depth backstop this task reused
+# rather than reinvented (see disable_source()'s own docstring).
+
+
+async def test_create_source_rejects_an_unrecognized_refresh_interval(_seeded_tenants):
+    ids = _seeded_tenants
+    async with db_session() as session:
+        repo = IngestRepository(tenant_id=ids["tenant_a"], session=session)
+        with pytest.raises(UnknownRefreshIntervalError, match="hourly"):
+            await repo.create_source(
+                source_type="urls", config={"urls": ["https://example.com"]},
+                refresh_interval="hourly",
+            )
+        count = (
+            await session.execute(sa.select(sa.func.count()).select_from(Source))
+        ).scalar_one()
+        assert count == 0  # the rejected call left no row behind
+
+
+async def test_create_source_rejects_an_interval_more_frequent_than_the_plan_allows(
+    _seeded_tenants, monkeypatch
+):
+    ids = _seeded_tenants
+    # The Settings-stand-in floor (app/config.py's own refresh_interval_
+    # min_allowed), tightened past its generous "daily" default so "daily"
+    # itself becomes a real violation -- the plan-exceeding case, distinct
+    # from the unrecognized-vocabulary case above.
+    monkeypatch.setenv("REFRESH_INTERVAL_MIN_ALLOWED", "weekly")
+    get_settings.cache_clear()
+    async with db_session() as session:
+        repo = IngestRepository(tenant_id=ids["tenant_a"], session=session)
+        with pytest.raises(RefreshIntervalExceedsPlanError, match="daily"):
+            await repo.create_source(
+                source_type="urls", config={"urls": ["https://example.com"]},
+                refresh_interval="daily",
+            )
+        count = (
+            await session.execute(sa.select(sa.func.count()).select_from(Source))
+        ).scalar_one()
+        assert count == 0
+
+
+async def test_create_source_accepts_a_valid_refresh_interval(_seeded_tenants):
+    ids = _seeded_tenants
+    async with db_session() as session:
+        repo = IngestRepository(tenant_id=ids["tenant_a"], session=session)
+        source = await repo.create_source(
+            source_type="urls", config={"urls": ["https://example.com"]},
+            refresh_interval="weekly",
+        )
+        await session.commit()
+        source_id = source.id
+
+    async with db_session() as session:
+        row = (await session.execute(sa.select(Source).where(Source.id == source_id))).scalar_one()
+    assert row.tenant_id == ids["tenant_a"]
+    assert row.type == "urls"
+    assert row.refresh_interval == "weekly"
+    assert row.enabled is True
+    assert row.exceeds_plan is False
+    assert row.last_run_at is None
+
+
+async def test_create_source_is_immediately_due_with_no_extra_seeding_call(_seeded_tenants):
+    # Decision (confirmed before building, not assumed): create_source()
+    # seeds no scheduler state of its own -- get_due_sources() already
+    # selects every one of this tenant's own enabled sources, and a fresh
+    # row's own `last_run_at IS NULL` already makes it due. Proves that is
+    # genuinely true live, with NOTHING else called in between.
+    ids = _seeded_tenants
+    async with db_session() as session:
+        repo = IngestRepository(tenant_id=ids["tenant_a"], session=session)
+        source = await repo.create_source(
+            source_type="urls", config={"urls": ["https://example.com"]},
+            refresh_interval="daily",
+        )
+        await session.commit()
+        source_id = source.id
+
+    async with db_session() as session:
+        due = await get_due_sources(session, tenant_id=ids["tenant_a"])
+    assert {s.id for s in due} == {source_id}
+
+
+async def test_update_source_enforces_the_same_refresh_interval_rules_on_change(
+    _seeded_tenants, monkeypatch
+):
+    ids = _seeded_tenants
+    async with db_session() as session:
+        repo = IngestRepository(tenant_id=ids["tenant_a"], session=session)
+        source = await repo.create_source(
+            source_type="urls", config={"urls": ["https://example.com"]},
+            refresh_interval="daily",
+        )
+        await session.commit()
+        source_id = source.id
+
+    # Unrecognized interval: rejected, existing row untouched.
+    async with db_session() as session:
+        repo = IngestRepository(tenant_id=ids["tenant_a"], session=session)
+        with pytest.raises(UnknownRefreshIntervalError, match="hourly"):
+            await repo.update_source(source_id, refresh_interval="hourly")
+
+    # Plan-exceeding interval: rejected the same way create_source() would.
+    monkeypatch.setenv("REFRESH_INTERVAL_MIN_ALLOWED", "weekly")
+    get_settings.cache_clear()
+    async with db_session() as session:
+        repo = IngestRepository(tenant_id=ids["tenant_a"], session=session)
+        with pytest.raises(RefreshIntervalExceedsPlanError, match="daily"):
+            await repo.update_source(source_id, refresh_interval="daily")
+
+    async with db_session() as session:
+        unchanged = (
+            await session.execute(sa.select(Source).where(Source.id == source_id))
+        ).scalar_one()
+    assert unchanged.refresh_interval == "daily"  # both rejections left it alone
+
+    # A valid change (still within the now-tightened "weekly" floor) applies.
+    async with db_session() as session:
+        repo = IngestRepository(tenant_id=ids["tenant_a"], session=session)
+        updated = await repo.update_source(
+            source_id, config={"urls": ["https://example.com/new"]}, refresh_interval="weekly"
+        )
+        await session.commit()
+    assert updated.refresh_interval == "weekly"
+    assert updated.config == {"urls": ["https://example.com/new"]}
+
+
+async def test_disable_source_stops_it_from_being_returned_as_due(_seeded_tenants):
+    ids = _seeded_tenants
+    async with db_session() as session:
+        never_run = Source(
+            tenant_id=ids["tenant_a"], type="urls", config={}, refresh_interval="daily",
+            enabled=True, status="active", last_run_at=None,
+        )
+        stale = Source(
+            tenant_id=ids["tenant_a"], type="urls", config={}, refresh_interval="daily",
+            enabled=True, status="active",
+            last_run_at=datetime.now(UTC) - timedelta(days=30),
+        )
+        session.add_all([never_run, stale])
+        await session.commit()
+        never_run_id, stale_id = never_run.id, stale.id
+
+    # Before disabling: both are due (NULL and stale last_run_at alike).
+    async with db_session() as session:
+        due_before = await get_due_sources(session, tenant_id=ids["tenant_a"])
+    assert {s.id for s in due_before} == {never_run_id, stale_id}
+
+    async with db_session() as session:
+        repo = IngestRepository(tenant_id=ids["tenant_a"], session=session)
+        disabled = await repo.disable_source(stale_id)
+        await session.commit()
+    assert disabled.enabled is False
+
+    # After disabling: get_due_sources() -- the real structural backstop,
+    # reusing its existing Source.enabled.is_(True) filter with zero query
+    # changes -- never returns it, regardless of its stale last_run_at.
+    async with db_session() as session:
+        due_after = await get_due_sources(session, tenant_id=ids["tenant_a"])
+    assert {s.id for s in due_after} == {never_run_id}
+
+
+async def test_disable_source_raises_for_a_source_belonging_to_a_different_tenant(
+    _seeded_tenants,
+):
+    ids = _seeded_tenants
+    async with db_session() as session:
+        source = Source(
+            tenant_id=ids["tenant_a"], type="urls", config={}, refresh_interval="daily",
+            enabled=True, status="active",
+        )
+        session.add(source)
+        await session.commit()
+        source_id = source.id
+
+    async with db_session() as session:
+        repo = IngestRepository(tenant_id=ids["tenant_b"], session=session)
+        with pytest.raises(UnknownSourceError, match=str(source_id)):
+            await repo.disable_source(source_id)
+
+
+async def test_flag_source_if_exceeds_plan_flags_without_disabling_or_touching_scheduling(
+    _seeded_tenants, monkeypatch
+):
+    ids = _seeded_tenants
+    last_run_at = datetime.now(UTC) - timedelta(days=5)
+    async with db_session() as session:
+        source = Source(
+            tenant_id=ids["tenant_a"], type="urls", config={}, refresh_interval="daily",
+            enabled=True, status="active", last_run_at=last_run_at,
+        )
+        session.add(source)
+        await session.commit()
+        source_id = source.id
+
+    # Created under today's generous "daily" default -- no violation yet.
+    async with db_session() as session:
+        result = await session.execute(sa.select(Source).where(Source.id == source_id))
+        source = result.scalar_one()
+        exceeds = flag_source_if_exceeds_plan(source)
+        await session.commit()
+    assert exceeds is False
+    assert source.exceeds_plan is False
+
+    # A hypothetical stricter plan (a downgrade, simulated the only way
+    # this task's own Settings-stand-in can be): the SAME existing source,
+    # re-checked, is now flagged -- disable_source() is never called, and
+    # neither enabled nor last_run_at move.
+    monkeypatch.setenv("REFRESH_INTERVAL_MIN_ALLOWED", "weekly")
+    get_settings.cache_clear()
+    async with db_session() as session:
+        result = await session.execute(sa.select(Source).where(Source.id == source_id))
+        source = result.scalar_one()
+        exceeds = flag_source_if_exceeds_plan(source)
+        await session.commit()
+    assert exceeds is True
+
+    async with db_session() as session:
+        row = (await session.execute(sa.select(Source).where(Source.id == source_id))).scalar_one()
+    assert row.exceeds_plan is True
+    assert row.enabled is True  # not disabled
+    assert row.last_run_at == last_run_at  # scheduling untouched

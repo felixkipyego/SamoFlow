@@ -83,24 +83,17 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import DateTimeClock
-from app.ingest.models import Job, Source
+from app.ingest.models import REFRESH_INTERVAL_DELTAS, Job, Source
 from app.ingest.repository import IngestRepository
 from app.tenancy.models import Tenant
 
-# docs/SPEC.md §5.4's own four named refresh intervals -- a closed,
-# spec-fixed vocabulary, matching `sources.type`'s own CheckConstraint
-# precedent in spirit, but NOT enforced as a CheckConstraint here: that
-# belongs with the real refresh-interval-vs-plan validation (Task 2.9.b's
-# own job, per the Step 2.9 breakdown -- this task only reads whatever
-# value is already there). An unrecognized value (a config drift this
-# task cannot prevent, only detect) is treated as "not due" rather than
+# REFRESH_INTERVAL_DELTAS moved to app/ingest/models.py at Task 2.9.b --
+# see that module's own header comment for why (repository.py's new
+# create_source()/update_source() need it too, and importing it from here
+# would be circular: this module already imports IngestRepository, below).
+# Re-used here unchanged: an unrecognized value (a config drift this task
+# cannot prevent, only detect) is still treated as "not due" rather than
 # raised -- see get_due_sources()'s own docstring.
-REFRESH_INTERVAL_DELTAS: dict[str, timedelta] = {
-    "daily": timedelta(days=1),
-    "weekly": timedelta(weeks=1),
-    "monthly": timedelta(days=30),
-    "quarterly": timedelta(days=90),
-}
 
 # The job_type each adapter's own completed-task work already established
 # (2.6.d/2.6.e/2.7.d/2.8.e) -- `sources.type` uses the bare adapter name,
