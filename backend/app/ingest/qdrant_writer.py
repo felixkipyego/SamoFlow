@@ -281,6 +281,7 @@ async def finish_ingest(
     source_type: str,
     url: str | None,
     file_name: str | None,
+    row_identity: str | None = None,
     embedding_version: str,
     clock: DateTimeClock = lambda: datetime.now(UTC),
 ) -> tuple[str, uuid.UUID]:
@@ -293,28 +294,37 @@ async def finish_ingest(
     sniff-and-extract) stays separate, genuinely different in shape, and
     is NOT part of this function.
 
-    `url`/`file_name`: exactly one is a real string, the other `None`,
-    matching Document's own mutual-exclusivity convention (2.4.a) -- the
-    caller decides which. The existing-row lookup below queries BOTH
-    columns in one shape (`Document.url == url, Document.file_name ==
-    file_name`) rather than branching on which one is set: SQLAlchemy's
-    own `== None` overload produces `IS NULL`, not a literal `= NULL`
-    comparison that would never match, so this one shape is correct for
-    BOTH callers -- confirmed by reading SQLAlchemy's own documented
-    behavior, not assumed. The two partial unique indexes (2.4.a) already
-    guarantee each row has only one of the two columns populated, so this
-    can never ambiguously match the wrong row.
+    `url`/`file_name`/`row_identity`: exactly one is a real string, the
+    other two `None`, matching Document's own mutual-exclusivity
+    convention (2.4.a, widened at Task 2.8.d to a third dimension) -- the
+    caller decides which. `row_identity` defaults to `None` specifically
+    so this widening is a pure addition: `ingest_url()`/`ingest_upload()`
+    (2.6.c/2.7.c, both completed tasks, neither touched by this change)
+    keep calling this function exactly as they always have, never passing
+    it, and the real behavior they get is byte-for-byte unchanged -- only
+    `ingest_db_row()` (2.8.d, database_adapter.py) is the new, third real
+    caller that ever passes a real value. The existing-row lookup below
+    queries ALL THREE columns in one shape rather than branching on which
+    one is set: SQLAlchemy's own `== None` overload produces `IS NULL`,
+    not a literal `= NULL` comparison that would never match, so this one
+    shape is correct for all three callers -- confirmed by reading
+    SQLAlchemy's own documented behavior at 2.6.c/2.7.c, re-confirmed here
+    for the third column. The three partial unique indexes (2.4.a for the
+    first two, 2.8.d for `row_identity`) already guarantee each row has
+    only one of the three columns populated, so this can never ambiguously
+    match the wrong row.
 
     Returns `(status, document_id)` -- status is always `"unchanged"` or
     `"ingested"`, never `"skipped"`/`"failed"` (each caller decides those
     earlier, in its OWN adapter-specific step, before ever calling this
     function) -- `document_id` is always a real `uuid.UUID`, never `None`.
     Each caller wraps this pair into its own result type (`IngestResult`/
-    `UploadIngestResult`), deliberately NOT a value this shared function
-    returns itself: those two types' own docstrings describe genuinely
-    different adapter semantics (decided at 2.7.b, re-confirmed at the
-    2.7.a/b/c duplication check) -- unifying THEIR shape too would force
-    one of them to describe the other's own meanings inaccurately.
+    `UploadIngestResult`/`DbRowIngestResult`), deliberately NOT a value
+    this shared function returns itself: each result type's own docstring
+    describes genuinely different adapter semantics (decided at 2.7.b,
+    re-confirmed at the 2.7.a/b/c duplication check, re-confirmed again at
+    2.8.d) -- unifying THEIR shape too would force one of them to describe
+    another's own meanings inaccurately.
     """
     content_hash = compute_content_hash(content)
 
@@ -324,6 +334,7 @@ async def finish_ingest(
                 Document.source_id == source_id,
                 Document.url == url,
                 Document.file_name == file_name,
+                Document.row_identity == row_identity,
             )
         )
     ).scalar_one_or_none()
@@ -356,6 +367,7 @@ async def finish_ingest(
                 source_id=source_id,
                 url=url,
                 file_name=file_name,
+                row_identity=row_identity,
                 title=content.title,
                 content_hash=content_hash,
                 status="extracted",

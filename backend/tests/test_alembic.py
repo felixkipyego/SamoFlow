@@ -405,6 +405,14 @@ def test_upgrade_head_is_idempotent_and_never_prints_the_password(_test_engine):
     assert documents_file_name_index["unique"] is True
     assert documents_file_name_index["column_names"] == ["source_id", "file_name"]
 
+    # Task 2.8.d: the row_identity-side third partial index -- the
+    # database-source twin of the two above.
+    (documents_row_identity_index,) = [
+        i for i in documents_indexes if i["name"] == "ix_documents_source_id_row_identity_unique"
+    ]
+    assert documents_row_identity_index["unique"] is True
+    assert documents_row_identity_index["column_names"] == ["source_id", "row_identity"]
+
     # Task 2.1.b: db_connections.encrypted_credentials needs pgcrypto --
     # the real migration (not just the test fixture's own workaround,
     # 2.1.a's own bug) must be the thing that enables it.
@@ -821,6 +829,91 @@ def test_documents_url_and_file_name_constraints_enforced_by_the_database(_test_
     with engine.connect() as connection:
         (count,) = connection.execute(sa.text("SELECT count(*) FROM documents")).one()
     assert count == 6
+
+
+def test_downgrade_removes_documents_row_identity_column_and_partial_index(_test_engine):
+    # Task 2.8.d: the same C1 pattern as the documents status-check/
+    # partial-index downgrade test above and the three before it -- pin
+    # to this migration's own specific, immutable revision ID (never
+    # "head"), then downgrade "-1" one relative step from there.
+    engine = _test_engine
+    _reset_public_schema(engine)
+    migrated = _run_alembic("upgrade", "8aad12c28f2f", engine=engine)
+    assert migrated.returncode == 0, migrated.stdout + migrated.stderr
+
+    downgraded = _run_alembic("downgrade", "-1", engine=engine)
+    assert downgraded.returncode == 0, downgraded.stdout + downgraded.stderr
+
+    inspector = sa.inspect(engine)
+    document_columns = {c["name"] for c in inspector.get_columns("documents")}
+    assert "row_identity" not in document_columns
+
+    document_index_names = {i["name"] for i in inspector.get_indexes("documents")}
+    assert "ix_documents_source_id_row_identity_unique" not in document_index_names
+
+    restored = _run_alembic("upgrade", "head", engine=engine)
+    assert restored.returncode == 0, restored.stdout + restored.stderr
+
+
+def test_documents_row_identity_constraint_enforced_by_the_database(_test_engine):
+    # Task 2.8.d: the real security/data-integrity property the new
+    # partial unique index exists to protect -- the row_identity-side
+    # twin of test_documents_url_and_file_name_constraints_enforced_by_
+    # the_database above, kept as its OWN new test rather than extending
+    # that completed task's own test (rule 2), even though it reuses the
+    # identical INSERT-and-assert shape.
+    engine = _test_engine
+    _reset_public_schema(engine)
+    migrated = _run_alembic("upgrade", "head", engine=engine)
+    assert migrated.returncode == 0, migrated.stdout + migrated.stderr
+
+    with engine.connect() as connection:
+        connection.execute(
+            sa.text("INSERT INTO tenants (name, status) VALUES ('Tenant Rows', 'active')")
+        )
+        connection.execute(
+            sa.text(
+                "INSERT INTO sources (tenant_id, type, refresh_interval, status) "
+                "SELECT id, 'database', 'daily', 'active' FROM tenants WHERE name = 'Tenant Rows'"
+            )
+        )
+        connection.commit()
+
+    insert_document = (
+        "INSERT INTO documents (tenant_id, source_id, row_identity, status, last_seen_at) "
+        "SELECT t.id, s.id, :row_identity, :status, now() "
+        "FROM tenants t JOIN sources s ON s.tenant_id = t.id WHERE t.name = 'Tenant Rows'"
+    )
+
+    with engine.connect() as connection:
+        # Two different row identities, same source_id: both succeed.
+        connection.execute(
+            sa.text(insert_document),
+            {"row_identity": "public.products:1", "status": "pending"},
+        )
+        connection.execute(
+            sa.text(insert_document),
+            {"row_identity": "public.products:2", "status": "pending"},
+        )
+        connection.commit()
+
+    # Duplicate (source_id, row_identity): rejected.
+    assert_rejected_by_integrity_error(
+        engine, insert_document, {"row_identity": "public.products:1", "status": "pending"}
+    )
+
+    # NULL row_identity (a web/upload-source document, the identical
+    # already-proven "neither set" case) still allowed, same reasoning
+    # as the url/file_name test above.
+    with engine.connect() as connection:
+        connection.execute(
+            sa.text(insert_document), {"row_identity": None, "status": "pending"}
+        )
+        connection.commit()
+
+    with engine.connect() as connection:
+        (count,) = connection.execute(sa.text("SELECT count(*) FROM documents")).one()
+    assert count == 3
 
 
 def test_verified_domains_partial_index_rejects_active_duplicate_frees_on_revoke(_test_engine):

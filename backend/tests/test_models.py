@@ -186,6 +186,21 @@ def test_documents_file_name_unique_index_is_partial_and_scoped_to_source():
     assert "file_name IS NOT NULL" in str(where_clause)
 
 
+def test_documents_row_identity_unique_index_is_partial_and_scoped_to_source():
+    # Task 2.8.d: the row_identity-side twin of the url/file_name partial
+    # indexes above -- resolves the long-open "whoever first designs real
+    # identity/uniqueness for `database`-source documents" marker (2.4.a).
+    table = Base.metadata.tables["documents"]
+    (index,) = [
+        i for i in table.indexes if i.name == "ix_documents_source_id_row_identity_unique"
+    ]
+    assert index.unique is True
+    assert [c.name for c in index.columns] == ["source_id", "row_identity"]
+    where_clause = index.dialect_options["postgresql"]["where"]
+    assert where_clause is not None, "index has no postgresql_where -- it is not partial"
+    assert "row_identity IS NOT NULL" in str(where_clause)
+
+
 def test_audit_log_has_no_tenant_id_column():
     # Task 2.2.a: deliberately a platform-level log, not tenant-scoped --
     # confirmed, not merely absent by oversight (see app/ingest/models.py's

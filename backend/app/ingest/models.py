@@ -74,12 +74,20 @@ class Document(Base):
         nullable=False,
         index=True,
     )
-    # A web source (urls/crawl) has a url; an upload has a file_name --
-    # never both meaningfully for the same document, so both stay
-    # nullable rather than forcing a fake value into whichever one a
-    # given source type doesn't use.
+    # A web source (urls/crawl) has a url; an upload has a file_name; a
+    # database source (Task 2.8.d) has a row_identity -- never more than
+    # one meaningfully for the same document, so all three stay nullable
+    # rather than forcing a fake value into whichever two a given source
+    # type doesn't use.
     url: Mapped[str | None] = mapped_column(String, nullable=True)
     file_name: Mapped[str | None] = mapped_column(String, nullable=True)
+    # Task 2.8.d: resolves the long-open "whoever first designs real
+    # identity/uniqueness for `database`-source documents" marker
+    # (recorded at 2.4.a / the duplication check after it) -- see this
+    # class's own `__table_args__` comment below for the full mechanism,
+    # and app/ingest/row_templates.py's own derive_row_identity() for how
+    # the real string is built (`f"{table}:{pk_value}"`).
+    row_identity: Mapped[str | None] = mapped_column(String, nullable=True)
     title: Mapped[str | None] = mapped_column(String, nullable=True)
     # content_hash and etag exist for one reason: docs/SPEC.md §5.3's
     # idempotency design ("a re-run overwrites instead of duplicating")
@@ -116,12 +124,30 @@ class Document(Base):
     # filename at all). The class comment above only named two of the
     # three real cases; a document with both columns NULL is therefore a
     # genuinely valid state, not a gap to close here, so no "at least one
-    # of url/file_name must be set" CheckConstraint is added.
+    # of url/file_name must be set" CheckConstraint is added. 2.4.a's own
+    # investigation stopped there, deliberately: "a database-source
+    # document has zero uniqueness protection today... correctly out of
+    # scope for 2.4.a itself (no database adapter or row-identity design
+    # exists yet)" -- recorded as its own Open marker, now resolved below.
     #
-    # TWO separate partial unique indexes, not one combined index: the
-    # mutual exclusivity means a (source_id, url) collision and a
-    # (source_id, file_name) collision are two independent uniqueness
-    # rules with no row ever needing to be compared on both at once.
+    # Task 2.8.d: row_identity is that third case's own real identity --
+    # the database-source twin of url/file_name, same mutual-exclusivity
+    # convention, same partial-unique-index pattern, added the moment a
+    # real adapter (and a real identity scheme, derive_row_identity() in
+    # app/ingest/row_templates.py) existed to define what should
+    # distinguish two such rows, exactly as that Open marker's own
+    # "likely a table/row-identifier column" prediction anticipated.
+    # Confirmed live, not assumed, before this column existed: two
+    # indistinguishable database-source rows (both url and file_name
+    # NULL) under the same source_id both inserted successfully with no
+    # error at all -- the real, reproduced gap this column and its own
+    # index close.
+    #
+    # THREE separate partial unique indexes, not one combined index: the
+    # mutual exclusivity means a (source_id, url) collision, a
+    # (source_id, file_name) collision and a (source_id, row_identity)
+    # collision are three independent uniqueness rules with no row ever
+    # needing to be compared on more than one at once.
     # postgresql_where="... IS NOT NULL" is NOT functionally required to
     # stop two NULL rows from colliding -- confirmed live (Postgres never
     # considers two NULLs equal under a plain unique index, so unmatched
@@ -146,6 +172,13 @@ class Document(Base):
             "file_name",
             unique=True,
             postgresql_where=text("file_name IS NOT NULL"),
+        ),
+        Index(
+            "ix_documents_source_id_row_identity_unique",
+            "source_id",
+            "row_identity",
+            unique=True,
+            postgresql_where=text("row_identity IS NOT NULL"),
         ),
     )
 

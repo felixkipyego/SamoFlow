@@ -25,8 +25,11 @@ import asyncpg
 import asyncpg.cursor
 import dns.asyncresolver
 import pytest
+import sqlalchemy as sa
 
+from app import qdrant
 from app.ingest import database_adapter as database_adapter_module
+from app.ingest import qdrant_writer as qdrant_writer_module
 from app.ingest.database_adapter import (
     InvalidQueryError,
     UnsafeDatabaseHostError,
@@ -34,12 +37,15 @@ from app.ingest.database_adapter import (
     connect_safely,
     ensure_read_only,
     fetch_readonly_rows,
+    ingest_db_row,
 )
+from app.ingest.models import Document, Source
 from app.tenancy.models import Tenant
 from tests.conftest import (
     assert_db_connection_credential_round_trip,
     db_session,
     fake_is_unsafe_except_loopback,
+    patch_embed_dense,
     require_test_database,
 )
 from tests.test_host_safety import _fake_resolver_class
@@ -497,3 +503,147 @@ async def test_a_genuine_single_select_statement_is_accepted(readonly_and_writab
         assert [dict(r) for r in rows] == [{"one": 1}]
     finally:
         await conn.close()
+
+
+# --- Task 2.8.d: the per-row ingest primitive, ingest_db_row() -----------
+# Live against both real services (test-db AND test-qdrant), matching
+# test_upload_adapter.py's own established methodology exactly -- this
+# task's own three required proofs: the unchanged-shortcut firing on
+# identical content, NOT firing when a row is edited in place (same
+# identity, new content), and two different rows never colliding.
+
+_PRODUCTS_TEMPLATE_CONFIG = {
+    "columns": ["name", "price"],
+    "template": "Product: {name}, priced at {price}",
+    "primary_key": "id",
+}
+
+
+async def _seed_tenant_and_database_source() -> dict:
+    tenant_id = uuid.uuid4()
+    async with db_session() as session:
+        session.add(Tenant(id=tenant_id, name="Database Adapter Proof Tenant", status="active"))
+        await session.commit()
+
+    async with db_session() as session:
+        source = Source(
+            tenant_id=tenant_id, type="database", refresh_interval="daily", status="active"
+        )
+        session.add(source)
+        await session.commit()
+        source_id = source.id
+
+    return {"tenant_id": tenant_id, "source_id": source_id}
+
+
+async def _setup_db_row_test(monkeypatch, live_test_services):
+    patch_embed_dense(monkeypatch)
+    _, client, collection_name = live_test_services
+    await qdrant.ensure_collection(client, collection_name)
+    ids = await _seed_tenant_and_database_source()
+    return client, collection_name, ids
+
+
+async def _ingest_row(client, collection_name, ids, row, template_config=_PRODUCTS_TEMPLATE_CONFIG):
+    async with db_session() as session:
+        result = await ingest_db_row(
+            session,
+            client,
+            collection_name,
+            tenant_id=ids["tenant_id"],
+            source_id=ids["source_id"],
+            table="public.products",
+            row=row,
+            template_config=template_config,
+        )
+        await session.commit()
+    return result
+
+
+async def test_rerun_with_identical_row_content_skips_reembed(monkeypatch, live_test_services):
+    client, collection_name, ids = await _setup_db_row_test(monkeypatch, live_test_services)
+    row = {"id": 1, "name": "Widget", "price": 9.99}
+
+    first = await _ingest_row(client, collection_name, ids, row)
+    assert first.status == "ingested"
+    count_after_first = await client.count(collection_name=collection_name)
+
+    calls = []
+    original = qdrant_writer_module.embed_and_upsert
+
+    async def _counting(*args, **kwargs):
+        calls.append(1)
+        return await original(*args, **kwargs)
+
+    monkeypatch.setattr(qdrant_writer_module, "embed_and_upsert", _counting)
+
+    # The identical row dict again -- the realistic shape of a scheduled
+    # re-sync hitting a row that has not changed since the last run.
+    second = await _ingest_row(client, collection_name, ids, row)
+
+    assert second.status == "unchanged"
+    assert second.document_id == first.document_id
+    assert calls == []  # embed_and_upsert() was never called the second time
+    count_after_second = await client.count(collection_name=collection_name)
+    assert count_after_second.count == count_after_first.count
+
+
+async def test_a_row_edited_in_place_keeps_its_identity_and_reembeds(
+    monkeypatch, live_test_services
+):
+    # The core case 2.4.a's own marker existed to handle: the SAME
+    # primary key (the SAME real-world row), but its other column values
+    # changed since the last sync -- the unchanged-shortcut must NOT fire,
+    # the SAME documents row must be updated (not a second one created),
+    # and the real Qdrant content must reflect the new value.
+    client, collection_name, ids = await _setup_db_row_test(monkeypatch, live_test_services)
+    row_v1 = {"id": 1, "name": "Widget", "price": 9.99}
+    row_v2 = {"id": 1, "name": "Widget", "price": 14.99}
+
+    first = await _ingest_row(client, collection_name, ids, row_v1)
+    assert first.status == "ingested"
+
+    second = await _ingest_row(client, collection_name, ids, row_v2)
+    assert second.status == "ingested"  # the shortcut did NOT fire
+    assert second.document_id == first.document_id  # same identity, same document
+
+    records, _ = await client.scroll(
+        collection_name=collection_name,
+        scroll_filter=qdrant.tenant_filter(ids["tenant_id"]),
+        limit=10,
+    )
+    assert len(records) >= 1
+    assert all("14.99" in record.payload["text"] for record in records)
+    assert all("9.99" not in record.payload["text"] for record in records)
+
+
+async def test_two_different_rows_never_collide_even_with_identical_content(
+    monkeypatch, live_test_services
+):
+    # Different primary keys, deliberately IDENTICAL rendered content --
+    # the one case that would reveal a collision if derive_row_identity()
+    # or finish_ingest()'s own new row_identity lookup were wrong, since
+    # content-hash comparison alone could never catch an identity bug
+    # (two genuinely different rows with the same content must still
+    # become two genuinely different documents rows).
+    client, collection_name, ids = await _setup_db_row_test(monkeypatch, live_test_services)
+    row_a = {"id": 1, "name": "Widget", "price": 9.99}
+    row_b = {"id": 2, "name": "Widget", "price": 9.99}
+
+    result_a = await _ingest_row(client, collection_name, ids, row_a)
+    result_b = await _ingest_row(client, collection_name, ids, row_b)
+
+    assert result_a.status == "ingested"
+    assert result_b.status == "ingested"
+    assert result_a.document_id != result_b.document_id
+
+    async with db_session() as session:
+        documents = (
+            await session.execute(
+                sa.select(Document).where(Document.source_id == ids["source_id"])
+            )
+        ).scalars().all()
+    assert {doc.row_identity for doc in documents} == {
+        "public.products:1",
+        "public.products:2",
+    }

@@ -79,6 +79,23 @@
 # (2.8.d) is responsible for building a query this allowlist, the textual
 # guard, AND the actual database's own real grants would all separately
 # accept.
+#
+# Task 2.8.d: each table's own config gains a THIRD field, `"primary_key"`
+# -- a plain column name (a string, matching `columns`'s own "just names,
+# no structure" shape), alongside the existing `"columns"`/`"template"` --
+# not a restructuring of what 2.8.c already built, exactly as that task's
+# own instruction required. Deliberately NOT required to also appear in
+# `"columns"` itself: an internal id column is a completely ordinary real
+# case for a primary key that should never be rendered into the knowledge-
+# base text itself (confirmed by this module's own 2.8.c precedent --
+# render_row_to_text() already tolerates and ignores a row carrying extra
+# columns beyond `columns`, a design decision made exactly so an id column
+# fetched alongside the rendered ones would not need to appear in the
+# rendered text). derive_row_identity() below is the one new function this
+# field exists for -- see its own docstring for the full identity scheme
+# and how it composes with finish_ingest() (app/ingest/qdrant_writer.py,
+# widened at this same task to accept a third identity dimension,
+# `row_identity`, alongside its own pre-existing `url`/`file_name`).
 from collections.abc import Mapping
 from typing import Any
 
@@ -101,6 +118,59 @@ class TemplateRenderError(Exception):
     rather than surfacing as a bare, unexplained KeyError from
     str.format() internals.
     """
+
+
+class MissingPrimaryKeyError(Exception):
+    """Raised by derive_row_identity() when the table's own declared
+    `primary_key` column is either absent from `row` or NULL -- same
+    "surface loudly, don't paper over it" philosophy as MissingColumnError
+    (this module's own header comment): a missing primary-key column is a
+    stale template, matching MissingColumnError's own reasoning exactly;
+    a NULL primary-key VALUE is different again (the column resolved fine,
+    but a NULL can never be a stable identity for anything) -- both are
+    genuine configuration/data-integrity problems, never a per-row
+    variation to render around the way a NULL in `columns` is.
+    """
+
+
+def derive_row_identity(
+    row: Mapping[str, Any], table: str, template_config: Mapping[str, Any]
+) -> str:
+    """The stable identity string for one fetched row: `f"{table}:
+    {pk_value}"`, where `pk_value` is `row[template_config["primary_key"]]`
+    -- the scheme named directly by this task's own scope decision, not
+    invented here. `table` is the SAME schema-qualified string
+    `allowlisted_tables`/`row_templates` both use (2.8.c) -- passed
+    explicitly, not read from `template_config` itself, matching
+    is_table_allowlisted()'s own "table is always an explicit parameter"
+    convention (this module's own header comment). Schema-qualification
+    is exactly what keeps this scheme collision-free across tables: two
+    different allowlisted tables can never produce the same identity
+    string unless their own schema-qualified names were themselves
+    ambiguous, which `is_table_allowlisted()`'s own plain-string membership
+    check already assumes they are not.
+
+    Raises MissingPrimaryKeyError if `primary_key`'s own column is absent
+    from `row` or its value is NULL -- see that exception's own docstring.
+    Never renders a NULL primary key as an empty string the way
+    render_row_to_text() does for an ordinary template column: a NULL
+    identity would make every such row collide on `f"{table}:"`, silently
+    merging genuinely distinct rows into one `documents` row -- the exact
+    failure mode this whole mechanism exists to prevent, so it fails
+    loudly here instead.
+    """
+    pk_column = template_config["primary_key"]
+    if pk_column not in row:
+        raise MissingPrimaryKeyError(
+            f"row is missing its declared primary_key column {pk_column!r}"
+        )
+    pk_value = row[pk_column]
+    if pk_value is None:
+        raise MissingPrimaryKeyError(
+            f"primary_key column {pk_column!r} is NULL for this row -- a NULL "
+            "value can never be a stable row identity"
+        )
+    return f"{table}:{pk_value}"
 
 
 def is_table_allowlisted(allowlisted_tables: Mapping[str, Any], table: str) -> bool:

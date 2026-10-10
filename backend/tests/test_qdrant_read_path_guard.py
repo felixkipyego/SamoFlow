@@ -94,6 +94,15 @@ APP_DIR = BACKEND_DIR / "app"
 # deciding, that it trips rule (a) the same way web_adapter.py/job_
 # handlers.py/crawl.py already do. Calls NO method on the client itself,
 # so NOT added to READ_ALLOWLIST, same reasoning.
+# Task 2.8.d: app/ingest/database_adapter.py added -- the identical shape
+# yet again (ingest_db_row() takes `client` as a bare pass-through
+# parameter, typed as the real AsyncQdrantClient, forwarded unmodified to
+# finish_ingest()). This file already imports asyncpg freely (2.8.a/b's
+# own asyncpg-confinement guard, test_database_adapter_guard.py, is a
+# SEPARATE allow-list for a different client entirely) -- this is its
+# first use of qdrant_client specifically. Calls no method on the client
+# itself, so NOT added to READ_ALLOWLIST, same reasoning as every prior
+# entry here.
 CLIENT_ACCESS_ALLOWLIST: frozenset[str] = frozenset(
     {
         "app/qdrant.py",
@@ -104,6 +113,7 @@ CLIENT_ACCESS_ALLOWLIST: frozenset[str] = frozenset(
         "app/ingest/job_handlers.py",
         "app/ingest/crawl.py",
         "app/ingest/upload_adapter.py",
+        "app/ingest/database_adapter.py",
     }
 )
 

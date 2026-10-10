@@ -195,14 +195,80 @@
 # responsible for constructing a query this guard will actually accept.
 # It does NOT create or manage `sources`/`jobs` rows, and it does NOT
 # register a `JOB_HANDLERS` entry (2.8.d/2.8.e's own jobs).
+#
+# Task 2.8.d: the per-row ingest primitive, ingest_db_row() -- the third
+# real caller of finish_ingest() (app/ingest/qdrant_writer.py), per the
+# Step 2.7 canonical-contract precedent, following ingest_url()'s/ingest_
+# upload()'s own established shape exactly: render the row to text (2.8.c's
+# own render_row_to_text()), derive its stable identity (2.8.c's own
+# derive_row_identity(), added at this same task), call finish_ingest()
+# with that identity and content. `_SOURCE_TYPE = "database"` hardcoded,
+# not a parameter -- matching upload_adapter.py's own identical reasoning
+# (`ingest_db_row()` has exactly one real caller and one possible value;
+# a parameter with only one ever-passed value is a parameter the task
+# does not need, rule 11). EMBEDDING_VERSION imported from web_adapter.py
+# directly, not redeclared -- matching upload_adapter.py's own identical
+# precedent (one project-wide embedding-version constant, not a per-
+# adapter copy).
+#
+# finish_ingest() itself WIDENED at this same task (a real, necessary,
+# flagged consequence, not assumed away): it previously accepted only
+# `url`/`file_name` as identity dimensions, with NO way to pass a third
+# kind of identity through its own hardcoded two-column lookup and
+# Document(...) construction -- confirmed by reading its actual code
+# before building this, not assumed reusable as-is just because the
+# task's own plan described it that way. Resolved by adding a THIRD
+# keyword-only parameter, `row_identity: str | None = None` -- the
+# default means `ingest_url()`/`ingest_upload()` (2.6.c/2.7.c, both
+# completed tasks) needed zero changes of their own and keep their exact
+# prior behavior, byte for byte; only this function, the new third real
+# caller, ever passes a real value. See qdrant_writer.py's own updated
+# docstring for the full widening.
+#
+# ExtractedContent wrapping: render_row_to_text() (2.8.c) returns a plain
+# string, matching that task's own literal instruction ("the rendered
+# text string finish_ingest() expects as content") -- but finish_ingest()
+# actually takes `content: ExtractedContent` (app/ingest/extract_html.py),
+# never a bare string, confirmed by reading its real signature rather
+# than assumed from the task's own description. Resolved here, not by
+# retroactively changing render_row_to_text()'s own return type (2.8.c is
+# a completed task; its own contract, "return the rendered string," is
+# correct and unchanged) -- _text_to_extracted_content() below wraps the
+# string into the flat, structureless ExtractedContent shape extract_
+# text.py's own extract_text() already established for exactly this
+# "no heading structure at all" case (one ContentBlock, no heading_path,
+# `title=None`, `word_count=len(text.split())`), reused rather than
+# reinvented.
+#
+# `is_nearly_empty`, inherited for free from that same reuse, confirmed
+# live and flagged rather than silently accepted: NEARLY_EMPTY_WORD_
+# THRESHOLD (extract_html.py) is 50 words, and most real row-to-text
+# templates (short, structured sentences) will render well under that --
+# meaning `Document.is_nearly_empty` will likely be `True` for the
+# common case here, unlike a web page (where it flags a genuine anomaly).
+# The underlying boolean MECHANISM is still correctly reused (rule 11 --
+# don't invent a second one); only its DASHBOARD-FACING interpretation
+# ("may need JavaScript" makes no sense for a product row) would need
+# its own per-source-type wording, Phase 6's own job, not touched here.
 import ipaddress
 import re
 import uuid
+from collections.abc import Mapping
+from dataclasses import dataclass
+from datetime import UTC, datetime
+from typing import Any
 
 import asyncpg
+from qdrant_client import AsyncQdrantClient
+from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.db import DateTimeClock
+from app.ingest.extract_html import ContentBlock, ExtractedContent
 from app.ingest.host_safety import resolve_and_validate
 from app.ingest.ip_safety import is_unsafe_destination_ip
+from app.ingest.qdrant_writer import finish_ingest
+from app.ingest.row_templates import derive_row_identity, render_row_to_text
+from app.ingest.web_adapter import EMBEDDING_VERSION
 
 
 class UnsafeDatabaseHostError(Exception):
@@ -391,3 +457,97 @@ async def fetch_readonly_rows(
         await conn.execute("SELECT set_config('statement_timeout', $1, true)", timeout_ms)
         cursor = await conn.cursor(query)
         return await cursor.fetch(row_cap)
+
+
+_SOURCE_TYPE = "database"
+
+
+@dataclass(frozen=True)
+class DbRowIngestResult:
+    """An equivalent of web_adapter.py's own IngestResult/upload_adapter.py's
+    own UploadIngestResult (2.7.b's own "genuinely distinct concerns stay
+    separate" precedent, re-confirmed here, not reused directly) -- but
+    deliberately only TWO states, not four: `"ingested"`/`"unchanged"`,
+    matching finish_ingest()'s own exact, non-nullable return contract.
+    Neither `"skipped"` nor `"failed"` applies here -- by the time
+    ingest_db_row() is ever called, the row has already been fetched
+    through 2.8.b's own full defense-in-depth chain and already rendered
+    through 2.8.c's own renderer; a genuine problem at either of those
+    earlier stages (a bad query, a stale template) is a configuration
+    problem that propagates UNCAUGHT from this function (matching row_
+    templates.py's own "surface loudly" philosophy for MissingColumnError/
+    MissingPrimaryKeyError/TemplateRenderError), not a per-row outcome
+    this result type needs to represent.
+    """
+
+    status: str
+    document_id: uuid.UUID
+
+
+def _text_to_extracted_content(text: str) -> ExtractedContent:
+    """Wraps a rendered row's own plain string (render_row_to_text(),
+    2.8.c) into the flat, structureless ExtractedContent shape finish_
+    ingest() actually requires -- see this module's own header comment
+    for why this wrapping lives here, not inside render_row_to_text()
+    itself. Mirrors extract_text.py's own extract_text() exactly (the
+    identical "no heading structure at all" case): one ContentBlock (none
+    if the rendered text is empty), no title, word_count over the
+    stripped text.
+    """
+    stripped = text.strip()
+    blocks = (ContentBlock(heading_path=(), text=stripped),) if stripped else ()
+    return ExtractedContent(title=None, blocks=blocks, word_count=len(stripped.split()))
+
+
+async def ingest_db_row(
+    session: AsyncSession,
+    client: AsyncQdrantClient,
+    collection_name: str,
+    *,
+    tenant_id: uuid.UUID,
+    source_id: uuid.UUID,
+    table: str,
+    row: Mapping[str, Any],
+    template_config: Mapping[str, Any],
+    clock: DateTimeClock = lambda: datetime.now(UTC),
+) -> DbRowIngestResult:
+    """Renders one already-fetched database row into its own `documents`
+    row, creating or updating it via finish_ingest() -- the third real
+    caller of that shared tail (web_adapter.py's ingest_url(), upload_
+    adapter.py's ingest_upload(), both 2.6.c/2.7.c), per the Step 2.7
+    canonical-contract precedent. See this module's own header comment
+    for the full design, including the two real, necessary widenings this
+    task made to already-completed code (finish_ingest()'s own new
+    `row_identity` parameter; the ExtractedContent-wrapping step) and why
+    each was necessary rather than assumed away.
+
+    `row`/`table`/`template_config` are taken exactly as already given --
+    this function has no idea how `row` was fetched, whether `table` was
+    ever checked against `is_table_allowlisted()`, or whether `template_
+    config` is really `row_templates[table]` -- all of that is the real,
+    not-yet-built caller's job (2.8.e's own job handler). This primitive
+    only ever does two things with its three inputs: derive the row's own
+    stable identity (row_templates.py's derive_row_identity(), added at
+    this same task) and render it to text (row_templates.py's render_row_
+    to_text(), 2.8.c) -- then hands both to finish_ingest() exactly like
+    ingest_url()/ingest_upload() hand it a url/file_name and an already-
+    extracted ExtractedContent.
+    """
+    row_identity = derive_row_identity(row, table, template_config)
+    content = _text_to_extracted_content(render_row_to_text(row, template_config))
+
+    status, document_id = await finish_ingest(
+        session,
+        client,
+        collection_name,
+        content,
+        tenant_id=tenant_id,
+        source_id=source_id,
+        source_type=_SOURCE_TYPE,
+        url=None,
+        file_name=None,
+        row_identity=row_identity,
+        embedding_version=EMBEDDING_VERSION,
+        clock=clock,
+    )
+    return DbRowIngestResult(status=status, document_id=document_id)

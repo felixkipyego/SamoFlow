@@ -13,11 +13,15 @@
 # -- so a plain dict is a faithful stand-in for this module's own actual
 # contract, and no live test-db round trip would prove anything a dict
 # doesn't already prove just as well.
+import uuid
+
 import pytest
 
 from app.ingest.row_templates import (
     MissingColumnError,
+    MissingPrimaryKeyError,
     TemplateRenderError,
+    derive_row_identity,
     is_table_allowlisted,
     render_row_to_text,
 )
@@ -118,3 +122,72 @@ def test_an_extra_column_in_the_row_not_named_in_columns_is_ignored():
         render_row_to_text(row, _TEMPLATE_CONFIG)
         == "Product: Widget - A fine widget, priced at 9.99"
     )
+
+
+# --- derive_row_identity() ------------------------------------------------
+
+_PRODUCTS_CONFIG = {
+    "columns": ["name", "price"],
+    "template": "{name}: {price}",
+    "primary_key": "id",
+}
+
+
+def test_a_normal_integer_primary_key_derives_the_expected_identity():
+    row = {"id": 42, "name": "Widget", "price": 9.99}
+    assert derive_row_identity(row, "public.products", _PRODUCTS_CONFIG) == "public.products:42"
+
+
+def test_a_string_primary_key_derives_the_expected_identity():
+    row = {"id": "SKU-001", "name": "Widget", "price": 9.99}
+    assert (
+        derive_row_identity(row, "public.products", _PRODUCTS_CONFIG) == "public.products:SKU-001"
+    )
+
+
+def test_a_uuid_primary_key_derives_the_expected_identity():
+    pk = uuid.uuid4()
+    row = {"id": pk, "name": "Widget", "price": 9.99}
+    assert derive_row_identity(row, "public.products", _PRODUCTS_CONFIG) == f"public.products:{pk}"
+
+
+def test_a_primary_key_value_containing_a_colon_does_not_break_derivation():
+    # Edge case named directly by this task's own test requirement: the
+    # table prefix is always written first and whole, so a colon inside
+    # the pk VALUE itself cannot be confused with the table/pk separator
+    # -- it simply becomes part of the (still perfectly valid, still
+    # collision-free in practice) tail of the string.
+    row = {"id": "weird:value", "name": "Widget", "price": 9.99}
+    assert (
+        derive_row_identity(row, "public.products", _PRODUCTS_CONFIG)
+        == "public.products:weird:value"
+    )
+
+
+def test_a_zero_primary_key_value_is_a_genuine_identity_not_treated_as_falsy():
+    # 0 is a perfectly real primary key value -- derive_row_identity()
+    # must not accidentally treat it like None/missing via a truthiness
+    # check instead of an explicit `is None` check.
+    row = {"id": 0, "name": "Widget", "price": 9.99}
+    assert derive_row_identity(row, "public.products", _PRODUCTS_CONFIG) == "public.products:0"
+
+
+def test_a_missing_primary_key_column_raises_missing_primary_key_error():
+    row = {"name": "Widget", "price": 9.99}  # no "id" at all
+    with pytest.raises(MissingPrimaryKeyError, match="id"):
+        derive_row_identity(row, "public.products", _PRODUCTS_CONFIG)
+
+
+def test_a_null_primary_key_value_raises_missing_primary_key_error():
+    row = {"id": None, "name": "Widget", "price": 9.99}
+    with pytest.raises(MissingPrimaryKeyError, match="NULL"):
+        derive_row_identity(row, "public.products", _PRODUCTS_CONFIG)
+
+
+def test_different_tables_with_the_same_primary_key_value_never_collide():
+    row = {"id": 1, "name": "Widget", "price": 9.99}
+    products_identity = derive_row_identity(row, "public.products", _PRODUCTS_CONFIG)
+    orders_identity = derive_row_identity(row, "public.orders", _PRODUCTS_CONFIG)
+    assert products_identity != orders_identity
+    assert products_identity == "public.products:1"
+    assert orders_identity == "public.orders:1"
