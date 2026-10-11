@@ -674,8 +674,10 @@ class IngestRepository:
         source as recently-run and excludes it, exactly as it would for
         any other completed run, with zero code of its own aware that
         refresh-now exists. Proven live, not assumed, by
-        test_ingest_repository.py's own
-        test_a_source_refreshed_via_refresh_now_is_not_returned_as_due.
+        test_job_handlers.py's own
+        test_a_source_refreshed_via_refresh_now_is_not_returned_as_due_afterward
+        (through the REAL worker.run() loop, not called in isolation --
+        matches every other job-handler task's own proof requirement).
 
         No exemption for a new/never-run source (build item 3): a never-
         requested source (`last_refresh_requested_at IS NULL`) always

@@ -789,6 +789,39 @@ async def assert_db_connection_credential_round_trip(
     assert decrypted == credentials
 
 
+async def _verify_domain_directly(domain_id: uuid.UUID) -> None:
+    # Duplication check after 2.9.a/b/c: "claim a domain, then force it to
+    # 'verified' via a raw UPDATE, bypassing the real DNS/file/meta_tag
+    # check" had grown to FIVE separate copies with no shared helper --
+    # test_revocation_preserves_indexed_content.py, test_web_adapter.py,
+    # and three inside test_job_handlers.py alone (two named helpers,
+    # _seed_tenant_source_and_verified_domain()/_seed_tenant_crawl_source_
+    # and_verified_domain(), plus a THIRD, inline copy the 2.9.c refresh-
+    # now test added) -- each one's own comment already said "matching
+    # the established precedent," so the duplication was known, just never
+    # extracted, well past this project's own 3rd-occurrence threshold.
+    #
+    # Deliberately holds ONLY the claim-then-verify dance, decoupled from
+    # any source/job creation: the 2.9.c call site needed exactly this,
+    # and nothing more -- its own source is created and its own job is
+    # triggered via request_refresh_now() afterward, not auto-enqueued the
+    # way _seed_tenant_source_and_verified_domain()'s own bundled shape
+    # would (which is the real reason that call site wrote an inline copy
+    # in the first place rather than reusing an existing helper). Callers
+    # that also want a source/job created still build their own bundled
+    # helper around this one (see test_job_handlers.py's own two, still
+    # bundled on purpose, each for its own adapter-specific config shape).
+    async with db_session() as session:
+        await session.execute(
+            sa.text(
+                "UPDATE verified_domains SET status = 'verified', verified_at = now() "
+                "WHERE id = :id"
+            ),
+            {"id": domain_id},
+        )
+        await session.commit()
+
+
 @pytest.fixture
 async def _seeded_tenant(reset_test_database) -> AsyncIterator[uuid.UUID]:
     # Shared by test_queue.py (2.1.c) and test_worker.py (2.1.d/e)

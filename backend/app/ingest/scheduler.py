@@ -142,13 +142,17 @@ async def get_due_sources(
     SQL-level reimplementation of the same dict.
 
     A `source.refresh_interval` value outside `REFRESH_INTERVAL_DELTAS`
-    (schema permits any string -- no CheckConstraint exists yet, that is
-    Task 2.9.b's own job) is a configuration-drift case this task cannot
-    prevent, only detect -- logged by the caller (handle_scheduler_tick(),
-    job_handlers.py) and treated as NOT due, never raised: one source's
-    own stale/invalid config must not abort the whole tenant's tick,
-    matching this project's own established per-item-independence
-    discipline (Step 2.7 closure summary).
+    (schema permits any string -- deliberately no CheckConstraint, Task
+    2.9.b's own real resolution, not a gap left pending: a CheckConstraint
+    would be a second, independently-maintained copy of the identical
+    vocabulary this dict already owns, rule 11 -- 2.9.b's create_source()/
+    update_source(), app/ingest/repository.py, validate against this same
+    dict in Python instead, at creation/update time) is a configuration-
+    drift case this task cannot prevent, only detect -- logged by the
+    caller (handle_scheduler_tick(), job_handlers.py) and treated as NOT
+    due, never raised: one source's own stale/invalid config must not
+    abort the whole tenant's tick, matching this project's own established
+    per-item-independence discipline (Step 2.7 closure summary).
     """
     if not await is_tenant_active(session, tenant_id):
         return []

@@ -50,6 +50,7 @@ from app.worker import check_heartbeat_fresh, run
 from tests.conftest import (
     VALID_ENV,
     _fetch_job,
+    _verify_domain_directly,
     db_session,
     fake_is_unsafe_except_loopback,
     local_http_server,
@@ -190,18 +191,11 @@ async def _seed_tenant_source_and_verified_domain(urls: list[str]) -> dict:
         await session.commit()
         domain_id = verified_domain.id
 
-    # Raw UPDATE straight to "verified", matching test_web_adapter.py's
-    # own established precedent for this exact need -- DNS verification
-    # itself is not under test here.
-    async with db_session() as session:
-        await session.execute(
-            sa.text(
-                "UPDATE verified_domains SET status = 'verified', verified_at = now() "
-                "WHERE id = :id"
-            ),
-            {"id": domain_id},
-        )
-        await session.commit()
+    # Duplication check after 2.9.a/b/c: the claim-then-raw-UPDATE dance
+    # now lives once, in tests/conftest.py's own _verify_domain_directly()
+    # -- see that function's own comment for the full extraction reasoning
+    # (this was one of 5 near-identical copies).
+    await _verify_domain_directly(domain_id)
 
     return await _create_source_and_enqueue(tenant_id, "urls", {"urls": urls}, "ingest_url")
 
@@ -360,15 +354,10 @@ async def _seed_tenant_crawl_source_and_verified_domain(seed_url: str) -> dict:
         await session.commit()
         domain_id = verified_domain.id
 
-    async with db_session() as session:
-        await session.execute(
-            sa.text(
-                "UPDATE verified_domains SET status = 'verified', verified_at = now() "
-                "WHERE id = :id"
-            ),
-            {"id": domain_id},
-        )
-        await session.commit()
+    # Duplication check after 2.9.a/b/c: see _seed_tenant_source_and_
+    # verified_domain()'s own identical comment above -- the same
+    # extraction, tests/conftest.py's own _verify_domain_directly().
+    await _verify_domain_directly(domain_id)
 
     return await _create_source_and_enqueue(
         tenant_id, "crawl", {"seed_url": seed_url}, "ingest_crawl"
@@ -1341,18 +1330,15 @@ async def test_a_source_refreshed_via_refresh_now_is_not_returned_as_due_afterwa
             await session.commit()
             domain_id = verified_domain.id
 
-        # Raw UPDATE straight to "verified" -- matches _seed_tenant_source_
-        # and_verified_domain()'s own established precedent for this exact
-        # need (DNS verification itself is not under test here).
-        async with db_session() as session:
-            await session.execute(
-                sa.text(
-                    "UPDATE verified_domains SET status = 'verified', verified_at = now() "
-                    "WHERE id = :id"
-                ),
-                {"id": domain_id},
-            )
-            await session.commit()
+        # Duplication check after 2.9.a/b/c: this was the inline copy that
+        # pushed the claim-then-raw-UPDATE dance to 5 occurrences --
+        # extracted into tests/conftest.py's own _verify_domain_directly()
+        # instead (deliberately NOT one of the two existing bundled
+        # helpers above, _seed_tenant_source_and_verified_domain()/
+        # _seed_tenant_crawl_source_and_verified_domain(): both also
+        # auto-enqueue a job, which would race this test's own
+        # request_refresh_now() call for the very next claim slot).
+        await _verify_domain_directly(domain_id)
 
         async with db_session() as session:
             source = Source(

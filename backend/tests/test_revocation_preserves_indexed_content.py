@@ -30,7 +30,7 @@ from app.ingest.models import VerifiedDomain
 from app.ingest.qdrant_writer import embed_and_upsert
 from app.ingest.repository import IngestRepository, revoke_domain
 from app.tenancy.models import Tenant
-from tests.conftest import db_session, patch_embed_dense
+from tests.conftest import _verify_domain_directly, db_session, patch_embed_dense
 
 # embed_dense() stubbed via the shared patch_embed_dense() fixture
 # (tests/conftest.py) -- extracted at the duplication check after
@@ -56,20 +56,16 @@ async def test_revoking_a_domain_leaves_already_indexed_chunks_answerable(
         await session.commit()
         domain_id = domain.id
 
-    # "verified", not merely "pending" (point (a)'s own wording: "a
-    # verified domain") -- a raw UPDATE bypassing the real DNS check,
-    # matching the established precedent for this exact need
-    # (test_ingest_repository.py's own identical raw-update setup): DNS
-    # verification itself is not under test here.
-    async with db_session() as session:
-        await session.execute(
-            sa.text(
-                "UPDATE verified_domains SET status = 'verified', verified_at = now() "
-                "WHERE id = :id"
-            ),
-            {"id": domain_id},
-        )
-        await session.commit()
+    # Duplication check after 2.9.a/b/c: the claim-then-raw-UPDATE dance
+    # now lives once, in tests/conftest.py's own _verify_domain_directly()
+    # (this was one of 5 near-identical copies).
+    # NOTE: this comment's own prior wording claimed to mirror "test_
+    # ingest_repository.py's own identical raw-update setup" -- wrong,
+    # that file's only raw UPDATE sets status to 'revoked', not
+    # 'verified' (a different thing entirely). Pre-existing, unrelated to
+    # this fix pass; left uncorrected, flagged here for whoever next
+    # touches this file.
+    await _verify_domain_directly(domain_id)
 
     await qdrant.ensure_collection(client, name)
     document_id = uuid.uuid4()

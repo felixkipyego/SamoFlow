@@ -44,6 +44,7 @@ from app.ingest.repository import IngestRepository
 from app.ingest.web_adapter import ingest_url
 from app.tenancy.models import Tenant
 from tests.conftest import (
+    _verify_domain_directly,
     assert_no_socket_connections,
     db_session,
     fake_is_unsafe_except_loopback,
@@ -146,19 +147,10 @@ async def _seed_tenant_source_and_verified_domain(domain: str = _LOOPBACK_HOST) 
         await session.commit()
         domain_id = verified_domain.id
 
-    # Raw UPDATE straight to "verified", matching
-    # test_revocation_preserves_indexed_content.py's own established
-    # precedent for this exact need -- DNS verification itself is not
-    # under test here.
-    async with db_session() as session:
-        await session.execute(
-            sa.text(
-                "UPDATE verified_domains SET status = 'verified', verified_at = now() "
-                "WHERE id = :id"
-            ),
-            {"id": domain_id},
-        )
-        await session.commit()
+    # Duplication check after 2.9.a/b/c: the claim-then-raw-UPDATE dance
+    # now lives once, in tests/conftest.py's own _verify_domain_directly()
+    # (this was one of 5 near-identical copies).
+    await _verify_domain_directly(domain_id)
 
     return {"tenant_id": tenant_id, "source_id": source_id}
 
