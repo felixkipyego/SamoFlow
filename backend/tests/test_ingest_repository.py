@@ -15,6 +15,7 @@
 #     hostile-caller discipline (test_tenancy_repository.py): a real
 #     db_connection belonging to a different tenant, and a nonexistent id,
 #     must produce the identical outcome (both raise), never distinguished.
+import http.server
 import uuid
 from datetime import UTC, datetime, timedelta
 
@@ -34,11 +35,14 @@ from app.ingest.repository import (
     VALID_JOB_TYPES,
     CredentialEncryptionError,
     DomainAlreadyClaimedError,
+    DomainNotVerifiedError,
     DomainRevokedError,
     IngestRepository,
     RefreshIntervalExceedsPlanError,
     RefreshNowAllowanceExhaustedError,
     RefreshNowCooldownError,
+    SourceDisabledError,
+    TenantSuspendedError,
     UnknownJobTypeError,
     UnknownRefreshIntervalError,
     UnknownSourceError,
@@ -49,9 +53,11 @@ from app.ingest.scheduler import get_due_sources
 from app.plans import models as plans_models  # noqa: F401 (registers "plans" on Base.metadata)
 from app.tenancy.models import Tenant
 from tests.conftest import (
+    _verify_domain_directly,
     assert_db_connection_credential_round_trip,
     assert_secret_not_in_exception_chain,
     db_session,
+    local_http_server,
     patch_embed_dense,
 )
 
@@ -1061,6 +1067,68 @@ async def test_revoke_domain_never_persists_the_status_change_alone_if_the_audit
 # rather than reinvented (see disable_source()'s own docstring).
 
 
+async def _create_source(
+    tenant_id: uuid.UUID,
+    *,
+    source_type: str = "urls",
+    config: dict | None = None,
+    refresh_interval: str = "daily",
+) -> uuid.UUID:
+    # Task 2.9.g duplication-check fix: the create_source()-then-commit-
+    # then-grab-id shape repeated 12 times in this file (confirmed by
+    # grep before extracting, well past this project's own 3-occurrence
+    # threshold) -- extracted here. Returns only the id, not the ORM
+    # object: every real call site already re-queries the row fresh in
+    # its own later session anyway (this project's own established
+    # "never hold a stale ORM object across a session boundary"
+    # discipline), so returning more would invite exactly that misuse.
+    # The two call sites inside a `pytest.raises(...)` block (proving
+    # create_source() itself REJECTS) and the one batch-creates-three-
+    # sources-in-one-shared-transaction isolation test are deliberately
+    # NOT converted to this helper -- genuinely different shapes, not an
+    # oversight.
+    async with db_session() as session:
+        repo = IngestRepository(tenant_id=tenant_id, session=session)
+        source = await repo.create_source(
+            source_type=source_type,
+            config=config if config is not None else {"urls": ["https://example.com"]},
+            refresh_interval=refresh_interval,
+        )
+        await session.commit()
+        return source.id
+
+
+async def _index_real_content(
+    client,
+    collection_name: str,
+    *,
+    tenant_id: uuid.UUID,
+    source_id: uuid.UUID,
+    source_url: str,
+    html_body: str,
+) -> uuid.UUID:
+    # Task 2.9.g duplication-check fix: the extract_html()-then-embed_
+    # and_upsert()-with-a-fresh-document_id shape repeated 3 times in
+    # this file (confirmed by grep before extracting). Returns the
+    # generated document_id, since every real call site needs it
+    # afterward (asserting on Qdrant payloads/scroll results keyed by it).
+    content = extract_html(html_body)
+    document_id = uuid.uuid4()
+    await embed_and_upsert(
+        content,
+        client=client,
+        collection_name=collection_name,
+        tenant_id=tenant_id,
+        source_id=source_id,
+        source_type="urls",
+        document_id=document_id,
+        source_url=source_url,
+        file_name=None,
+        embedding_version="v1",
+    )
+    return document_id
+
+
 async def test_create_source_rejects_an_unrecognized_refresh_interval(_seeded_tenants):
     ids = _seeded_tenants
     async with db_session() as session:
@@ -1099,16 +1167,90 @@ async def test_create_source_rejects_an_interval_more_frequent_than_the_plan_all
         assert count == 0
 
 
-async def test_create_source_accepts_a_valid_refresh_interval(_seeded_tenants):
+def _recording_handler(hits: list):
+    # Task 2.10.b [SECURITY]: a minimal local HTTP server handler that
+    # records every requested path -- proves zero network activity, not
+    # merely a rejected return value. Mirrors test_job_handlers.py's own
+    # _tracking_handler() shape; kept local rather than imported, matching
+    # that file's own scripted_handler()/_tracking_handler() precedent of
+    # each test file holding its own small handler class.
+    class _Handler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            hits.append(self.path)
+            self.send_response(200)
+            self.end_headers()
+
+        def log_message(self, *args):
+            pass
+
+    return _Handler
+
+
+async def test_create_source_rejects_a_crawl_type_source_for_an_unverified_domain(
+    _seeded_tenants,
+):
+    # Task 2.10.b [SECURITY]: the §16 bullet-1 fix, primary layer. Before
+    # this fix, create_source() never checked domain verification at all
+    # -- a crawl-type source for ANY domain, verified or not, could be
+    # created and scheduled, and only the per-page WRITE (ingest_url(),
+    # inside run_crawl()'s own discovery) was ever rejected, strictly
+    # AFTER real, SSRF-guarded but ownership-unproven HTTP traffic
+    # (robots.txt, sitemap.xml, every discovered page) had already gone
+    # out. This tenant never verifies anything at all -- the domain is
+    # not merely absent from `verified_domains`, there IS no such row.
+    ids = _seeded_tenants
+    hits: list = []
+    with local_http_server(_recording_handler(hits)) as port:
+        seed_url = f"http://127.0.0.1:{port}/"
+        async with db_session() as session:
+            repo = IngestRepository(tenant_id=ids["tenant_a"], session=session)
+            with pytest.raises(DomainNotVerifiedError, match="127.0.0.1"):
+                await repo.create_source(
+                    source_type="crawl", config={"seed_url": seed_url},
+                    refresh_interval="daily",
+                )
+    assert hits == []  # zero network activity -- rejected before any fetch
+
+    async with db_session() as session:
+        source_count = (
+            await session.execute(sa.select(sa.func.count()).select_from(Source))
+        ).scalar_one()
+        job_count = (
+            await session.execute(
+                sa.select(sa.func.count()).select_from(Job).where(Job.tenant_id == ids["tenant_a"])
+            )
+        ).scalar_one()
+    assert source_count == 0  # the rejected call left no Source row behind
+    assert job_count == 0  # and nothing was ever enqueued
+
+
+async def test_create_source_accepts_a_crawl_type_source_for_a_verified_domain(
+    _seeded_tenants,
+):
+    # The success path, proven alongside the rejection above so the fix
+    # is confirmed to reject the right thing, not everything.
     ids = _seeded_tenants
     async with db_session() as session:
         repo = IngestRepository(tenant_id=ids["tenant_a"], session=session)
+        domain = await repo.claim_domain("verified-for-crawl.example")
+        await session.commit()
+        domain_id = domain.id
+    await _verify_domain_directly(domain_id)
+
+    async with db_session() as session:
+        repo = IngestRepository(tenant_id=ids["tenant_a"], session=session)
         source = await repo.create_source(
-            source_type="urls", config={"urls": ["https://example.com"]},
-            refresh_interval="weekly",
+            source_type="crawl",
+            config={"seed_url": "https://verified-for-crawl.example/"},
+            refresh_interval="daily",
         )
         await session.commit()
-        source_id = source.id
+    assert source.type == "crawl"
+
+
+async def test_create_source_accepts_a_valid_refresh_interval(_seeded_tenants):
+    ids = _seeded_tenants
+    source_id = await _create_source(ids["tenant_a"], refresh_interval="weekly")
 
     async with db_session() as session:
         row = (await session.execute(sa.select(Source).where(Source.id == source_id))).scalar_one()
@@ -1127,14 +1269,7 @@ async def test_create_source_is_immediately_due_with_no_extra_seeding_call(_seed
     # row's own `last_run_at IS NULL` already makes it due. Proves that is
     # genuinely true live, with NOTHING else called in between.
     ids = _seeded_tenants
-    async with db_session() as session:
-        repo = IngestRepository(tenant_id=ids["tenant_a"], session=session)
-        source = await repo.create_source(
-            source_type="urls", config={"urls": ["https://example.com"]},
-            refresh_interval="daily",
-        )
-        await session.commit()
-        source_id = source.id
+    source_id = await _create_source(ids["tenant_a"])
 
     async with db_session() as session:
         due = await get_due_sources(session, tenant_id=ids["tenant_a"])
@@ -1145,14 +1280,7 @@ async def test_update_source_enforces_the_same_refresh_interval_rules_on_change(
     _seeded_tenants, monkeypatch
 ):
     ids = _seeded_tenants
-    async with db_session() as session:
-        repo = IngestRepository(tenant_id=ids["tenant_a"], session=session)
-        source = await repo.create_source(
-            source_type="urls", config={"urls": ["https://example.com"]},
-            refresh_interval="daily",
-        )
-        await session.commit()
-        source_id = source.id
+    source_id = await _create_source(ids["tenant_a"])
 
     # Unrecognized interval: rejected, existing row untouched.
     async with db_session() as session:
@@ -1305,14 +1433,7 @@ async def test_flag_source_if_exceeds_plan_flags_without_disabling_or_touching_s
 async def test_request_refresh_now_enqueues_a_real_job_when_both_checks_pass(_seeded_tenants):
     ids = _seeded_tenants
     now = datetime(2026, 1, 15, 12, 0, 0, tzinfo=UTC)
-    async with db_session() as session:
-        repo = IngestRepository(tenant_id=ids["tenant_a"], session=session)
-        source = await repo.create_source(
-            source_type="urls", config={"urls": ["https://example.com"]},
-            refresh_interval="daily",
-        )
-        await session.commit()
-        source_id = source.id
+    source_id = await _create_source(ids["tenant_a"])
 
     async with db_session() as session:
         repo = IngestRepository(tenant_id=ids["tenant_a"], session=session)
@@ -1336,14 +1457,7 @@ async def test_request_refresh_now_enqueues_a_real_job_when_both_checks_pass(_se
 async def test_request_refresh_now_rejects_within_the_cooldown_window(_seeded_tenants):
     ids = _seeded_tenants
     t0 = datetime(2026, 1, 15, 12, 0, 0, tzinfo=UTC)
-    async with db_session() as session:
-        repo = IngestRepository(tenant_id=ids["tenant_a"], session=session)
-        source = await repo.create_source(
-            source_type="urls", config={"urls": ["https://example.com"]},
-            refresh_interval="daily",
-        )
-        await session.commit()
-        source_id = source.id
+    source_id = await _create_source(ids["tenant_a"])
 
     async with db_session() as session:
         repo = IngestRepository(tenant_id=ids["tenant_a"], session=session)
@@ -1380,14 +1494,7 @@ async def test_request_refresh_now_rejects_once_exhausted_then_allows_again_afte
     get_settings.cache_clear()
 
     t0 = datetime(2026, 1, 15, 12, 0, 0, tzinfo=UTC)
-    async with db_session() as session:
-        repo = IngestRepository(tenant_id=ids["tenant_a"], session=session)
-        source = await repo.create_source(
-            source_type="urls", config={"urls": ["https://example.com"]},
-            refresh_interval="daily",
-        )
-        await session.commit()
-        source_id = source.id
+    source_id = await _create_source(ids["tenant_a"])
 
     # Two requests, spaced past the 1s cooldown, both within the allowance.
     async with db_session() as session:
@@ -1431,6 +1538,78 @@ async def test_request_refresh_now_rejects_once_exhausted_then_allows_again_afte
     assert source_row.refresh_now_window_started_at == t0 + timedelta(hours=25)
 
 
+async def test_request_refresh_now_rejects_a_disabled_source_and_enqueues_nothing(
+    _seeded_tenants, live_test_services, monkeypatch
+):
+    # Task 2.9.g [SECURITY] duplication-check fix D.1: before this fix,
+    # request_refresh_now() never checked source.enabled at all, so a
+    # disabled (soft-hidden) source's content could be made answerable
+    # again via this call alone, with no re-enable step. Proven live, not
+    # just unit-level, because disable_source() itself needs a real Qdrant
+    # client to hide the source's points first -- the same live pattern as
+    # the disable_source() tests just above.
+    patch_embed_dense(monkeypatch)
+    ids = _seeded_tenants
+    _, client, collection_name = live_test_services
+    await qdrant.ensure_collection(client, collection_name)
+
+    source_id = await _create_source(ids["tenant_a"])
+
+    async with db_session() as session:
+        repo = IngestRepository(tenant_id=ids["tenant_a"], session=session)
+        await repo.disable_source(source_id, client=client, collection_name=collection_name)
+        await session.commit()
+
+    async with db_session() as session:
+        repo = IngestRepository(tenant_id=ids["tenant_a"], session=session)
+        with pytest.raises(SourceDisabledError, match=str(source_id)):
+            await repo.request_refresh_now(source_id)
+
+    async with db_session() as session:
+        jobs = (
+            await session.execute(sa.select(Job).where(Job.source_id == source_id))
+        ).scalars().all()
+        source_row = (
+            await session.execute(sa.select(Source).where(Source.id == source_id))
+        ).scalar_one()
+    assert jobs == []  # no refresh job was enqueued for the disabled source
+    assert source_row.last_refresh_requested_at is None  # and the row is untouched
+
+
+async def test_request_refresh_now_rejects_a_suspended_tenants_source_and_enqueues_nothing(
+    _seeded_tenants,
+):
+    # Task 2.9.g [SECURITY], Finding 1 (Part 2 close-out review): the
+    # scheduled path is protected by three independent layers against a
+    # suspended tenant's background ingestion continuing (Task 2.9.a) --
+    # request_refresh_now() went through none of them. No live services
+    # needed here (unlike the disabled-source proof above): suspending a
+    # tenant is a plain Postgres UPDATE, no Qdrant involved at all.
+    ids = _seeded_tenants
+    source_id = await _create_source(ids["tenant_a"])
+
+    async with db_session() as session:
+        await session.execute(
+            sa.update(Tenant).where(Tenant.id == ids["tenant_a"]).values(status="suspended")
+        )
+        await session.commit()
+
+    async with db_session() as session:
+        repo = IngestRepository(tenant_id=ids["tenant_a"], session=session)
+        with pytest.raises(TenantSuspendedError, match=str(ids["tenant_a"])):
+            await repo.request_refresh_now(source_id)
+
+    async with db_session() as session:
+        jobs = (
+            await session.execute(sa.select(Job).where(Job.source_id == source_id))
+        ).scalars().all()
+        source_row = (
+            await session.execute(sa.select(Source).where(Source.id == source_id))
+        ).scalar_one()
+    assert jobs == []  # no refresh job was enqueued for the suspended tenant's source
+    assert source_row.last_refresh_requested_at is None  # and the row is untouched
+
+
 # --- Task 2.9.e [SECURITY]: source deletion/disable side effects -----------
 # Live against both real services together (test-db + test-qdrant), the
 # first tests in this file to need Qdrant at all -- a real, necessary
@@ -1451,14 +1630,9 @@ async def test_delete_source_removes_qdrant_points_and_documents_rows(
     _, client, collection_name = live_test_services
     await qdrant.ensure_collection(client, collection_name)
 
-    async with db_session() as session:
-        repo = IngestRepository(tenant_id=ids["tenant_a"], session=session)
-        source = await repo.create_source(
-            source_type="urls", config={"urls": ["https://delete-proof.example/page"]},
-            refresh_interval="daily",
-        )
-        await session.commit()
-        source_id = source.id
+    source_id = await _create_source(
+        ids["tenant_a"], config={"urls": ["https://delete-proof.example/page"]}
+    )
 
     content = extract_html(
         "<html><head><title>Delete Proof</title></head><body>"
@@ -1534,17 +1708,11 @@ async def test_delete_source_removes_the_on_disk_file_for_an_upload_type_source(
     monkeypatch.setenv("UPLOAD_STORAGE_PATH", str(storage_dir))
     get_settings.cache_clear()
 
-    async with db_session() as session:
-        repo = IngestRepository(tenant_id=ids["tenant_a"], session=session)
-        source = await repo.create_source(
-            source_type="upload",
-            config={
-                "uploads": [{"upload_id": str(upload_id), "original_filename": "proof.txt"}]
-            },
-            refresh_interval="daily",
-        )
-        await session.commit()
-        source_id = source.id
+    source_id = await _create_source(
+        ids["tenant_a"],
+        source_type="upload",
+        config={"uploads": [{"upload_id": str(upload_id), "original_filename": "proof.txt"}]},
+    )
 
     async with db_session() as session:
         repo = IngestRepository(tenant_id=ids["tenant_a"], session=session)
@@ -1562,32 +1730,21 @@ async def test_disable_source_hides_points_without_deleting_them(
     _, client, collection_name = live_test_services
     await qdrant.ensure_collection(client, collection_name)
 
-    async with db_session() as session:
-        repo = IngestRepository(tenant_id=ids["tenant_a"], session=session)
-        source = await repo.create_source(
-            source_type="urls", config={"urls": ["https://disable-proof.example/page"]},
-            refresh_interval="daily",
-        )
-        await session.commit()
-        source_id = source.id
-
-    content = extract_html(
-        "<html><head><title>Disable Proof</title></head><body>"
-        "<h2>Section</h2><p>real content that must stay present but hidden</p>"
-        "</body></html>"
+    source_id = await _create_source(
+        ids["tenant_a"], config={"urls": ["https://disable-proof.example/page"]}
     )
-    document_id = uuid.uuid4()
-    await embed_and_upsert(
-        content,
-        client=client,
-        collection_name=collection_name,
+
+    await _index_real_content(
+        client,
+        collection_name,
         tenant_id=ids["tenant_a"],
         source_id=source_id,
-        source_type="urls",
-        document_id=document_id,
         source_url="https://disable-proof.example/page",
-        file_name=None,
-        embedding_version="v1",
+        html_body=(
+            "<html><head><title>Disable Proof</title></head><body>"
+            "<h2>Section</h2><p>real content that must stay present but hidden</p>"
+            "</body></html>"
+        ),
     )
 
     async with db_session() as session:
@@ -1617,32 +1774,21 @@ async def test_enable_source_unhides_points_with_zero_re_ingestion(
     _, client, collection_name = live_test_services
     await qdrant.ensure_collection(client, collection_name)
 
-    async with db_session() as session:
-        repo = IngestRepository(tenant_id=ids["tenant_a"], session=session)
-        source = await repo.create_source(
-            source_type="urls", config={"urls": ["https://enable-proof.example/page"]},
-            refresh_interval="daily",
-        )
-        await session.commit()
-        source_id = source.id
-
-    content = extract_html(
-        "<html><head><title>Enable Proof</title></head><body>"
-        "<h2>Section</h2><p>real content that must be un-hidden, not re-ingested</p>"
-        "</body></html>"
+    source_id = await _create_source(
+        ids["tenant_a"], config={"urls": ["https://enable-proof.example/page"]}
     )
-    document_id = uuid.uuid4()
-    await embed_and_upsert(
-        content,
-        client=client,
-        collection_name=collection_name,
+
+    await _index_real_content(
+        client,
+        collection_name,
         tenant_id=ids["tenant_a"],
         source_id=source_id,
-        source_type="urls",
-        document_id=document_id,
         source_url="https://enable-proof.example/page",
-        file_name=None,
-        embedding_version="v1",
+        html_body=(
+            "<html><head><title>Enable Proof</title></head><body>"
+            "<h2>Section</h2><p>real content that must be un-hidden, not re-ingested</p>"
+            "</body></html>"
+        ),
     )
     points_before, _ = await client.scroll(
         collection_name=collection_name,
@@ -1709,16 +1855,17 @@ async def test_delete_and_disable_source_never_touch_a_different_sources_content
         (ids["tenant_a"], source_a2_id, "a2"),
         (ids["tenant_b"], source_b_id, "b"),
     ):
-        content = extract_html(
-            f"<html><head><title>{suffix}</title></head><body><h2>S</h2>"
-            f"<p>content for source {suffix}, must only ever be touched by "
-            "an operation against its own source_id</p></body></html>"
-        )
-        await embed_and_upsert(
-            content, client=client, collection_name=collection_name, tenant_id=tenant_id,
-            source_id=source_id, source_type="urls", document_id=uuid.uuid4(),
-            source_url=f"https://isolation-proof.example/{suffix}", file_name=None,
-            embedding_version="v1",
+        await _index_real_content(
+            client,
+            collection_name,
+            tenant_id=tenant_id,
+            source_id=source_id,
+            source_url=f"https://isolation-proof.example/{suffix}",
+            html_body=(
+                f"<html><head><title>{suffix}</title></head><body><h2>S</h2>"
+                f"<p>content for source {suffix}, must only ever be touched by "
+                "an operation against its own source_id</p></body></html>"
+            ),
         )
 
     # Only source_a1 (tenant_a) is disabled, then deleted.

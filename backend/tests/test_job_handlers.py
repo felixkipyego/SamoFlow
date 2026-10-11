@@ -44,7 +44,7 @@ from app.ingest import job_handlers as job_handlers_module
 from app.ingest import safe_fetch as safe_fetch_module
 from app.ingest import upload_storage
 from app.ingest.models import Document, Job, Source
-from app.ingest.repository import IngestRepository
+from app.ingest.repository import IngestRepository, revoke_domain
 from app.ingest.scheduler import get_due_sources
 from app.tenancy.models import Tenant
 from app.worker import check_heartbeat_fresh, run
@@ -580,6 +580,72 @@ async def test_an_out_of_scope_domain_link_is_never_fetched_mid_crawl(
     # No content from the out-of-scope host was ever chunked/embedded
     # either -- not merely absent from Postgres.
     assert all("evil" not in record.payload["source_url"] for record in records)
+
+
+async def test_a_domain_revoked_after_source_creation_is_rejected_at_the_handler_with_zero_fetches(
+    monkeypatch, live_test_services
+):
+    # Task 2.10.b [SECURITY]: the §16 bullet-1 fix, secondary/handler-
+    # level layer. create_source()'s own primary check (app/ingest/
+    # repository.py) only runs ONCE, at creation time -- it cannot catch
+    # a domain verified then LATER revoked (revoke_domain(), 2.2.g)
+    # before this source's first scheduled run. Proven the same way
+    # test_an_out_of_scope_domain_link_is_never_fetched_mid_crawl() above
+    # proves the SSRF case: a real, listening local server whose own
+    # hit count stays at zero -- robots.txt, sitemap.xml and every page
+    # are all equally never requested, not merely absent from the final
+    # result.
+    client = await _prepare_env(monkeypatch, live_test_services)
+    hits: list[str] = []
+    with local_http_server(_tracking_handler({}, hits)) as port:
+        seed = f"http://{_LOOPBACK_HOST}:{port}"
+
+        tenant_id = await _create_tenant("Crawl Revoked-After-Creation Proof Tenant")
+        async with db_session() as session:
+            repo = IngestRepository(tenant_id=tenant_id, session=session)
+            verified_domain = await repo.claim_domain(_LOOPBACK_HOST)
+            await session.commit()
+            domain_id = verified_domain.id
+        await _verify_domain_directly(domain_id)
+
+        ids = await _create_source_and_enqueue(
+            tenant_id, "crawl", {"seed_url": seed}, "ingest_crawl"
+        )
+
+        # Revoked AFTER the source already exists and its job is already
+        # enqueued -- create_source()'s own check already passed; only
+        # the handler-level backstop stands between this job and real
+        # network activity now.
+        async with db_session() as session:
+            await revoke_domain(session, domain_id, actor="test-admin")
+            await session.commit()
+
+        await asyncio.wait_for(run(asyncio.Event(), max_iterations=1), timeout=15)
+
+    assert hits == []  # zero fetches -- robots.txt/sitemap/pages all equally never requested
+
+    job = await _fetch_job(ids["job_id"])
+    assert job.status == "succeeded"  # a cheap check that found nothing to do, not a failure
+    assert job.error is None
+
+    documents = await _documents_for(ids["source_id"])
+    assert documents == []
+
+    records, _ = await client.scroll(
+        collection_name=qdrant.COLLECTION_NAME,
+        scroll_filter=qdrant.tenant_filter(ids["tenant_id"]),
+        limit=10,
+    )
+    assert records == []
+
+    # last_run_at/last_crawl_started_at both stay untouched: no discovery
+    # happened at all, so there is nothing for the staleness-cleanup
+    # comparison (2.9.d) to safely compare against -- advancing either
+    # here would risk a later real crawl wrongly treating every already-
+    # indexed page as "missing" after this skipped run.
+    source_row = await _fetch_source(ids["source_id"])
+    assert source_row.last_run_at is None
+    assert source_row.last_crawl_started_at is None
 
 
 async def test_heartbeat_is_written_mid_crawl_not_only_at_job_boundaries(

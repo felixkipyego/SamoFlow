@@ -317,6 +317,7 @@ from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+import httpx
 from qdrant_client import AsyncQdrantClient
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -342,7 +343,7 @@ from app.ingest.repository import IngestRepository
 from app.ingest.row_templates import MissingColumnError, MissingPrimaryKeyError, TemplateRenderError
 from app.ingest.scheduler import get_due_sources, is_tenant_active
 from app.ingest.upload_adapter import ingest_upload
-from app.ingest.web_adapter import ingest_url
+from app.ingest.web_adapter import ingest_url, is_domain_verified
 
 logger = logging.getLogger(__name__)
 
@@ -382,6 +383,54 @@ async def _open_source_session(
         yield client, session, source
 
 
+async def _skip_if_source_disabled_or_tenant_inactive(
+    session: AsyncSession, source: Source
+) -> bool:
+    """Task 2.9.g [SECURITY]: the adapter handlers' own defense-in-depth
+    backstop against a disabled source, OR a now-suspended tenant, ever
+    getting fresh, visible content written -- the handler-level layer of
+    the same two-layer fix this duplication check applied to
+    `request_refresh_now()` (app/ingest/repository.py's own primary
+    fix: that method now rejects both cases outright, before ever
+    enqueueing a job). This backstop protects against ANY other path
+    that might someday enqueue a job for a disabled source or a
+    suspended tenant, not just that one already-fixed caller -- matching
+    this project's own established defense-in-depth discipline (e.g. the
+    suspended-tenant three-layer pattern, Task 2.9.a's own follow-up).
+
+    Originally `_skip_if_source_disabled()` (source.enabled only,
+    Task 2.9.g's own Part 1 fix D.1); widened here at the same task's
+    Part 2 close-out review (Finding 1) to also cover tenant suspension,
+    rather than adding a second, separate check function -- the two
+    conditions are both "nothing to do here, not a failure" gates
+    checked at the exact same call site in all four handlers below, so
+    one shared function reporting "skip or not" covers both without a
+    caller needing to call two functions and OR the results itself.
+    Tenant checked FIRST, before source.enabled -- the same broader-
+    before-narrower order `request_refresh_now()` now uses (tenant-
+    level gate before source-level gate), reusing `is_tenant_active()`
+    (app/ingest/scheduler.py, already imported by this module) rather
+    than a second, parallel tenant-status query.
+
+    Returns `True` (the caller must return immediately, treating this as
+    nothing to do, not a failure -- the identical "cheap check that found
+    nothing to do is not a failure" philosophy `_check_active_and_
+    reenqueue_self()` above already uses for a suspended tenant) if
+    either condition holds. Shared by all four adapter handlers below,
+    each of which already holds `session`/`source` via `_open_source_
+    session()` -- a single one-line call per handler, not a repeated
+    multi-line block, since the real logic (and its own log lines) lives
+    here once.
+    """
+    if not await is_tenant_active(session, source.tenant_id):
+        logger.info("tenant %s is not active, skipping this job", source.tenant_id)
+        return True
+    if not source.enabled:
+        logger.info("source %s is disabled, skipping this job", source.id)
+        return True
+    return False
+
+
 async def handle_ingest_url(job: Job) -> None:
     """The `urls` adapter's own `JOB_HANDLERS["ingest_url"]` entry.
 
@@ -391,6 +440,8 @@ async def handle_ingest_url(job: Job) -> None:
     and the heartbeat decision.
     """
     async with _open_source_session(job, "ingest_url") as (client, session, source):
+        if await _skip_if_source_disabled_or_tenant_inactive(session, source):
+            return
         urls = source.config.get("urls", [])
         for url in urls:
             result = await ingest_url(
@@ -470,7 +521,33 @@ async def handle_ingest_crawl(job: Job) -> None:
     settings = get_settings()
     run_started_at = datetime.now(UTC)
     async with _open_source_session(job, "ingest_crawl") as (client, session, source):
+        if await _skip_if_source_disabled_or_tenant_inactive(session, source):
+            return
         seed_url = source.config["seed_url"]
+        # Task 2.10.b [SECURITY]: the handler-level backstop for create_
+        # source()'s own matching check (app/ingest/repository.py) -- a
+        # source verified at CREATION time can have that verification
+        # REVOKED before this job ever runs (`revoke_domain()`, 2.2.g),
+        # and create_source() has no way to re-check that later. Re-
+        # checked here, before run_crawl()'s own discovery phase starts
+        # (robots.txt/sitemap/BFS), not just trusting the row's own
+        # already-stale creation-time state -- the identical reasoning
+        # ingest_url() already uses for re-checking per page rather than
+        # once per job. Treated exactly like the disabled/suspended skip
+        # immediately above: return with no last_run_at write, since no
+        # discovery happened at all, and `last_crawl_started_at`'s own
+        # staleness-cleanup comparison (2.9.d) must never run against a
+        # job that made zero real discovery attempts -- doing so would
+        # wrongly treat every currently-indexed page as "missing" after
+        # just two ticks of a revoked domain, deleting real content for
+        # the wrong reason.
+        hostname = httpx.URL(seed_url).host
+        if not await is_domain_verified(session, job.tenant_id, hostname):
+            logger.info(
+                "domain %s is not verified for tenant %s, skipping this crawl job",
+                hostname, job.tenant_id,
+            )
+            return
         await run_crawl(
             session,
             client,
@@ -616,6 +693,8 @@ async def handle_ingest_upload(job: Job) -> None:
     settings = get_settings()
     storage_dir = Path(settings.upload_storage_path)
     async with _open_source_session(job, "ingest_upload") as (client, session, source):
+        if await _skip_if_source_disabled_or_tenant_inactive(session, source):
+            return
         uploads = source.config.get("uploads", [])
         for entry in uploads:
             upload_id = uuid.UUID(entry["upload_id"])
@@ -673,6 +752,8 @@ async def handle_ingest_db(job: Job) -> None:
     """
     settings = get_settings()
     async with _open_source_session(job, "ingest_db") as (client, session, source):
+        if await _skip_if_source_disabled_or_tenant_inactive(session, source):
+            return
         db_connection_id = uuid.UUID(source.config["db_connection_id"])
         db_connection = (
             await session.execute(
@@ -775,6 +856,51 @@ async def handle_ingest_db(job: Job) -> None:
         await session.commit()
 
 
+async def _check_active_and_reenqueue_self(
+    session: AsyncSession, job: Job, *, job_type: str, interval_seconds: float
+) -> bool:
+    """Task 2.9.g duplication-check fix: shared by `handle_scheduler_
+    tick()`/`handle_reconcile()` below -- their own suspended-tenant
+    guard + self-re-enqueue preamble had become a second near-identical
+    block (confirmed by reading both directly, beyond the seeding-
+    function pair already extracted in app/ingest/scheduler.py).
+
+    Returns `False` if the tenant is no longer active: the caller must
+    return immediately -- no self-re-enqueue, no real per-tenant work.
+    The job itself still succeeds (a cheap check that correctly found
+    nothing to do is not a failure); the real effect is that this
+    tenant's own self-perpetuating chain stops HERE instead of ticking
+    forever for a tenant with nothing to check. The matching bootstrap
+    sweep (`ensure_scheduler_ticks_seeded()`/`ensure_reconcile_ticks_
+    seeded()`, app/ingest/scheduler.py) only ever looks at tenants with
+    NO pending/running tick at all, so it would never touch an ALREADY-
+    RUNNING chain like this one -- this check is what actually stops a
+    chain suspended mid-flight.
+
+    Returns `True` once the next occurrence has been enqueued and
+    committed: the caller should proceed with its own real per-tenant
+    work. Deliberately this order, not the reverse -- if that real work
+    were ever to raise an unexpected, uncaught exception (an
+    infrastructure-level problem), the self-re-enqueue has already
+    committed by then, so this tenant's own chain survives regardless of
+    what happens afterward.
+    """
+    if not await is_tenant_active(session, job.tenant_id):
+        logger.info(
+            "%s: tenant %s is not active, letting its own chain end here",
+            job_type,
+            job.tenant_id,
+        )
+        return False
+
+    next_run_at = datetime.now(UTC) + timedelta(seconds=interval_seconds)
+    await IngestRepository(tenant_id=job.tenant_id, session=session).enqueue(
+        job_type=job_type, next_run_at=next_run_at
+    )
+    await session.commit()
+    return True
+
+
 async def handle_scheduler_tick(job: Job) -> None:
     """The scheduler's own `JOB_HANDLERS["scheduler_tick"]` entry -- a
     genuinely different shape from the four adapter handlers above: no
@@ -806,34 +932,20 @@ async def handle_scheduler_tick(job: Job) -> None:
     propagate uncaught and take the ordinary job-level backoff/retry path.
 
     Suspended-tenant check FIRST, before anything else (layer 2 of the
-    three described in scheduler.py's own header comment): if the tenant
-    is no longer `is_tenant_active()`, this handler returns immediately --
-    no self-re-enqueue, no `get_due_sources()` call. The job itself still
-    succeeds (a cheap check that correctly found nothing to do is not a
-    failure); the real effect is that this tenant's own self-perpetuating
-    chain stops HERE instead of ticking forever for a tenant with nothing
-    to check. `ensure_scheduler_ticks_seeded()`'s own identical check
-    (layer 1) only ever looks at tenants with NO pending/running tick at
-    all, so it would never touch an ALREADY-RUNNING chain like this one --
-    this check is what actually stops a chain suspended mid-flight.
+    three described in scheduler.py's own header comment), and the self-
+    re-enqueue itself -- both now shared with `handle_reconcile()` below
+    via `_check_active_and_reenqueue_self()` (Task 2.9.g duplication-check
+    fix; see that function's own docstring for the full reasoning).
     """
     settings = get_settings()
     async with _session_factory()() as session:
-        if not await is_tenant_active(session, job.tenant_id):
-            logger.info(
-                "handle_scheduler_tick: tenant %s is not active, letting its own "
-                "scheduler_tick chain end here",
-                job.tenant_id,
-            )
+        if not await _check_active_and_reenqueue_self(
+            session,
+            job,
+            job_type="scheduler_tick",
+            interval_seconds=settings.scheduler_tick_interval_seconds,
+        ):
             return
-
-        next_run_at = datetime.now(UTC) + timedelta(
-            seconds=settings.scheduler_tick_interval_seconds
-        )
-        await IngestRepository(tenant_id=job.tenant_id, session=session).enqueue(
-            job_type="scheduler_tick", next_run_at=next_run_at
-        )
-        await session.commit()
 
         due_sources = await get_due_sources(session, tenant_id=job.tenant_id)
         for source in due_sources:
@@ -897,26 +1009,19 @@ async def handle_reconcile(job: Job) -> None:
     docstring for why mirroring the CURRENT, already-refined shape of
     that function was judged the more faithful reading of "mirror its
     exact shape" than mirroring an earlier, pre-refinement version that
-    no longer exists). If the tenant is no longer `is_tenant_active()`,
-    this handler returns immediately -- no self-re-enqueue, no reconcile
-    pass. The job itself still succeeds.
+    no longer exists). Now shared with `handle_scheduler_tick()` above
+    via `_check_active_and_reenqueue_self()` (Task 2.9.g duplication-check
+    fix) -- if the tenant is no longer active, this handler returns
+    immediately, no self-re-enqueue, no reconcile pass; the job itself
+    still succeeds.
     """
     settings = get_settings()
     client: AsyncQdrantClient = qdrant.get_qdrant_client()
     async with _session_factory()() as session:
-        if not await is_tenant_active(session, job.tenant_id):
-            logger.info(
-                "handle_reconcile: tenant %s is not active, letting its own "
-                "reconcile chain end here",
-                job.tenant_id,
-            )
+        if not await _check_active_and_reenqueue_self(
+            session, job, job_type="reconcile", interval_seconds=settings.reconcile_interval_seconds
+        ):
             return
-
-        next_run_at = datetime.now(UTC) + timedelta(seconds=settings.reconcile_interval_seconds)
-        await IngestRepository(tenant_id=job.tenant_id, session=session).enqueue(
-            job_type="reconcile", next_run_at=next_run_at
-        )
-        await session.commit()
 
         deleted = await reconcile_tenant(
             session, client, qdrant.COLLECTION_NAME, tenant_id=job.tenant_id

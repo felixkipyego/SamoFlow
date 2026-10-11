@@ -24,12 +24,14 @@
 # (app/tenancy/repository.py): one shared discipline for every
 # tenant-scoped repository in this codebase, not a second scheme.
 import json
+import logging
 import secrets
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+import httpx
 from qdrant_client import AsyncQdrantClient
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
@@ -57,6 +59,16 @@ from app.ingest.qdrant_writer import (
     hide_points_for_source,
     unhide_points_for_source,
 )
+from app.ingest.web_adapter import is_domain_verified
+
+# Task 2.9.g duplication-check fix [SECURITY]: this module had zero
+# logging anywhere, confirmed by grep before adding this -- meaning
+# delete_source()/disable_source()/enable_source() (all three
+# irreversible-or-deletion-adjacent) emitted no log line at all for
+# their own mutations, diverging from the per-deletion logging
+# convention `_cleanup_stale_crawl_documents()` (Task 2.9.d) and
+# `reconcile_tenant()` (Task 2.9.f) both already established.
+logger = logging.getLogger(__name__)
 
 # Task 2.6.b: the first REAL job-type vocabulary -- a real caller
 # (adapter, scheduler) could legitimately enqueue(). Deliberately real-
@@ -222,6 +234,41 @@ class RefreshIntervalExceedsPlanError(Exception):
     """
 
 
+class DomainNotVerifiedError(Exception):
+    """Task 2.10.b [SECURITY]: raised by create_source() when a `crawl`-
+    type source's own `config["seed_url"]` names a domain that is not
+    `verified_domains`-verified for this tenant. Matches `DomainAlready
+    ClaimedError`/`DomainRevokedError`'s own naming convention above.
+
+    The real, confirmed gap this closes: before this fix, `create_source()`
+    never checked domain verification at all for ANY source type --
+    `ingest_url()` (`app/ingest/web_adapter.py`) only ever rejects the
+    per-page WRITE, strictly AFTER `run_crawl()`'s own discovery phase
+    (robots.txt fetch, sitemap.xml fetch, then BFS link-following, up to
+    `Settings.crawl_page_cap` pages) has already issued real, SSRF-guarded
+    but ownership-unproven HTTP traffic against an arbitrary tenant-named
+    domain. docs/SPEC.md §16's own "Crawling an unverified domain is
+    rejected" is a claim about the FETCH, not merely the write -- the
+    `urls` adapter already satisfies it for free (`ingest_url()`'s own
+    verification check runs strictly before its own `fetch_with_
+    redirects()` call, so a single unverified URL never generates any
+    network activity at all), but nothing stopped a `crawl`-type source
+    from being created, scheduled and run against a domain the tenant
+    never proved ownership of.
+
+    Checked only for `source_type == "crawl"` -- the `urls` adapter's own
+    per-URL check already covers the `urls` source type with zero
+    network activity, and `upload`/`database` sources have no domain
+    concept at all. Reuses `is_domain_verified()` (`app/ingest/
+    web_adapter.py`) rather than a second, parallel query -- the exact
+    same check `ingest_url()` already runs, just moved one step earlier
+    (source creation, not per-page fetch) for this one source type. See
+    also `handle_ingest_crawl()`'s own matching handler-level backstop
+    (`app/ingest/job_handlers.py`) for a source verified at creation but
+    revoked before its first scheduled run.
+    """
+
+
 class RefreshNowCooldownError(Exception):
     """Raised by request_refresh_now() when `source.last_refresh_requested_at`
     is too recent -- fewer than `Settings.refresh_now_cooldown_seconds`
@@ -239,6 +286,60 @@ class RefreshNowAllowanceExhaustedError(Exception):
     has already reached `Settings.refresh_now_daily_allowance` for the
     current rolling 24h window (`source.refresh_now_window_started_at`).
     A plain pre-check, same shape as RefreshNowCooldownError above.
+    """
+
+
+class TenantSuspendedError(Exception):
+    """Task 2.9.g [SECURITY], Finding 1 (Part 2 close-out review): raised
+    by request_refresh_now() when the owning tenant is no longer
+    `"active"`. The scheduled path (`scheduler_tick`) is protected by
+    THREE independent layers against a suspended tenant's background
+    ingestion continuing (the seeding query, `_check_active_and_
+    reenqueue_self()`, and `get_due_sources()` itself -- all Task 2.9.a,
+    app/ingest/scheduler.py's own header comment has the full reasoning)
+    -- `request_refresh_now()` went through none of them, since it
+    enqueues the adapter job directly rather than via any of those three.
+    Checked FIRST, before even `source.enabled` below: "is the tenant
+    this source belongs to even active" is a broader, more fundamental
+    gate than "is this one source enabled," matching the scheduler
+    path's own tenant-then-source layering exactly. Reuses
+    `is_tenant_active()` (app/ingest/scheduler.py) rather than a second,
+    parallel tenant-status query -- imported inside the method, not at
+    module level, since scheduler.py already imports `IngestRepository`
+    from this module; a top-level import here would be circular (the
+    same resolution already used for `REFRESH_INTERVAL_DELTAS`/
+    `JOB_TYPE_FOR_SOURCE_TYPE`, both relocated to models.py for the
+    identical reason -- not done here since `is_tenant_active()` is a
+    query FUNCTION, not shared data, and a deferred import is this
+    project's own other established fix for exactly this shape, see
+    job_handlers.py's handle_ingest_crawl()'s own `from app.worker
+    import ...`).  See also `_skip_if_source_disabled_or_tenant_
+    inactive()` (app/ingest/job_handlers.py) -- the matching handler-
+    level defense-in-depth backstop for any OTHER path that might
+    someday enqueue a job for a now-suspended tenant, not just this one.
+    """
+
+
+class SourceDisabledError(Exception):
+    """Task 2.9.g [SECURITY] duplication-check fix: raised by
+    request_refresh_now() when `source.enabled` is `False`. A real,
+    confirmed cross-subtask gap found while reviewing Step 2.9 as a
+    whole, not merely a theoretical one: before this fix, calling
+    request_refresh_now() on a disabled (soft-hidden, Task 2.9.e) source
+    enqueued a real adapter job anyway -- `_get_owned_source()` has never
+    filtered on `enabled` -- and that job's own handler would write
+    FRESH Qdrant points with no `HIDDEN_FIELD` set (the normal write
+    path, build_payload(), never sets that flag), making the source's
+    content answerable again WITHOUT ever calling enable_source(). A
+    plain pre-check, same shape as RefreshNowCooldownError/
+    RefreshNowAllowanceExhaustedError above -- checked right after
+    TenantSuspendedError above, still before either of those two, since
+    "is this source even eligible for refresh at all" is more
+    fundamental than "how recently was it refreshed." See also
+    `_skip_if_source_disabled_or_tenant_inactive()`
+    (app/ingest/job_handlers.py) -- the matching handler-level defense-
+    in-depth backstop for any OTHER path that might someday enqueue a
+    job for a disabled source, not just this one.
     """
 
 
@@ -556,8 +657,26 @@ class IngestRepository:
         duplicate that already-working path (rule 11); proven live, not
         assumed, by test_ingest_repository.py's own
         test_create_source_is_immediately_due_with_no_extra_seeding_call.
+
+        Task 2.10.b [SECURITY]: for `source_type == "crawl"` only, checked
+        BEFORE any row is constructed -- see `DomainNotVerifiedError`'s
+        own docstring above for the real, confirmed gap this closes.
+        `update_source()` deliberately does NOT get a matching check: a
+        later `update_source()` call changing `config["seed_url"]` to a
+        DIFFERENT, unverified domain is instead caught by `handle_ingest_
+        crawl()`'s own matching backstop (`app/ingest/job_handlers.py`),
+        which re-checks THIS source's own current seed_url right before
+        every real run regardless of how it got that way -- adding a
+        second check here would duplicate that one, not close a gap it
+        misses.
         """
         _validate_refresh_interval(refresh_interval)
+        if source_type == "crawl":
+            hostname = httpx.URL(config["seed_url"]).host
+            if not await is_domain_verified(self.session, self.tenant_id, hostname):
+                raise DomainNotVerifiedError(
+                    f"domain {hostname!r} is not verified for this tenant"
+                )
         source = Source(
             tenant_id=self.tenant_id,
             type=source_type,
@@ -666,6 +785,11 @@ class IngestRepository:
         )
         source.enabled = False
         await self.session.flush()
+        logger.info(
+            "disable_source: tenant %s source %s disabled, points hidden",
+            self.tenant_id,
+            source.id,
+        )
         return source
 
     async def enable_source(
@@ -703,6 +827,11 @@ class IngestRepository:
         )
         source.enabled = True
         await self.session.flush()
+        logger.info(
+            "enable_source: tenant %s source %s enabled, points unhidden",
+            self.tenant_id,
+            source.id,
+        )
         return source
 
     async def delete_source(
@@ -770,15 +899,25 @@ class IngestRepository:
         store visitors can actually retrieve from is cleared first.
         """
         source = await self._get_owned_source(source_id)
+        upload_count = 0
         if source.type == "upload":
             storage_dir = Path(get_settings().upload_storage_path)
-            for entry in source.config.get("uploads", []):
+            uploads = source.config.get("uploads", [])
+            for entry in uploads:
                 upload_storage.delete(uuid.UUID(entry["upload_id"]), storage_dir=storage_dir)
+            upload_count = len(uploads)
         await delete_points_for_source(
             client, collection_name, tenant_id=self.tenant_id, source_id=source.id
         )
         await self.session.delete(source)
         await self.session.flush()
+        logger.info(
+            "delete_source: tenant %s source %s deleted (type=%s, %d upload file(s) removed)",
+            self.tenant_id,
+            source_id,
+            source.type,
+            upload_count,
+        )
 
     async def request_refresh_now(
         self,
@@ -841,8 +980,30 @@ class IngestRepository:
         clears the cooldown check, and create_source()'s own scheduler-
         seeding (2.9.b) already covers getting it scheduled at all -- there
         is nothing left for this method to special-case.
+
+        Task 2.9.g [SECURITY] duplication-check fix: `source.enabled`
+        checked before cooldown or allowance -- see
+        `SourceDisabledError`'s own docstring above for the real,
+        confirmed gap this closes (a disabled source's content could
+        previously be made answerable again via this method alone,
+        without ever calling enable_source()).
+
+        Task 2.9.g [SECURITY], Finding 1: tenant-active checked FIRST,
+        before even `source.enabled` -- see `TenantSuspendedError`'s own
+        docstring above for the real, confirmed gap this closes (a
+        suspended tenant's source could previously still be refreshed on
+        demand via this method alone, bypassing all three layers that
+        protect the scheduled path).
         """
         source = await self._get_owned_source(source_id)
+        # Deferred import: circular at module level otherwise, see
+        # TenantSuspendedError's own docstring above for why.
+        from app.ingest.scheduler import is_tenant_active
+
+        if not await is_tenant_active(self.session, self.tenant_id):
+            raise TenantSuspendedError(f"tenant {self.tenant_id} is not active")
+        if not source.enabled:
+            raise SourceDisabledError(f"source {source_id} is disabled")
         now = clock()
         settings = get_settings()
 
