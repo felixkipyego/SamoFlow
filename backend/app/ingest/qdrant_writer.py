@@ -234,6 +234,118 @@ async def delete_points_for_document(
     )
 
 
+# Task 2.9.e's own "hidden" payload flag -- source-level, not document-
+# level, so a bare string constant (not a second build_payload()-style
+# dict shape) is all this needs.
+HIDDEN_FIELD = "hidden"
+
+
+def _source_filter(tenant_id: uuid.UUID, source_id: uuid.UUID) -> Filter:
+    """Task 2.9.e, decision 5: the ONE "which points belong to this
+    source" filter, shared by `delete_points_for_source()`/
+    `hide_points_for_source()`/`unhide_points_for_source()` below --
+    written once so none of the three can ever drift from the other two
+    on what "this source's own points" even means (rule 11), the
+    identical reasoning `_refresh_interval_violates_plan()` (2.9.b) and
+    `tenant_filter()` (app/qdrant.py) already established for their own
+    single shared comparisons. Filters on the EXISTING `source_id`
+    payload field (`build_payload()`'s own shape, Task 2.5.c) -- no new
+    payload field needed for the filter criterion itself, only for the
+    hide/unhide flag below. `tenant_id` scoping is defense in depth
+    (matching `delete_points_for_document()`'s own identical reasoning),
+    not strictly load-bearing: `source_id` values are already globally
+    unique UUIDs, but a caller-supplied id from the wrong tenant should
+    never be able to reach another tenant's points even in principle.
+    """
+    return Filter(
+        must=[
+            FieldCondition(key=CLIENT_ID_FIELD, match=MatchValue(value=str(tenant_id))),
+            FieldCondition(key="source_id", match=MatchValue(value=str(source_id))),
+        ]
+    )
+
+
+async def delete_points_for_source(
+    client: AsyncQdrantClient,
+    collection_name: str,
+    *,
+    tenant_id: uuid.UUID,
+    source_id: uuid.UUID,
+) -> None:
+    """Task 2.9.e, decision 1: DELETING a source is final and irreversible
+    -- its points are hard-deleted, not hidden. One Qdrant call for the
+    WHOLE source (every chunk of every document it owns), not a per-
+    document loop calling `delete_points_for_document()` once each: every
+    point already carries its own `source_id` (`build_payload()`, Task
+    2.5.c), so one filter reaches all of them directly, matching this
+    task's own decision 1 wording ("reusing delete_points_for_document()'s
+    own filter-based deletion PATTERN... scoped to source_id instead of
+    doc_id") -- the pattern is reused, not the function itself, since the
+    scoping field differs.
+    """
+    await client.delete(
+        collection_name=collection_name, points_selector=_source_filter(tenant_id, source_id)
+    )
+
+
+async def hide_points_for_source(
+    client: AsyncQdrantClient,
+    collection_name: str,
+    *,
+    tenant_id: uuid.UUID,
+    source_id: uuid.UUID,
+) -> None:
+    """Task 2.9.e, decision 1: DISABLING a source is reversible by design
+    -- its points are soft-hidden via `HIDDEN_FIELD` (set to `True`), not
+    deleted, so a cheap re-enable (`unhide_points_for_source()` below)
+    needs no re-ingestion. `set_payload()` merges into each matching
+    point's existing payload (confirmed by reading its own docstring --
+    "Set payload values for points"), leaving every other key (`text`,
+    `client_id`, `doc_id`, etc.) completely untouched.
+
+    This flag has NO consumer yet -- `retrieve()` does not exist until
+    Step 3.1 (see the matching Open marker recorded at this task). Built
+    ahead of its real caller anyway, matching this project's own
+    established precedent for exactly this shape (`confirm_verification()`
+    before a real session endpoint called it, Task 2.2.e;
+    `revoke_domain()` before a real admin surface called it, Task 2.2.g;
+    `ensure_collection()` before any real ingestion wrote a point, Task
+    1.3.c) -- building the primitive now does not require also wiring its
+    only real future consumer.
+    """
+    await client.set_payload(
+        collection_name=collection_name,
+        payload={HIDDEN_FIELD: True},
+        points=_source_filter(tenant_id, source_id),
+    )
+
+
+async def unhide_points_for_source(
+    client: AsyncQdrantClient,
+    collection_name: str,
+    *,
+    tenant_id: uuid.UUID,
+    source_id: uuid.UUID,
+) -> None:
+    """Task 2.9.e: re-enabling a disabled source's own counterpart to
+    `hide_points_for_source()` above. `delete_payload()` (NOT
+    `clear_payload()` -- confirmed live by reading both docstrings before
+    choosing: `clear_payload()` deletes a point's ENTIRE payload, which
+    would also destroy `client_id`/`doc_id`/`text`/every other key, a
+    real, confirmed-before-building footgun this function must not walk
+    into; `delete_payload()` removes only the NAMED keys given) removes
+    `HIDDEN_FIELD` entirely, restoring the exact "absent" state every
+    never-hidden point already has -- not merely setting it back to
+    `False`, which would leave an explicit, lingering key behind that
+    every other point never had.
+    """
+    await client.delete_payload(
+        collection_name=collection_name,
+        keys=[HIDDEN_FIELD],
+        points=_source_filter(tenant_id, source_id),
+    )
+
+
 async def embed_and_upsert(
     content: ExtractedContent,
     *,

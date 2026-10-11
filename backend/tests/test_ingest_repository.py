@@ -22,9 +22,13 @@ import pytest
 import sqlalchemy as sa
 from sqlalchemy.exc import IntegrityError
 
+from app import qdrant
 from app.config import get_settings
 from app.ingest import repository as repository_module
-from app.ingest.models import AuditLog, Job, Source, VerifiedDomain
+from app.ingest import upload_storage
+from app.ingest.extract_html import extract_html
+from app.ingest.models import AuditLog, Document, Job, Source, VerifiedDomain
+from app.ingest.qdrant_writer import HIDDEN_FIELD, embed_and_upsert, finish_ingest
 from app.ingest.queue import claim_next_job
 from app.ingest.repository import (
     VALID_JOB_TYPES,
@@ -48,6 +52,7 @@ from tests.conftest import (
     assert_db_connection_credential_round_trip,
     assert_secret_not_in_exception_chain,
     db_session,
+    patch_embed_dense,
 )
 
 DISTINCTIVE_PASSWORD = "sUpEr-DiStInCtIvE-fake-password-123-never-leak-me"  # noqa: S105 (test fixture value, not a real secret)
@@ -1180,8 +1185,12 @@ async def test_update_source_enforces_the_same_refresh_interval_rules_on_change(
     assert updated.config == {"urls": ["https://example.com/new"]}
 
 
-async def test_disable_source_stops_it_from_being_returned_as_due(_seeded_tenants):
+async def test_disable_source_stops_it_from_being_returned_as_due(
+    _seeded_tenants, live_test_services
+):
     ids = _seeded_tenants
+    _, client, collection_name = live_test_services
+    await qdrant.ensure_collection(client, collection_name)
     async with db_session() as session:
         never_run = Source(
             tenant_id=ids["tenant_a"], type="urls", config={}, refresh_interval="daily",
@@ -1203,7 +1212,9 @@ async def test_disable_source_stops_it_from_being_returned_as_due(_seeded_tenant
 
     async with db_session() as session:
         repo = IngestRepository(tenant_id=ids["tenant_a"], session=session)
-        disabled = await repo.disable_source(stale_id)
+        disabled = await repo.disable_source(
+            stale_id, client=client, collection_name=collection_name
+        )
         await session.commit()
     assert disabled.enabled is False
 
@@ -1216,9 +1227,16 @@ async def test_disable_source_stops_it_from_being_returned_as_due(_seeded_tenant
 
 
 async def test_disable_source_raises_for_a_source_belonging_to_a_different_tenant(
-    _seeded_tenants,
+    _seeded_tenants, live_test_services
 ):
     ids = _seeded_tenants
+    # UnknownSourceError is raised by _get_owned_source() BEFORE this
+    # method ever touches Qdrant (confirmed by reading disable_source()'s
+    # own code: the hide_points_for_source() call is reached only after
+    # the owned-source lookup succeeds) -- client/collection_name are
+    # still the real ones from live_test_services, not a stand-in, since
+    # nothing about this test's own proof depends on them being unusable.
+    _, client, collection_name = live_test_services
     async with db_session() as session:
         source = Source(
             tenant_id=ids["tenant_a"], type="urls", config={}, refresh_interval="daily",
@@ -1231,7 +1249,7 @@ async def test_disable_source_raises_for_a_source_belonging_to_a_different_tenan
     async with db_session() as session:
         repo = IngestRepository(tenant_id=ids["tenant_b"], session=session)
         with pytest.raises(UnknownSourceError, match=str(source_id)):
-            await repo.disable_source(source_id)
+            await repo.disable_source(source_id, client=client, collection_name=collection_name)
 
 
 async def test_flag_source_if_exceeds_plan_flags_without_disabling_or_touching_scheduling(
@@ -1411,3 +1429,332 @@ async def test_request_refresh_now_rejects_once_exhausted_then_allows_again_afte
     assert job_row.status == "pending"
     assert source_row.refresh_now_count == 1
     assert source_row.refresh_now_window_started_at == t0 + timedelta(hours=25)
+
+
+# --- Task 2.9.e [SECURITY]: source deletion/disable side effects -----------
+# Live against both real services together (test-db + test-qdrant), the
+# first tests in this file to need Qdrant at all -- a real, necessary
+# consequence of widening disable_source() (2.9.b) to also touch Qdrant,
+# flagged plainly rather than silently worked around: the two existing
+# disable_source() tests above were widened to pass a real client/
+# collection_name too (UnknownSourceError's own test needs one in name
+# only -- confirmed by reading disable_source()'s own code that the
+# Qdrant call is never reached on that path -- but passes the real one
+# anyway rather than an untyped stand-in).
+
+
+async def test_delete_source_removes_qdrant_points_and_documents_rows(
+    _seeded_tenants, live_test_services, monkeypatch
+):
+    patch_embed_dense(monkeypatch)
+    ids = _seeded_tenants
+    _, client, collection_name = live_test_services
+    await qdrant.ensure_collection(client, collection_name)
+
+    async with db_session() as session:
+        repo = IngestRepository(tenant_id=ids["tenant_a"], session=session)
+        source = await repo.create_source(
+            source_type="urls", config={"urls": ["https://delete-proof.example/page"]},
+            refresh_interval="daily",
+        )
+        await session.commit()
+        source_id = source.id
+
+    content = extract_html(
+        "<html><head><title>Delete Proof</title></head><body>"
+        "<h2>Section</h2><p>real content that must be hard-deleted</p>"
+        "</body></html>"
+    )
+    async with db_session() as session:
+        await finish_ingest(
+            session,
+            client,
+            collection_name,
+            content,
+            tenant_id=ids["tenant_a"],
+            source_id=source_id,
+            source_type="urls",
+            url="https://delete-proof.example/page",
+            file_name=None,
+            embedding_version="v1",
+        )
+        await session.commit()
+
+    count_before = await client.count(collection_name=collection_name)
+    assert count_before.count >= 1
+    async with db_session() as session:
+        docs_before = (
+            await session.execute(sa.select(Document).where(Document.source_id == source_id))
+        ).scalars().all()
+    assert len(docs_before) == 1
+
+    async with db_session() as session:
+        repo = IngestRepository(tenant_id=ids["tenant_a"], session=session)
+        await repo.delete_source(source_id, client=client, collection_name=collection_name)
+        await session.commit()
+
+    # The Source row itself is gone.
+    async with db_session() as session:
+        remaining_source = (
+            await session.execute(sa.select(Source).where(Source.id == source_id))
+        ).scalar_one_or_none()
+    assert remaining_source is None
+
+    # Its documents row(s) cascaded away at the database level.
+    async with db_session() as session:
+        docs_after = (
+            await session.execute(sa.select(Document).where(Document.source_id == source_id))
+        ).scalars().all()
+    assert docs_after == []
+
+    # Its Qdrant points are hard-deleted, confirmed via a real query.
+    records, _ = await client.scroll(
+        collection_name=collection_name,
+        scroll_filter=qdrant.tenant_filter(ids["tenant_a"]),
+        limit=20,
+    )
+    assert records == []
+
+
+async def test_delete_source_removes_the_on_disk_file_for_an_upload_type_source(
+    _seeded_tenants, live_test_services, monkeypatch, tmp_path
+):
+    patch_embed_dense(monkeypatch)
+    ids = _seeded_tenants
+    _, client, collection_name = live_test_services
+    await qdrant.ensure_collection(client, collection_name)
+
+    storage_dir = tmp_path / "uploads"
+    upload_id = upload_storage.save(
+        b"real upload bytes", storage_dir=storage_dir, max_size_bytes=1024
+    )
+    stored_path = storage_dir / str(upload_id)
+    assert stored_path.exists()  # confirms the real file exists before deletion
+
+    monkeypatch.setenv("UPLOAD_STORAGE_PATH", str(storage_dir))
+    get_settings.cache_clear()
+
+    async with db_session() as session:
+        repo = IngestRepository(tenant_id=ids["tenant_a"], session=session)
+        source = await repo.create_source(
+            source_type="upload",
+            config={
+                "uploads": [{"upload_id": str(upload_id), "original_filename": "proof.txt"}]
+            },
+            refresh_interval="daily",
+        )
+        await session.commit()
+        source_id = source.id
+
+    async with db_session() as session:
+        repo = IngestRepository(tenant_id=ids["tenant_a"], session=session)
+        await repo.delete_source(source_id, client=client, collection_name=collection_name)
+        await session.commit()
+
+    assert not stored_path.exists()
+
+
+async def test_disable_source_hides_points_without_deleting_them(
+    _seeded_tenants, live_test_services, monkeypatch
+):
+    patch_embed_dense(monkeypatch)
+    ids = _seeded_tenants
+    _, client, collection_name = live_test_services
+    await qdrant.ensure_collection(client, collection_name)
+
+    async with db_session() as session:
+        repo = IngestRepository(tenant_id=ids["tenant_a"], session=session)
+        source = await repo.create_source(
+            source_type="urls", config={"urls": ["https://disable-proof.example/page"]},
+            refresh_interval="daily",
+        )
+        await session.commit()
+        source_id = source.id
+
+    content = extract_html(
+        "<html><head><title>Disable Proof</title></head><body>"
+        "<h2>Section</h2><p>real content that must stay present but hidden</p>"
+        "</body></html>"
+    )
+    document_id = uuid.uuid4()
+    await embed_and_upsert(
+        content,
+        client=client,
+        collection_name=collection_name,
+        tenant_id=ids["tenant_a"],
+        source_id=source_id,
+        source_type="urls",
+        document_id=document_id,
+        source_url="https://disable-proof.example/page",
+        file_name=None,
+        embedding_version="v1",
+    )
+
+    async with db_session() as session:
+        repo = IngestRepository(tenant_id=ids["tenant_a"], session=session)
+        disabled = await repo.disable_source(
+            source_id, client=client, collection_name=collection_name
+        )
+        await session.commit()
+    assert disabled.enabled is False
+
+    # Present, not deleted -- then flagged hidden, read directly from the
+    # real payload, not inferred from retrieve() (which does not exist).
+    records, _ = await client.scroll(
+        collection_name=collection_name,
+        scroll_filter=qdrant.tenant_filter(ids["tenant_a"]),
+        limit=20,
+    )
+    assert len(records) >= 1
+    assert all(record.payload.get(HIDDEN_FIELD) is True for record in records)
+
+
+async def test_enable_source_unhides_points_with_zero_re_ingestion(
+    _seeded_tenants, live_test_services, monkeypatch
+):
+    patch_embed_dense(monkeypatch)
+    ids = _seeded_tenants
+    _, client, collection_name = live_test_services
+    await qdrant.ensure_collection(client, collection_name)
+
+    async with db_session() as session:
+        repo = IngestRepository(tenant_id=ids["tenant_a"], session=session)
+        source = await repo.create_source(
+            source_type="urls", config={"urls": ["https://enable-proof.example/page"]},
+            refresh_interval="daily",
+        )
+        await session.commit()
+        source_id = source.id
+
+    content = extract_html(
+        "<html><head><title>Enable Proof</title></head><body>"
+        "<h2>Section</h2><p>real content that must be un-hidden, not re-ingested</p>"
+        "</body></html>"
+    )
+    document_id = uuid.uuid4()
+    await embed_and_upsert(
+        content,
+        client=client,
+        collection_name=collection_name,
+        tenant_id=ids["tenant_a"],
+        source_id=source_id,
+        source_type="urls",
+        document_id=document_id,
+        source_url="https://enable-proof.example/page",
+        file_name=None,
+        embedding_version="v1",
+    )
+    points_before, _ = await client.scroll(
+        collection_name=collection_name,
+        scroll_filter=qdrant.tenant_filter(ids["tenant_a"]),
+        limit=20,
+    )
+    point_ids_before = {record.id for record in points_before}
+
+    async with db_session() as session:
+        repo = IngestRepository(tenant_id=ids["tenant_a"], session=session)
+        await repo.disable_source(source_id, client=client, collection_name=collection_name)
+        await session.commit()
+
+    async with db_session() as session:
+        repo = IngestRepository(tenant_id=ids["tenant_a"], session=session)
+        enabled = await repo.enable_source(
+            source_id, client=client, collection_name=collection_name
+        )
+        await session.commit()
+    assert enabled.enabled is True
+
+    records, _ = await client.scroll(
+        collection_name=collection_name,
+        scroll_filter=qdrant.tenant_filter(ids["tenant_a"]),
+        limit=20,
+    )
+    # The exact same points -- zero re-ingestion, not a fresh set.
+    assert {record.id for record in records} == point_ids_before
+    assert all(HIDDEN_FIELD not in record.payload for record in records)
+
+
+async def test_delete_and_disable_source_never_touch_a_different_sources_content(
+    _seeded_tenants, live_test_services, monkeypatch
+):
+    # Both axes this project always proves for a deletion/isolation-shaped
+    # operation: a DIFFERENT TENANT's content (source_b, tenant_b) and a
+    # DIFFERENT SOURCE belonging to the SAME tenant (source_a2, tenant_a)
+    # -- only source_a1 (tenant_a) is ever disabled/deleted.
+    patch_embed_dense(monkeypatch)
+    ids = _seeded_tenants
+    _, client, collection_name = live_test_services
+    await qdrant.ensure_collection(client, collection_name)
+
+    async with db_session() as session:
+        repo_a = IngestRepository(tenant_id=ids["tenant_a"], session=session)
+        source_a1 = await repo_a.create_source(
+            source_type="urls", config={"urls": ["https://isolation-proof.example/a1"]},
+            refresh_interval="daily",
+        )
+        source_a2 = await repo_a.create_source(
+            source_type="urls", config={"urls": ["https://isolation-proof.example/a2"]},
+            refresh_interval="daily",
+        )
+        repo_b = IngestRepository(tenant_id=ids["tenant_b"], session=session)
+        source_b = await repo_b.create_source(
+            source_type="urls", config={"urls": ["https://isolation-proof.example/b"]},
+            refresh_interval="daily",
+        )
+        await session.commit()
+        source_a1_id, source_a2_id, source_b_id = source_a1.id, source_a2.id, source_b.id
+
+    for tenant_id, source_id, suffix in (
+        (ids["tenant_a"], source_a1_id, "a1"),
+        (ids["tenant_a"], source_a2_id, "a2"),
+        (ids["tenant_b"], source_b_id, "b"),
+    ):
+        content = extract_html(
+            f"<html><head><title>{suffix}</title></head><body><h2>S</h2>"
+            f"<p>content for source {suffix}, must only ever be touched by "
+            "an operation against its own source_id</p></body></html>"
+        )
+        await embed_and_upsert(
+            content, client=client, collection_name=collection_name, tenant_id=tenant_id,
+            source_id=source_id, source_type="urls", document_id=uuid.uuid4(),
+            source_url=f"https://isolation-proof.example/{suffix}", file_name=None,
+            embedding_version="v1",
+        )
+
+    # Only source_a1 (tenant_a) is disabled, then deleted.
+    async with db_session() as session:
+        repo_a = IngestRepository(tenant_id=ids["tenant_a"], session=session)
+        await repo_a.disable_source(source_a1_id, client=client, collection_name=collection_name)
+        await repo_a.delete_source(source_a1_id, client=client, collection_name=collection_name)
+        await session.commit()
+
+    # source_a2 (same tenant, different source) and source_b (different
+    # tenant) are both completely untouched: still enabled, their own
+    # points still present and never flagged hidden.
+    async with db_session() as session:
+        source_a2_row = (
+            await session.execute(sa.select(Source).where(Source.id == source_a2_id))
+        ).scalar_one()
+        source_b_row = (
+            await session.execute(sa.select(Source).where(Source.id == source_b_id))
+        ).scalar_one()
+    assert source_a2_row.enabled is True
+    assert source_b_row.enabled is True
+
+    records, _ = await client.scroll(
+        collection_name=collection_name,
+        scroll_filter=qdrant.tenant_filter(ids["tenant_a"]),
+        limit=20,
+    )
+    remaining_source_ids = {record.payload["source_id"] for record in records}
+    assert remaining_source_ids == {str(source_a2_id)}  # source_a1's own points are gone
+    assert all(HIDDEN_FIELD not in record.payload for record in records)
+
+    records_b, _ = await client.scroll(
+        collection_name=collection_name,
+        scroll_filter=qdrant.tenant_filter(ids["tenant_b"]),
+        limit=20,
+    )
+    assert len(records_b) >= 1
+    assert all(record.payload["source_id"] == str(source_b_id) for record in records_b)
+    assert all(HIDDEN_FIELD not in record.payload for record in records_b)

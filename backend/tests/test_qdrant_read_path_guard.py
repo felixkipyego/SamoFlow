@@ -103,6 +103,15 @@ APP_DIR = BACKEND_DIR / "app"
 # first use of qdrant_client specifically. Calls no method on the client
 # itself, so NOT added to READ_ALLOWLIST, same reasoning as every prior
 # entry here.
+# Task 2.9.e [SECURITY]: app/ingest/repository.py added -- the identical
+# "pass-through parameter typed as the real AsyncQdrantClient" shape
+# again (disable_source()/enable_source()/delete_source() each take
+# `client` and forward it unmodified to hide_points_for_source()/
+# unhide_points_for_source()/delete_points_for_source(), app/ingest/
+# qdrant_writer.py). Confirmed live, by running this guard before
+# deciding, that it trips rule (a) the same way every prior entry here
+# did. Calls no method on the client itself, so NOT added to
+# READ_ALLOWLIST, same reasoning as every prior entry.
 CLIENT_ACCESS_ALLOWLIST: frozenset[str] = frozenset(
     {
         "app/qdrant.py",
@@ -114,6 +123,7 @@ CLIENT_ACCESS_ALLOWLIST: frozenset[str] = frozenset(
         "app/ingest/crawl.py",
         "app/ingest/upload_adapter.py",
         "app/ingest/database_adapter.py",
+        "app/ingest/repository.py",
     }
 )
 

@@ -28,13 +28,16 @@ import secrets
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
+from qdrant_client import AsyncQdrantClient
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
 from app.db import DateTimeClock, violated_constraint_name
+from app.ingest import upload_storage
 from app.ingest.domain_verification import (
     check_dns_verification,
     check_file_verification,
@@ -48,6 +51,11 @@ from app.ingest.models import (
     Job,
     Source,
     VerifiedDomain,
+)
+from app.ingest.qdrant_writer import (
+    delete_points_for_source,
+    hide_points_for_source,
+    unhide_points_for_source,
 )
 
 # Task 2.6.b: the first REAL job-type vocabulary -- a real caller
@@ -599,7 +607,13 @@ class IngestRepository:
         await self.session.flush()
         return source
 
-    async def disable_source(self, source_id: uuid.UUID) -> Source:
+    async def disable_source(
+        self,
+        source_id: uuid.UUID,
+        *,
+        client: AsyncQdrantClient,
+        collection_name: str,
+    ) -> Source:
         """Task 2.9.b, decision 3. Sets `enabled = False` -- NOT
         `status` (confirmed live before building, not assumed:
         get_due_sources()'s own real WHERE clause, app/ingest/scheduler.py,
@@ -617,11 +631,138 @@ class IngestRepository:
         come back as due -- even with a NULL/stale `last_run_at` -- by
         test_ingest_repository.py's own
         test_disable_source_stops_it_from_being_returned_as_due.
+
+        Task 2.9.e, decision 1: widened to also soft-HIDE this source's
+        own Qdrant points (`hide_points_for_source()`) -- disabling is
+        reversible by design, so points are flagged, never deleted. The
+        Qdrant call happens BEFORE the `enabled = False` flush, not
+        after: matching Task 2.9.d's own established "the worse failure
+        mode is content staying answerable when it shouldn't be"
+        precedent, applied in the direction that fits THIS trigger -- if
+        the later flush ever failed, the worst surviving state is points
+        already hidden for a source the database still shows as enabled
+        (strictly MORE hidden than the database claims, never less),
+        rather than the reverse.
         """
         source = await self._get_owned_source(source_id)
+        await hide_points_for_source(
+            client, collection_name, tenant_id=self.tenant_id, source_id=source.id
+        )
         source.enabled = False
         await self.session.flush()
         return source
+
+    async def enable_source(
+        self,
+        source_id: uuid.UUID,
+        *,
+        client: AsyncQdrantClient,
+        collection_name: str,
+    ) -> Source:
+        """Task 2.9.e: `disable_source()`'s own reversal -- implied by
+        decision 2's "the mechanism to set/clear [the hidden flag]" and
+        this task's own required test (c), not separately named as a
+        numbered build item, but a natural, necessary counterpart built
+        here rather than left half-built (matching this project's own
+        `mark_job_succeeded()`/`mark_job_failed()` precedent, Task 2.1.c:
+        a state transition is never built in only one direction when the
+        other is obviously needed too). Un-hides via
+        `unhide_points_for_source()` -- zero re-ingestion, by construction:
+        the points were never deleted, only flagged, so removing the flag
+        is the entire operation.
+
+        Ordering is the SAME "Qdrant call before the flush" rule
+        `disable_source()` above uses, for consistency (rule 11 -- one
+        convention, not two), even though re-enabling has no asymmetric
+        security risk either way yet (no retrieval-time consumer of the
+        hidden flag exists until Step 3.1, see this task's own new Open
+        marker): if the later flush ever failed, the worst surviving
+        state is points already un-hidden for a source the database
+        still shows as disabled -- harmless today, and still the more
+        conservative direction once a real consumer exists.
+        """
+        source = await self._get_owned_source(source_id)
+        await unhide_points_for_source(
+            client, collection_name, tenant_id=self.tenant_id, source_id=source.id
+        )
+        source.enabled = True
+        await self.session.flush()
+        return source
+
+    async def delete_source(
+        self,
+        source_id: uuid.UUID,
+        *,
+        client: AsyncQdrantClient,
+        collection_name: str,
+    ) -> None:
+        """Task 2.9.e, decision 1/3: DELETING a source is final and
+        irreversible -- hard-deletes its Qdrant points and the `Source`
+        row itself (which cascades to its own `documents` and `jobs`
+        rows automatically, see below). No return value: unlike every
+        other method on this class, there is no surviving row to hand
+        back once this returns.
+
+        Cascade investigation, confirmed live before building, not
+        assumed (this task's own build item 3 asked for this explicitly):
+        `documents.source_id` and `jobs.source_id` both declare
+        `ForeignKey("sources.id", ondelete="CASCADE")` (app/ingest/
+        models.py) -- a real DATABASE-level cascade, not an ORM-level
+        `cascade=` relationship option (this class uses no ORM
+        relationships at all, only explicit queries). Deleting the
+        `Source` row and flushing is therefore sufficient on its own for
+        both tables; no explicit `DELETE FROM documents`/`DELETE FROM
+        jobs` is written here, and adding one would be a redundant,
+        independently-maintained second copy of what Postgres already
+        guarantees (rule 11). `db_connections` is DIFFERENT: confirmed by
+        reading its own model that it has no FK to `sources` at all in
+        EITHER direction (`sources.config["db_connection_id"]` is a plain
+        string pointer, not a real FK, per Task 2.8.e's own decision) --
+        deleting a source therefore leaves its own referenced
+        `db_connections` row completely untouched, neither cascaded nor
+        cleaned up here. Building a new cleanup mechanism for it was
+        considered and declined: nothing in this task's own instructions
+        asks for it, a `db_connections` row is not proven to belong to
+        exactly one source (the schema does not enforce that), and
+        inventing one here would be solving a problem this task was not
+        asked to solve (rule 11).
+
+        Upload bytes (decision 4): for an upload-type source, every
+        referenced upload's own on-disk file is deleted via
+        `upload_storage.delete()` (Task 2.7.a, already idempotent --
+        `Path.unlink(missing_ok=True)`) -- resolving the FIRST 2.7.c-
+        recorded Open marker ("nothing deletes on-disk bytes on source
+        deletion"). The SECOND 2.7.c marker (orphaned bytes when a
+        re-upload REPLACES an upload_id under the same source/filename --
+        a config-transition trigger, not a source-deletion one) is
+        explicitly NOT touched here, per this task's own instruction --
+        confirmed left open below (PROJECT_SPEC.md's own Open markers).
+
+        Ordering: upload-file deletion, THEN Qdrant, THEN the `Source`
+        row -- deliberately the safest-first order, not an arbitrary one.
+        `upload_storage.delete()` and `delete_points_for_source()` are
+        both confirmed idempotent (missing_ok=True; a zero-match Qdrant
+        filter completes successfully, Task 2.9.d's own live finding), so
+        a failure at any step leaves every prior step safely re-runnable
+        on a retry -- the only real asymmetry is that a `Source` row
+        deleted first, with the Qdrant delete failing afterward, would
+        leave content answerable with no owning row left to re-run this
+        method against at all (`_get_owned_source()` would raise
+        UnknownSourceError on retry). Qdrant before Postgres mirrors Task
+        2.9.d's own established reasoning exactly: the worse failure mode
+        is content staying answerable when it should not be, so the
+        store visitors can actually retrieve from is cleared first.
+        """
+        source = await self._get_owned_source(source_id)
+        if source.type == "upload":
+            storage_dir = Path(get_settings().upload_storage_path)
+            for entry in source.config.get("uploads", []):
+                upload_storage.delete(uuid.UUID(entry["upload_id"]), storage_dir=storage_dir)
+        await delete_points_for_source(
+            client, collection_name, tenant_id=self.tenant_id, source_id=source.id
+        )
+        await self.session.delete(source)
+        await self.session.flush()
 
     async def request_refresh_now(
         self,
