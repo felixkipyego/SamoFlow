@@ -32,7 +32,7 @@ import uuid
 from datetime import UTC, datetime
 
 from qdrant_client import AsyncQdrantClient
-from qdrant_client.http.models import PointStruct, SparseVector
+from qdrant_client.http.models import FieldCondition, Filter, MatchValue, PointStruct, SparseVector
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -41,7 +41,7 @@ from app.ingest.chunking import chunk_text, compute_content_hash
 from app.ingest.embedding import EMBEDDING_MODEL, SparseVectorData, embed_dense, embed_sparse
 from app.ingest.extract_html import ExtractedContent
 from app.ingest.models import Document
-from app.qdrant import DENSE_VECTOR_NAME, SPARSE_VECTOR_NAME
+from app.qdrant import CLIENT_ID_FIELD, DENSE_VECTOR_NAME, SPARSE_VECTOR_NAME
 
 # Task 2.5.c: a project-specific constant, generated ONCE (uuid.uuid4(),
 # picked arbitrarily) and hardcoded forever from this point on -- matching
@@ -183,6 +183,55 @@ async def upsert_points(
     if not points:
         return
     await client.upsert(collection_name=collection_name, points=points)
+
+
+async def delete_points_for_document(
+    client: AsyncQdrantClient,
+    collection_name: str,
+    *,
+    tenant_id: uuid.UUID,
+    document_id: uuid.UUID,
+) -> None:
+    """Task 2.9.d. The first Qdrant-deletion primitive in this codebase --
+    confirmed live (grep across app/) that none already existed before
+    writing this, per that task's own "reuse, don't rebuild" instruction.
+    Lives here, beside `upsert_points()`, for the identical reason that
+    function does: this is the one place in CLIENT_ACCESS_ALLOWLIST
+    (test_qdrant_read_path_guard.py) that already calls a WRITE-classified
+    method (`delete` is already in that guard's own `WRITE_METHODS`, not
+    `READ_METHODS` -- confirmed by reading it, not assumed), so adding a
+    second write method here needs no new allow-list entry anywhere.
+
+    Deletes by FILTER (document_id, scoped to tenant_id too, defense in
+    depth against a caller-supplied id from the wrong tenant), not by
+    reconstructing point ids: a document's own chunk_index values are not
+    known to the caller (only `finish_ingest()`'s own embed_and_upsert()
+    call, Task 2.5.e, knows how many chunks a given document produced),
+    and `build_point_id()`'s own determinism means every chunk's id can be
+    derived forward from `(document_id, chunk_index, embedding_version)`
+    but not enumerated backward from `document_id` alone without knowing
+    every chunk_index that was ever written for it -- a filter needs
+    neither.
+
+    A filter matching ZERO points is confirmed live, not assumed, to
+    complete successfully (`UpdateStatus.COMPLETED`), unlike
+    `upsert_points()`'s own confirmed 400 on an empty points LIST above --
+    a genuinely different call shape (a filter that matches nothing vs. an
+    empty points argument), so no early-return guard is needed or added
+    here: this is a real, reachable case (e.g. a nearly-empty document,
+    2.4.b's own `is_nearly_empty` concept, that produced zero chunks and
+    therefore never had any points to begin with, yet still has a
+    `documents` row that can become stale and reach this function).
+    """
+    await client.delete(
+        collection_name=collection_name,
+        points_selector=Filter(
+            must=[
+                FieldCondition(key=CLIENT_ID_FIELD, match=MatchValue(value=str(tenant_id))),
+                FieldCondition(key="doc_id", match=MatchValue(value=str(document_id))),
+            ]
+        ),
+    )
 
 
 async def embed_and_upsert(

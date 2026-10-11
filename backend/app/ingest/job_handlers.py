@@ -335,7 +335,8 @@ from app.ingest.database_adapter import (
     fetch_readonly_rows,
     ingest_db_row,
 )
-from app.ingest.models import JOB_TYPE_FOR_SOURCE_TYPE, DbConnection, Job, Source
+from app.ingest.models import JOB_TYPE_FOR_SOURCE_TYPE, DbConnection, Document, Job, Source
+from app.ingest.qdrant_writer import delete_points_for_document
 from app.ingest.repository import IngestRepository
 from app.ingest.row_templates import MissingColumnError, MissingPrimaryKeyError, TemplateRenderError
 from app.ingest.scheduler import get_due_sources, is_tenant_active
@@ -440,6 +441,21 @@ async def handle_ingest_crawl(job: Job) -> None:
     actually visited, giving a real, busy crawl genuine mid-job progress
     checkpoints, not just one heartbeat write at job start (the gap this
     task closes, deferred from 2.6.d).
+
+    Task 2.9.d [SECURITY]: crawl staleness cleanup, added at the end of
+    this same run, AFTER `last_run_at`/`last_crawl_started_at` are set and
+    committed -- deliberately CRAWL-ONLY, not `handle_ingest_url()`
+    (confirmed against docs/SPEC.md §5.4's own exact wording, "Pages
+    missing from two consecutive full crawls are deleted" -- crawl
+    discovery is implicit, so a page vanishing from the discovered set is
+    ambiguous between "removed" and "a transient fetch failure," which is
+    exactly what the two-consecutive-miss debounce exists to resolve; the
+    url-list adapter's own input is an explicit, tenant-supplied list --
+    a URL disappearing from it is already unambiguous, with nothing to
+    debounce, and what should then happen to it is a source-lifecycle
+    question, Task 2.9.e's own job, not a per-crawl detection problem).
+    See `_cleanup_stale_crawl_documents()`'s own docstring below for the
+    full two-consecutive-miss mechanism and the failed-run exclusion.
     """
     # Imported here, not at module level: see this module's own header
     # comment for why (worker.py -> job_handlers.py -> crawl.py would be
@@ -451,6 +467,7 @@ async def handle_ingest_crawl(job: Job) -> None:
     from app.worker import HEARTBEAT_PATH, write_heartbeat
 
     settings = get_settings()
+    run_started_at = datetime.now(UTC)
     async with _open_source_session(job, "ingest_crawl") as (client, session, source):
         seed_url = source.config["seed_url"]
         await run_crawl(
@@ -469,7 +486,119 @@ async def handle_ingest_crawl(job: Job) -> None:
         # see handle_ingest_url()'s own identical comment above for the
         # full reasoning.
         source.last_run_at = func.now()
+        # Task 2.9.d: the PREVIOUS completed run's own start time is read
+        # BEFORE it is overwritten below -- this is the exact threshold
+        # _cleanup_stale_crawl_documents() needs. Both this read and the
+        # write below are reached ONLY on run_crawl()'s own normal return,
+        # the identical guarantee last_run_at already relies on -- an
+        # uncaught exception from run_crawl() never reaches this line, so
+        # a failed/interrupted run is invisible to this mechanism: it
+        # never advances `last_crawl_started_at` and never runs the
+        # cleanup below, exactly the fail-closed property this task's own
+        # instructions required.
+        previous_crawl_started_at = source.last_crawl_started_at
+        source.last_crawl_started_at = run_started_at
         await session.commit()
+
+        if previous_crawl_started_at is not None:
+            await _cleanup_stale_crawl_documents(
+                session,
+                client,
+                qdrant.COLLECTION_NAME,
+                tenant_id=job.tenant_id,
+                source_id=job.source_id,
+                previous_crawl_started_at=previous_crawl_started_at,
+            )
+
+
+async def _cleanup_stale_crawl_documents(
+    session: AsyncSession,
+    client: AsyncQdrantClient,
+    collection_name: str,
+    *,
+    tenant_id: uuid.UUID,
+    source_id: uuid.UUID,
+    previous_crawl_started_at: datetime,
+) -> None:
+    """Task 2.9.d: deletes every document for `source_id` that was missing
+    from BOTH the run immediately before this one AND this run itself --
+    docs/SPEC.md §5.4's own "pages missing from two consecutive full
+    crawls are deleted."
+
+    The criterion, evaluated per document, is exactly one comparison:
+    `documents.last_seen_at < previous_crawl_started_at`. `last_seen_at`
+    is NOT a new signal -- confirmed live before building anything (per
+    this task's own "if anything looks wrong, say so" instruction): it
+    already exists and is already written, unconditionally, by
+    finish_ingest() (app/ingest/qdrant_writer.py, since Tasks 2.5.d/2.6.c)
+    on every page this OR any other adapter actually finds and processes.
+    A page this run genuinely found already has `last_seen_at` bumped to
+    (at earliest) this run's own start, which is always AFTER
+    `previous_crawl_started_at` by construction -- so only a page missing
+    from the CURRENT run is even a candidate. Of those candidates, one
+    with `last_seen_at >= previous_crawl_started_at` was still found
+    during the PREVIOUS run (exactly one miss so far, not deleted); one
+    with `last_seen_at < previous_crawl_started_at` was missing from the
+    previous run too (two consecutive misses, deleted). A page that
+    reappears on a later run has `last_seen_at` bumped forward again by
+    that same finish_ingest() write, which is why reappearing always
+    clears any accumulated miss count for free, with no separate counter
+    to reset.
+
+    Qdrant points deleted BEFORE the `documents` row, not after --
+    deliberately the OPPOSITE order from embed_and_upsert()/finish_ingest()'s
+    own "Qdrant first, Postgres commit after" precedent (handle_ingest_url()'s
+    own comment), and for a mirror-image reason: an upsert's own worse
+    failure mode is "a documents row exists but has no matching, findable
+    point" (a chunk silently unfindable despite its own row claiming to
+    exist), so Qdrant goes first there. A DELETION's own worse failure
+    mode is the opposite -- content that should be gone staying findable
+    to visitors (`documents` row deleted but its Qdrant points survive) --
+    so here Qdrant goes first instead: if the subsequent `documents`
+    delete+commit ever failed, the WORST surviving state is an orphaned
+    Qdrant point with no matching row, which Task 2.9.f's own (not yet
+    built) nightly reconcile job already exists to catch and remove, not
+    content that stays answerable to visitors after it should not be.
+    Deleted and committed per document, not batched -- matching this
+    project's own established per-item independence discipline (Step 2.7
+    closure summary): one stale document's own failure does not block
+    cleanup of the others.
+
+    No per-item try/except around either delete call: unlike the
+    canonical per-item CONTENT contract (a fetch failure, an unverified
+    domain -- each an expected, per-item outcome), a Qdrant/Postgres
+    delete failing here is an infrastructure-level problem with no
+    expected-failure meaning of its own, so it is left to propagate
+    uncaught and take the ordinary job-level retry path, matching every
+    other infrastructure-level failure in this codebase. A retry is safe
+    and naturally idempotent: it re-queries for still-stale documents
+    fresh, so one already deleted on a prior partial attempt simply no
+    longer matches and is never touched again.
+    """
+    stale_documents = (
+        (
+            await session.execute(
+                select(Document).where(
+                    Document.source_id == source_id,
+                    Document.last_seen_at < previous_crawl_started_at,
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    for document in stale_documents:
+        await delete_points_for_document(
+            client, collection_name, tenant_id=tenant_id, document_id=document.id
+        )
+        await session.delete(document)
+        await session.commit()
+        logger.info(
+            "_cleanup_stale_crawl_documents: source %s deleted stale document %s (url=%r)",
+            source_id,
+            document.id,
+            document.url,
+        )
 
 
 async def handle_ingest_upload(job: Job) -> None:

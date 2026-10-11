@@ -151,6 +151,35 @@ class Source(Base):
     refresh_now_window_started_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
+    # Task 2.9.d: crawl staleness cleanup's own "when did the PREVIOUS
+    # completed crawl run begin" signal -- deliberately a NEW field, not a
+    # reuse of `last_run_at` above, confirmed necessary before building
+    # (not assumed): `last_run_at` is written at a run's own COMPLETION
+    # (func.now(), Task 2.9.a), but the two-consecutive-miss criterion
+    # needs each run's own START time to threshold documents.last_seen_at
+    # against -- using completion time would be subtly wrong, since a page
+    # found early in a long-running crawl could have a last_seen_at
+    # earlier than that SAME run's own completion time, risking a false
+    # "missing" read on the very next run. Not sourced from `jobs.created_
+    # at`/`jobs.updated_at` either (checked before adding this, per this
+    # task's own instruction): `created_at` is enqueue time, which can
+    # predate real execution by an arbitrary backoff/retry delay if the
+    # job failed and retried; `updated_at` is overwritten at EVERY status
+    # transition (claim_next_job()'s own "claimed_at" reuse, queue.py) and
+    # no longer reflects start time once a job reaches "succeeded." Set by
+    # handle_ingest_crawl() (app/ingest/job_handlers.py) at the top of its
+    # own run, but only PERSISTED (overwriting the prior value) once that
+    # same run reaches its own normal completion -- the identical "only on
+    # a line an uncaught exception never reaches" guarantee `last_run_at`
+    # already relies on, so a failed/interrupted crawl run never advances
+    # this field and therefore can never count as a "miss" for any page.
+    # Nullable, no default, matching `last_run_at`'s own exact shape --
+    # `None` means no completed crawl run exists yet for this source, the
+    # correct state for a brand-new source (nothing to compare against,
+    # so no document can yet be "missing for two consecutive crawls").
+    last_crawl_started_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
 
     __table_args__ = (
         CheckConstraint("type IN ('urls', 'crawl', 'upload', 'database')", name="ck_sources_type"),

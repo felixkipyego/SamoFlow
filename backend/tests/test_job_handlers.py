@@ -40,6 +40,7 @@ import sqlalchemy as sa
 from app import qdrant
 from app import worker as worker_module
 from app.ingest import database_adapter as database_adapter_module
+from app.ingest import job_handlers as job_handlers_module
 from app.ingest import safe_fetch as safe_fetch_module
 from app.ingest import upload_storage
 from app.ingest.models import Document, Job, Source
@@ -635,7 +636,195 @@ async def test_heartbeat_is_written_mid_crawl_not_only_at_job_boundaries(
     assert check_heartbeat_fresh(heartbeat_path) is True
 
 
-# --- Task 2.7.d: handle_ingest_upload() -----------------------------------
+# --- Task 2.9.d [SECURITY]: crawl staleness cleanup -----------------------
+# Deliberately CRAWL-ONLY (confirmed against docs/SPEC.md §5.4's own exact
+# wording, "Pages missing from two consecutive full crawls are deleted") --
+# handle_ingest_url() is untouched by this task, not tested here either.
+
+
+def _sitemap_xml(seed: str, urls: list[str]) -> bytes:
+    entries = "".join(f"<url><loc>{u}</loc></url>" for u in urls)
+    return (
+        '<?xml version="1.0"?>'
+        '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">'
+        f"{entries}</urlset>"
+    ).encode()
+
+
+async def _enqueue_crawl_job(tenant_id: uuid.UUID, source_id: uuid.UUID) -> uuid.UUID:
+    # A second (and third...) real `ingest_crawl` job against the SAME
+    # already-seeded source -- _seed_tenant_crawl_source_and_verified_
+    # domain() above only ever creates the first one.
+    async with db_session() as session:
+        repo = IngestRepository(tenant_id=tenant_id, session=session)
+        job = await repo.enqueue(job_type="ingest_crawl", source_id=source_id, payload={})
+        await session.commit()
+        return job.id
+
+
+async def test_a_page_missing_from_two_consecutive_crawls_is_deleted_but_not_after_one_miss(
+    monkeypatch, live_test_services
+):
+    client = await _prepare_env(monkeypatch, live_test_services)
+    routes: dict = {}
+    with local_http_server(_tracking_handler(routes, [])) as port:
+        seed = f"http://{_LOOPBACK_HOST}:{port}"
+        page1 = f"{seed}/page1"
+        routes["/"] = (200, _rich_page("Home", "home").encode())
+        routes["/page1"] = (200, _rich_page("Page1", "one").encode())
+        routes["/robots.txt"] = (200, f"Sitemap: {seed}/sitemap.xml\n".encode())
+        routes["/sitemap.xml"] = (200, _sitemap_xml(seed, [seed, page1]))
+
+        ids = await _seed_tenant_crawl_source_and_verified_domain(seed)
+
+        # Crawl 1: both pages found. No previous run exists yet, so no
+        # cleanup runs at all -- nothing to compare against.
+        await asyncio.wait_for(run(asyncio.Event(), max_iterations=1), timeout=15)
+        documents = await _documents_for(ids["source_id"])
+        assert {doc.url for doc in documents} == {seed, page1}
+        source_after_1 = await _fetch_source(ids["source_id"])
+        assert source_after_1.last_crawl_started_at is not None
+
+        # Crawl 2: page1 removed from the sitemap -- one miss. Still
+        # present: a single miss is not enough to delete.
+        routes["/sitemap.xml"] = (200, _sitemap_xml(seed, [seed]))
+        job2_id = await _enqueue_crawl_job(ids["tenant_id"], ids["source_id"])
+        await asyncio.wait_for(run(asyncio.Event(), max_iterations=1), timeout=15)
+
+        job2 = await _fetch_job(job2_id)
+        assert job2.status == "succeeded"
+        documents = await _documents_for(ids["source_id"])
+        assert {doc.url for doc in documents} == {seed, page1}
+        page1_id = next(doc.id for doc in documents if doc.url == page1)
+        records, _ = await client.scroll(
+            collection_name=qdrant.COLLECTION_NAME,
+            scroll_filter=qdrant.tenant_filter(ids["tenant_id"]),
+            limit=20,
+        )
+        assert page1 in {r.payload["source_url"] for r in records}
+
+        # Crawl 3: page1 STILL missing -- two consecutive misses. Deleted,
+        # both the documents row and its real Qdrant points.
+        job3_id = await _enqueue_crawl_job(ids["tenant_id"], ids["source_id"])
+        await asyncio.wait_for(run(asyncio.Event(), max_iterations=1), timeout=15)
+
+        job3 = await _fetch_job(job3_id)
+        assert job3.status == "succeeded"
+        documents = await _documents_for(ids["source_id"])
+        assert {doc.url for doc in documents} == {seed}
+
+        async with db_session() as session:
+            remaining = (
+                await session.execute(sa.select(Document).where(Document.id == page1_id))
+            ).scalar_one_or_none()
+        assert remaining is None
+
+        records, _ = await client.scroll(
+            collection_name=qdrant.COLLECTION_NAME,
+            scroll_filter=qdrant.tenant_filter(ids["tenant_id"]),
+            limit=20,
+        )
+        assert page1 not in {r.payload["source_url"] for r in records}
+        assert seed in {r.payload["source_url"] for r in records}
+
+
+async def test_a_page_that_reappears_resets_its_last_seen_at_and_is_never_deleted(
+    monkeypatch, live_test_services
+):
+    client = await _prepare_env(monkeypatch, live_test_services)
+    routes: dict = {}
+    with local_http_server(_tracking_handler(routes, [])) as port:
+        seed = f"http://{_LOOPBACK_HOST}:{port}"
+        page1 = f"{seed}/page1"
+        routes["/"] = (200, _rich_page("Home", "home").encode())
+        routes["/page1"] = (200, _rich_page("Page1", "one").encode())
+        routes["/robots.txt"] = (200, f"Sitemap: {seed}/sitemap.xml\n".encode())
+        routes["/sitemap.xml"] = (200, _sitemap_xml(seed, [seed, page1]))
+
+        ids = await _seed_tenant_crawl_source_and_verified_domain(seed)
+        await asyncio.wait_for(run(asyncio.Event(), max_iterations=1), timeout=15)
+        documents = await _documents_for(ids["source_id"])
+        page1_id = next(doc.id for doc in documents if doc.url == page1)
+        async with db_session() as session:
+            page1_after_1 = (
+                await session.execute(sa.select(Document).where(Document.id == page1_id))
+            ).scalar_one()
+        last_seen_after_1 = page1_after_1.last_seen_at
+
+        # Crawl 2: page1 missing -- one miss, last_seen_at stays at crawl 1's.
+        routes["/sitemap.xml"] = (200, _sitemap_xml(seed, [seed]))
+        await _enqueue_crawl_job(ids["tenant_id"], ids["source_id"])
+        await asyncio.wait_for(run(asyncio.Event(), max_iterations=1), timeout=15)
+
+        # Crawl 3: page1 REAPPEARS in the sitemap -- found again, before
+        # it would have reached its own second consecutive miss.
+        routes["/sitemap.xml"] = (200, _sitemap_xml(seed, [seed, page1]))
+        job3_id = await _enqueue_crawl_job(ids["tenant_id"], ids["source_id"])
+        await asyncio.wait_for(run(asyncio.Event(), max_iterations=1), timeout=15)
+
+        job3 = await _fetch_job(job3_id)
+        assert job3.status == "succeeded"
+        documents = await _documents_for(ids["source_id"])
+        # Never deleted -- both pages still present.
+        assert {doc.url for doc in documents} == {seed, page1}
+        page1_after_3 = next(doc for doc in documents if doc.url == page1)
+        # last_seen_at reset FORWARD to crawl 3's own time, not stuck at
+        # crawl 1's stale value -- the real signal a reappearance resets.
+        assert page1_after_3.last_seen_at > last_seen_after_1
+
+        records, _ = await client.scroll(
+            collection_name=qdrant.COLLECTION_NAME,
+            scroll_filter=qdrant.tenant_filter(ids["tenant_id"]),
+            limit=20,
+        )
+        assert page1 in {r.payload["source_url"] for r in records}
+
+
+async def test_a_failed_crawl_run_does_not_count_as_a_miss(monkeypatch, live_test_services):
+    await _prepare_env(monkeypatch, live_test_services)
+    routes: dict = {}
+    with local_http_server(_tracking_handler(routes, [])) as port:
+        seed = f"http://{_LOOPBACK_HOST}:{port}"
+        page1 = f"{seed}/page1"
+        routes["/"] = (200, _rich_page("Home", "home").encode())
+        routes["/page1"] = (200, _rich_page("Page1", "one").encode())
+        routes["/robots.txt"] = (200, f"Sitemap: {seed}/sitemap.xml\n".encode())
+        routes["/sitemap.xml"] = (200, _sitemap_xml(seed, [seed, page1]))
+
+        ids = await _seed_tenant_crawl_source_and_verified_domain(seed)
+        await asyncio.wait_for(run(asyncio.Event(), max_iterations=1), timeout=15)
+        documents = await _documents_for(ids["source_id"])
+        assert {doc.url for doc in documents} == {seed, page1}
+        source_after_1 = await _fetch_source(ids["source_id"])
+        last_crawl_started_at_after_1 = source_after_1.last_crawl_started_at
+        assert last_crawl_started_at_after_1 is not None
+
+        # page1 removed from the sitemap -- if this next run succeeded, it
+        # would be exactly one miss. Instead, force the whole run to fail
+        # BEFORE it ever reaches last_run_at/last_crawl_started_at/cleanup
+        # (the identical "never reaches that line" guarantee last_run_at
+        # itself already relies on, Task 2.9.a) -- a real infrastructure-
+        # level failure, not a per-item one.
+        routes["/sitemap.xml"] = (200, _sitemap_xml(seed, [seed]))
+
+        async def _raise_crawl_failure(*args, **kwargs):
+            raise RuntimeError("simulated crawl failure")
+
+        monkeypatch.setattr(job_handlers_module, "run_crawl", _raise_crawl_failure)
+
+        job2_id = await _enqueue_crawl_job(ids["tenant_id"], ids["source_id"])
+        await asyncio.wait_for(run(asyncio.Event(), max_iterations=1), timeout=15)
+
+        job2 = await _fetch_job(job2_id)
+        assert job2.status != "succeeded"
+        assert job2.error is not None and "RuntimeError" in job2.error
+
+        # The failed run contributed NO staleness signal at all: neither
+        # last_crawl_started_at advanced, nor page1 touched or deleted.
+        source_after_2 = await _fetch_source(ids["source_id"])
+        assert source_after_2.last_crawl_started_at == last_crawl_started_at_after_1
+        documents = await _documents_for(ids["source_id"])
+        assert {doc.url for doc in documents} == {seed, page1}
 # Same live-against-both-real-services methodology as handle_ingest_url()/
 # handle_ingest_crawl() above, run through the SAME real worker.py loop
 # (test (c)'s own requirement -- every test below uses run(), never calls
