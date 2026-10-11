@@ -337,6 +337,7 @@ from app.ingest.database_adapter import (
 )
 from app.ingest.models import JOB_TYPE_FOR_SOURCE_TYPE, DbConnection, Document, Job, Source
 from app.ingest.qdrant_writer import delete_points_for_document
+from app.ingest.reconcile import reconcile_tenant
 from app.ingest.repository import IngestRepository
 from app.ingest.row_templates import MissingColumnError, MissingPrimaryKeyError, TemplateRenderError
 from app.ingest.scheduler import get_due_sources, is_tenant_active
@@ -860,4 +861,69 @@ async def handle_scheduler_tick(job: Job) -> None:
                 job.tenant_id,
                 job_type,
                 source.id,
+            )
+
+
+async def handle_reconcile(job: Job) -> None:
+    """The nightly reconcile's own `JOB_HANDLERS["reconcile"]` entry --
+    [SECURITY]-tagged per the Step 2.9 breakdown's own reasoning: "a
+    cross-tenant Qdrant deletion operation with no per-request guardrail
+    of its own (unlike `retrieve()`), hence [SECURITY]." Mirrors
+    `handle_scheduler_tick()` directly above closely, by design (approved:
+    "mirroring scheduler_tick's exact shape") -- no Qdrant client is
+    forwarded in (unlike the four adapter handlers above), since this job
+    is not source-scoped, so a real client is acquired directly here
+    (`qdrant.get_qdrant_client()`, the same factory `_open_source_session()`
+    itself calls) and used only for `reconcile_tenant()`'s own real work
+    below.
+
+    Per-tenant (this task's own confirmed scope decision, matching
+    `scheduler_tick`'s own identical per-tenant reasoning, app/ingest/
+    scheduler.py's header comment): re-enqueues its OWN next occurrence
+    `Settings.reconcile_interval_seconds` in the future FIRST, before
+    running the real reconcile pass -- the IDENTICAL ordering reasoning
+    `handle_scheduler_tick()` already established: if `reconcile_tenant()`
+    ever raised an unexpected, uncaught exception, the self-re-enqueue has
+    already committed by then, so this tenant's own reconcile chain
+    survives regardless of what happens afterward.
+    `ensure_reconcile_ticks_seeded()` (app/ingest/scheduler.py, wired into
+    worker.py's own run() loop) is the matching backstop if the chain is
+    ever broken anyway.
+
+    Suspended-tenant check FIRST, before anything else -- mirroring
+    `handle_scheduler_tick()`'s own identical layer-2 protection, applied
+    here even though this task's own instructions did not name tenant
+    suspension explicitly (see `ensure_reconcile_ticks_seeded()`'s own
+    docstring for why mirroring the CURRENT, already-refined shape of
+    that function was judged the more faithful reading of "mirror its
+    exact shape" than mirroring an earlier, pre-refinement version that
+    no longer exists). If the tenant is no longer `is_tenant_active()`,
+    this handler returns immediately -- no self-re-enqueue, no reconcile
+    pass. The job itself still succeeds.
+    """
+    settings = get_settings()
+    client: AsyncQdrantClient = qdrant.get_qdrant_client()
+    async with _session_factory()() as session:
+        if not await is_tenant_active(session, job.tenant_id):
+            logger.info(
+                "handle_reconcile: tenant %s is not active, letting its own "
+                "reconcile chain end here",
+                job.tenant_id,
+            )
+            return
+
+        next_run_at = datetime.now(UTC) + timedelta(seconds=settings.reconcile_interval_seconds)
+        await IngestRepository(tenant_id=job.tenant_id, session=session).enqueue(
+            job_type="reconcile", next_run_at=next_run_at
+        )
+        await session.commit()
+
+        deleted = await reconcile_tenant(
+            session, client, qdrant.COLLECTION_NAME, tenant_id=job.tenant_id
+        )
+        if deleted:
+            logger.info(
+                "handle_reconcile: tenant %s reconcile deleted %d orphaned point(s) total",
+                job.tenant_id,
+                deleted,
             )

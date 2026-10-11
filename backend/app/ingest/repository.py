@@ -101,8 +101,24 @@ from app.ingest.qdrant_writer import (
 # for the full design (per-tenant, self-re-enqueuing, the bootstrap/
 # self-healing sweep) and app/ingest/job_handlers.py's own header comment
 # for the real handler.
+#
+# Task 2.9.f [SECURITY]: "reconcile" added -- the identical shape as
+# "scheduler_tick" immediately above (no `source_id`, no real
+# `sources.config` to read, `payload` stays `{}`), a per-tenant self-re-
+# enqueuing job mirroring that one's own mechanism exactly, just a
+# different job_type and a much coarser interval. See
+# app/ingest/scheduler.py's own `ensure_reconcile_ticks_seeded()` and
+# app/ingest/job_handlers.py's own `handle_reconcile()` for the real
+# design/handler.
 VALID_JOB_TYPES: frozenset[str] = frozenset(
-    {"ingest_url", "ingest_crawl", "ingest_upload", "ingest_db", "scheduler_tick"}
+    {
+        "ingest_url",
+        "ingest_crawl",
+        "ingest_upload",
+        "ingest_db",
+        "scheduler_tick",
+        "reconcile",
+    }
 )
 
 

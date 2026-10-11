@@ -55,11 +55,12 @@ from app.ingest.job_handlers import (
     handle_ingest_db,
     handle_ingest_upload,
     handle_ingest_url,
+    handle_reconcile,
     handle_scheduler_tick,
 )
 from app.ingest.models import Job
 from app.ingest.queue import claim_next_job, mark_job_failed, mark_job_succeeded, reap_stuck_jobs
-from app.ingest.scheduler import ensure_scheduler_ticks_seeded
+from app.ingest.scheduler import ensure_reconcile_ticks_seeded, ensure_scheduler_ticks_seeded
 
 # all_models above is imported for the side effect of registering every
 # domain's tables on Base.metadata -- without it, jobs.tenant_id's FK to
@@ -179,6 +180,7 @@ JOB_HANDLERS: dict[str, Callable[[Job], Awaitable[None]]] = {
     "ingest_upload": handle_ingest_upload,
     "ingest_db": handle_ingest_db,
     "scheduler_tick": handle_scheduler_tick,
+    "reconcile": handle_reconcile,
 }
 
 
@@ -236,6 +238,20 @@ async def _ensure_scheduler_ticks_seeded() -> list:
     async with _session_factory()() as session:
         seeded = await ensure_scheduler_ticks_seeded(
             session, interval_seconds=get_settings().scheduler_tick_interval_seconds
+        )
+    return seeded
+
+
+async def _ensure_reconcile_ticks_seeded() -> list:
+    # Task 2.9.f: the nightly reconcile's own bootstrap/self-healing
+    # sweep, same cadence and same reasoning as
+    # _ensure_scheduler_ticks_seeded() directly above -- see
+    # ensure_reconcile_ticks_seeded()'s own docstring (app/ingest/
+    # scheduler.py) for why this is a near-identical mirror, flagged for
+    # the next duplication check rather than merged with its sibling here.
+    async with _session_factory()() as session:
+        seeded = await ensure_reconcile_ticks_seeded(
+            session, interval_seconds=get_settings().reconcile_interval_seconds
         )
     return seeded
 
@@ -350,6 +366,17 @@ async def run(stop: asyncio.Event | None = None, max_iterations: int | None = No
             if seeded:
                 logger.info(
                     "worker: seeded scheduler_tick for %d tenant(s): %s", len(seeded), seeded
+                )
+            # Task 2.9.f: the nightly reconcile's own bootstrap/self-
+            # healing sweep, same cadence and same try/except as every
+            # other per-iteration call above -- a transient failure here
+            # must not crash the worker either.
+            reconcile_seeded = await _ensure_reconcile_ticks_seeded()
+            if reconcile_seeded:
+                logger.info(
+                    "worker: seeded reconcile for %d tenant(s): %s",
+                    len(reconcile_seeded),
+                    reconcile_seeded,
                 )
             claimed = await _claim_and_process_one_job()
         except Exception as exc:
