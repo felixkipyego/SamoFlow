@@ -181,14 +181,25 @@ async def get_due_sources(
     return due
 
 
-async def ensure_scheduler_ticks_seeded(
+async def _ensure_ticks_seeded(
     session: AsyncSession,
     *,
+    job_type: str,
     interval_seconds: float,
     clock: DateTimeClock = lambda: datetime.now(UTC),
 ) -> list[uuid.UUID]:
-    """For every tenant with no `scheduler_tick` job currently `"pending"`
-    or `"running"`, seeds one. Returns the tenant ids seeded, for
+    """Task 2.9.g duplication-check fix: the ONE real body shared by
+    `ensure_scheduler_ticks_seeded()`/`ensure_reconcile_ticks_seeded()`
+    below -- extracted because the two had become byte-identical beyond
+    the literal `job_type` string (confirmed by reading both directly
+    before touching anything, not assumed), the exact candidate flagged
+    at Task 2.9.f's own build time and left for this check, per that
+    task's own comment, to resolve. Both public functions keep their own
+    original signature (no `job_type` parameter) and call this one with
+    their own fixed value -- no caller in `worker.py` needed to change.
+
+    For every tenant with no `job_type` job currently `"pending"` or
+    `"running"`, seeds one. Returns the tenant ids seeded, for
     logging/testing, matching `reap_stuck_jobs()`'s own "return ids
     reclaimed" precedent.
 
@@ -198,43 +209,46 @@ async def ensure_scheduler_ticks_seeded(
     brand-new tenant created while workers are already running (no
     restart) is picked up within one poll interval, not only at the next
     cold start; (2) this is ALSO the self-healing recovery path if a
-    tenant's own self-re-enqueuing chain was ever broken (its own
-    scheduler_tick job reached a terminal `"failed"` status after
-    exhausting `max_attempts`) -- the identical backstop role
-    `reap_stuck_jobs()` already plays for a different failure mode, reused
-    rather than inventing a second recovery mechanism (rule 11).
+    tenant's own self-re-enqueuing chain was ever broken (its own job
+    reached a terminal `"failed"` status after exhausting
+    `max_attempts`) -- the identical backstop role `reap_stuck_jobs()`
+    already plays for a different failure mode, reused rather than
+    inventing a second recovery mechanism (rule 11).
 
     A real, necessary consequence found live, not assumed, before settling
-    on this signature: the seeded job's own `next_run_at` is `clock() +
-    interval_seconds`, deliberately NOT immediately claimable the way a
-    real adapter job's own enqueue() call always is. An earlier version
-    without this delay made every freshly-bootstrapped tick immediately
-    compete with this SAME tenant's own already-pending real work for the
-    very next claim slot -- confirmed live via `make test-all`, not
-    theorized: a real test (`test_the_same_upload_id_ingested_twice_
-    across_two_real_jobs_stays_idempotent`) failed because its own SECOND
-    `run()` call claimed a LEFTOVER tick seeded (but not claimed) during
-    its FIRST call, instead of the test's own freshly-enqueued second
-    upload job, which has a newer `next_run_at` than that now-stale tick.
-    Delaying the very first tick by the same `interval_seconds` every
-    LATER self-re-enqueue already uses closes this race structurally (a
-    freshly-bootstrapped tick can never be older than genuinely pending
-    tenant work), not merely in the one case this was found in -- and
-    matches production intent anyway: a brand-new tenant's own schedule
-    starting a few minutes late is immaterial against day-granularity
-    refresh intervals, and avoids a thundering-herd-style burst of ticks
-    all becoming claimable on the very same iteration a fresh deployment
-    first notices many existing tenants at once.
+    on this signature (Task 2.9.a): the seeded job's own `next_run_at` is
+    `clock() + interval_seconds`, deliberately NOT immediately claimable
+    the way a real adapter job's own enqueue() call always is. An earlier
+    version without this delay made every freshly-bootstrapped tick
+    immediately compete with this SAME tenant's own already-pending real
+    work for the very next claim slot -- confirmed live via
+    `make test-all`, not theorized: a real test
+    (`test_the_same_upload_id_ingested_twice_across_two_real_jobs_stays_
+    idempotent`) failed because its own SECOND `run()` call claimed a
+    LEFTOVER tick seeded (but not claimed) during its FIRST call, instead
+    of the test's own freshly-enqueued second upload job, which has a
+    newer `next_run_at` than that now-stale tick. Delaying the very first
+    tick by the same `interval_seconds` every LATER self-re-enqueue
+    already uses closes this race structurally (a freshly-bootstrapped
+    tick can never be older than genuinely pending tenant work), not
+    merely in the one case this was found in -- and matches production
+    intent anyway: a brand-new tenant's own schedule starting a few
+    minutes late is immaterial against day-granularity refresh intervals,
+    and avoids a thundering-herd-style burst of ticks all becoming
+    claimable on the very same iteration a fresh deployment first notices
+    many existing tenants at once.
 
     Only seeds a tick for a tenant whose own `status == "active"` -- a
     suspended tenant never gets a NEW chain started (this module's own
-    header comment has the full three-layer reasoning; this is layer 1 of
-    3). A real, useful side effect of this being a recurring sweep rather
-    than a one-time check, not a separate mechanism: a tenant later
-    UN-suspended is picked up by this SAME query on its very next
-    iteration (no pending/running tick exists for it, and it is active
-    again), exactly the way an already-broken chain is already self-healed
-    today -- resumption needs no code of its own.
+    header comment has the full three-layer reasoning for the
+    `scheduler_tick` case; this is layer 1 of 3, and `handle_reconcile()`'s
+    own layer-2 check mirrors it for the identical reason, Task 2.9.f). A
+    real, useful side effect of this being a recurring sweep rather than a
+    one-time check, not a separate mechanism: a tenant later UN-suspended
+    is picked up by this SAME query on its very next iteration (no
+    pending/running tick exists for it, and it is active again), exactly
+    the way an already-broken chain is already self-healed today --
+    resumption needs no code of its own.
     """
     missing_tenant_ids = (
         (
@@ -244,7 +258,7 @@ async def ensure_scheduler_ticks_seeded(
                     ~sa.exists(
                         select(Job.id).where(
                             Job.tenant_id == Tenant.id,
-                            Job.job_type == "scheduler_tick",
+                            Job.job_type == job_type,
                             Job.status.in_(("pending", "running")),
                         )
                     )
@@ -257,11 +271,28 @@ async def ensure_scheduler_ticks_seeded(
     next_run_at = clock() + timedelta(seconds=interval_seconds)
     for tenant_id in missing_tenant_ids:
         await IngestRepository(tenant_id=tenant_id, session=session).enqueue(
-            job_type="scheduler_tick", next_run_at=next_run_at
+            job_type=job_type, next_run_at=next_run_at
         )
     if missing_tenant_ids:
         await session.commit()
     return list(missing_tenant_ids)
+
+
+async def ensure_scheduler_ticks_seeded(
+    session: AsyncSession,
+    *,
+    interval_seconds: float,
+    clock: DateTimeClock = lambda: datetime.now(UTC),
+) -> list[uuid.UUID]:
+    """The scheduler's own bootstrap/self-healing sweep for `scheduler_
+    tick` -- see `_ensure_ticks_seeded()` directly above for the full,
+    shared reasoning (extracted at the Task 2.9.g duplication check; this
+    function's own original docstring lived here before that, now
+    consolidated above since both siblings shared it word for word).
+    """
+    return await _ensure_ticks_seeded(
+        session, job_type="scheduler_tick", interval_seconds=interval_seconds, clock=clock
+    )
 
 
 async def ensure_reconcile_ticks_seeded(
@@ -270,64 +301,13 @@ async def ensure_reconcile_ticks_seeded(
     interval_seconds: float,
     clock: DateTimeClock = lambda: datetime.now(UTC),
 ) -> list[uuid.UUID]:
-    """Task 2.9.f: the nightly reconcile's own bootstrap/self-healing
-    sweep -- mirrors `ensure_scheduler_ticks_seeded()` directly above
-    deliberately and closely (approved design: "a bootstrap/self-healing
-    seeding function mirroring ensure_scheduler_ticks_seeded()"), one
-    line changed (`job_type="reconcile"` instead of `"scheduler_tick"`).
-
-    Flagged plainly, not silently duplicated: this is now a real,
-    near-identical second copy of that function's own query/enqueue
-    shape, differing only in the job_type string -- past this project's
-    own established 2nd/3rd-occurrence extraction threshold in spirit,
-    but built as its own separate function here anyway, matching this
-    task's own explicit instruction to mirror the existing function's
-    shape (not merge it) and the project's own repeated "flag, don't fix
-    mid-task" discipline for a duplication found/created while building,
-    not retroactively. Recorded as a candidate for the next duplication
-    check (due before/at Step 2.9's own close-out, per PROJECT_SPEC.md's
-    own counter) rather than refactored here, since generalizing this
-    would mean editing `ensure_scheduler_ticks_seeded()` itself -- an
-    already-completed Task 2.9.a function -- outside this task's own
-    asked-for scope (rule 2).
-
-    See that function's own docstring for the full reasoning behind
-    every design point reused unchanged here: the recurring-sweep-not-
-    one-time-check shape (new tenant pickup AND self-healing a broken
-    chain in one mechanism); the delayed first `next_run_at` (closes the
-    identical "freshly-bootstrapped tick races this tenant's own already-
-    pending work" class of problem, Task 2.9.a's own live finding);
-    `Tenant.status == "active"` (a suspended tenant never gets a NEW
-    reconcile chain started either, the same layer-1 suspended-tenant
-    treatment `scheduler_tick` already established, mirrored here for
-    consistency even though this task's own instructions did not name
-    tenant suspension explicitly -- `handle_reconcile()`,
-    app/ingest/job_handlers.py, mirrors `handle_scheduler_tick()`'s own
-    layer-2 `is_tenant_active()` check for the identical reason).
+    """The nightly reconcile's own bootstrap/self-healing sweep for
+    `reconcile` -- see `_ensure_ticks_seeded()` above for the full,
+    shared reasoning. Originally built (Task 2.9.f) as a hand-mirrored,
+    near-identical copy of `ensure_scheduler_ticks_seeded()`, flagged at
+    build time for this exact consolidation; now a thin wrapper, the
+    duplication resolved.
     """
-    missing_tenant_ids = (
-        (
-            await session.execute(
-                select(Tenant.id).where(
-                    Tenant.status == "active",
-                    ~sa.exists(
-                        select(Job.id).where(
-                            Job.tenant_id == Tenant.id,
-                            Job.job_type == "reconcile",
-                            Job.status.in_(("pending", "running")),
-                        )
-                    )
-                )
-            )
-        )
-        .scalars()
-        .all()
+    return await _ensure_ticks_seeded(
+        session, job_type="reconcile", interval_seconds=interval_seconds, clock=clock
     )
-    next_run_at = clock() + timedelta(seconds=interval_seconds)
-    for tenant_id in missing_tenant_ids:
-        await IngestRepository(tenant_id=tenant_id, session=session).enqueue(
-            job_type="reconcile", next_run_at=next_run_at
-        )
-    if missing_tenant_ids:
-        await session.commit()
-    return list(missing_tenant_ids)

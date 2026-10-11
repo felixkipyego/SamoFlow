@@ -113,7 +113,7 @@ class IngestResult:
     reason: str | None = None
 
 
-async def _domain_is_verified(session: AsyncSession, tenant_id: uuid.UUID, hostname: str) -> bool:
+async def is_domain_verified(session: AsyncSession, tenant_id: uuid.UUID, hostname: str) -> bool:
     # Task 2.6.c's own duplication check (C1 [SECURITY] fix): extracted
     # so ingest_url() can run the exact same check twice -- once against
     # the URL's original host (before fetching at all) and again against
@@ -122,6 +122,15 @@ async def _domain_is_verified(session: AsyncSession, tenant_id: uuid.UUID, hostn
     # exact-string-match wording in two places. See ingest_url()'s own
     # docstring for why only these two hosts are checked, never every
     # intermediate redirect hop.
+    #
+    # Widened to a public, module-level name at Task 2.10.b's own fix for
+    # the §16 bullet-1 gap (crawl's own discovery phase had no domain-
+    # verification gate at all, unlike this function's two existing
+    # call sites below): `create_source()`/`update_source()`
+    # (app/ingest/repository.py) and `handle_ingest_crawl()`
+    # (app/ingest/job_handlers.py) both now call this SAME check rather
+    # than a second, parallel implementation -- no circular import risk,
+    # since this module imports nothing from either of those two.
     return (
         await session.execute(
             select(VerifiedDomain.id).where(
@@ -198,7 +207,7 @@ async def ingest_url(
     this explicitly, not assumed safe, before building it.
     """
     hostname = httpx.URL(url).host
-    if not await _domain_is_verified(session, tenant_id, hostname):
+    if not await is_domain_verified(session, tenant_id, hostname):
         return IngestResult(status="skipped", reason=f"domain {hostname!r} is not verified")
 
     try:
@@ -207,7 +216,7 @@ async def ingest_url(
         return IngestResult(status="failed", reason=f"{type(exc).__name__}: {exc}")
 
     final_hostname = fetch_result.final_url.host
-    if final_hostname != hostname and not await _domain_is_verified(
+    if final_hostname != hostname and not await is_domain_verified(
         session, tenant_id, final_hostname
     ):
         return IngestResult(

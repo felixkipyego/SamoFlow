@@ -26,7 +26,7 @@ from app import qdrant
 from app.ingest.extract_html import extract_html
 from app.ingest.models import Document, Source
 from app.ingest.qdrant_writer import embed_and_upsert, finish_ingest
-from app.ingest.reconcile import find_orphaned_points, reconcile_tenant
+from app.ingest.reconcile import _SCROLL_PAGE_SIZE, find_orphaned_points, reconcile_tenant
 from app.ingest.repository import IngestRepository
 from app.tenancy.models import Tenant
 from tests.conftest import db_session, patch_embed_dense
@@ -290,3 +290,63 @@ async def test_reconcile_never_touches_a_different_tenants_legitimate_points(
             await session.execute(sa.select(Source).where(Source.id == ids_b["source_id"]))
         ).scalar_one()
     assert source_b_row.enabled is True
+
+
+async def test_find_orphaned_points_scrolls_past_a_single_page(live_test_services, monkeypatch):
+    # Task 2.9.g duplication-check item C: every other test in this file
+    # stays well under _SCROLL_PAGE_SIZE (256), so none of them can tell a
+    # correct `while True: ... if next_offset is None: break` loop apart
+    # from a bug that silently stops after page one. This test forces a
+    # SECOND round trip: a 300-chunk document (one <h2> section per chunk,
+    # same one-section-per-chunk construction every other test here
+    # relies on) shrunk down to 20 chunks leaves 280 stale, orphaned
+    # points -- more than fit on one page (256), and far more than the 20
+    # that remain legitimate. If pagination silently stopped at page one,
+    # at most 256 orphans could ever be found/deleted, never the real 280
+    # -- so the exact counts below are only possible if the loop actually
+    # reads a second page.
+    patch_embed_dense(monkeypatch)
+    _, client, collection_name = live_test_services
+    await qdrant.ensure_collection(client, collection_name)
+    ids = await _create_tenant_and_source("Reconcile Multi-Page Proof Tenant")
+
+    total_chunks = 300
+    remaining_chunks = 20
+    assert total_chunks > _SCROLL_PAGE_SIZE  # the premise this test depends on
+
+    await _ingest(
+        client, collection_name, tenant_id=ids["tenant_id"], source_id=ids["source_id"],
+        html=_html_with_sections(*(f"section {i}" for i in range(total_chunks))),
+    )
+    count_after_first = await client.count(
+        collection_name=collection_name, count_filter=qdrant.tenant_filter(ids["tenant_id"])
+    )
+    assert count_after_first.count == total_chunks
+
+    await _ingest(
+        client, collection_name, tenant_id=ids["tenant_id"], source_id=ids["source_id"],
+        html=_html_with_sections(*(f"section {i} (updated)" for i in range(remaining_chunks))),
+    )
+    count_before_reconcile = await client.count(
+        collection_name=collection_name, count_filter=qdrant.tenant_filter(ids["tenant_id"])
+    )
+    assert count_before_reconcile.count == total_chunks  # the shrink gap, still all present
+
+    expected_orphans = total_chunks - remaining_chunks  # 280 -- spans two scroll pages
+
+    async with db_session() as session:
+        orphans = await find_orphaned_points(
+            session, client, collection_name, tenant_id=ids["tenant_id"]
+        )
+    assert len(orphans) == expected_orphans
+
+    async with db_session() as session:
+        deleted = await reconcile_tenant(
+            session, client, collection_name, tenant_id=ids["tenant_id"]
+        )
+    assert deleted == expected_orphans
+
+    count_after_reconcile = await client.count(
+        collection_name=collection_name, count_filter=qdrant.tenant_filter(ids["tenant_id"])
+    )
+    assert count_after_reconcile.count == remaining_chunks
