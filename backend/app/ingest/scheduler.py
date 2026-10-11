@@ -262,3 +262,72 @@ async def ensure_scheduler_ticks_seeded(
     if missing_tenant_ids:
         await session.commit()
     return list(missing_tenant_ids)
+
+
+async def ensure_reconcile_ticks_seeded(
+    session: AsyncSession,
+    *,
+    interval_seconds: float,
+    clock: DateTimeClock = lambda: datetime.now(UTC),
+) -> list[uuid.UUID]:
+    """Task 2.9.f: the nightly reconcile's own bootstrap/self-healing
+    sweep -- mirrors `ensure_scheduler_ticks_seeded()` directly above
+    deliberately and closely (approved design: "a bootstrap/self-healing
+    seeding function mirroring ensure_scheduler_ticks_seeded()"), one
+    line changed (`job_type="reconcile"` instead of `"scheduler_tick"`).
+
+    Flagged plainly, not silently duplicated: this is now a real,
+    near-identical second copy of that function's own query/enqueue
+    shape, differing only in the job_type string -- past this project's
+    own established 2nd/3rd-occurrence extraction threshold in spirit,
+    but built as its own separate function here anyway, matching this
+    task's own explicit instruction to mirror the existing function's
+    shape (not merge it) and the project's own repeated "flag, don't fix
+    mid-task" discipline for a duplication found/created while building,
+    not retroactively. Recorded as a candidate for the next duplication
+    check (due before/at Step 2.9's own close-out, per PROJECT_SPEC.md's
+    own counter) rather than refactored here, since generalizing this
+    would mean editing `ensure_scheduler_ticks_seeded()` itself -- an
+    already-completed Task 2.9.a function -- outside this task's own
+    asked-for scope (rule 2).
+
+    See that function's own docstring for the full reasoning behind
+    every design point reused unchanged here: the recurring-sweep-not-
+    one-time-check shape (new tenant pickup AND self-healing a broken
+    chain in one mechanism); the delayed first `next_run_at` (closes the
+    identical "freshly-bootstrapped tick races this tenant's own already-
+    pending work" class of problem, Task 2.9.a's own live finding);
+    `Tenant.status == "active"` (a suspended tenant never gets a NEW
+    reconcile chain started either, the same layer-1 suspended-tenant
+    treatment `scheduler_tick` already established, mirrored here for
+    consistency even though this task's own instructions did not name
+    tenant suspension explicitly -- `handle_reconcile()`,
+    app/ingest/job_handlers.py, mirrors `handle_scheduler_tick()`'s own
+    layer-2 `is_tenant_active()` check for the identical reason).
+    """
+    missing_tenant_ids = (
+        (
+            await session.execute(
+                select(Tenant.id).where(
+                    Tenant.status == "active",
+                    ~sa.exists(
+                        select(Job.id).where(
+                            Job.tenant_id == Tenant.id,
+                            Job.job_type == "reconcile",
+                            Job.status.in_(("pending", "running")),
+                        )
+                    )
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    next_run_at = clock() + timedelta(seconds=interval_seconds)
+    for tenant_id in missing_tenant_ids:
+        await IngestRepository(tenant_id=tenant_id, session=session).enqueue(
+            job_type="reconcile", next_run_at=next_run_at
+        )
+    if missing_tenant_ids:
+        await session.commit()
+    return list(missing_tenant_ids)

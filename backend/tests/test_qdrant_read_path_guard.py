@@ -112,6 +112,17 @@ APP_DIR = BACKEND_DIR / "app"
 # deciding, that it trips rule (a) the same way every prior entry here
 # did. Calls no method on the client itself, so NOT added to
 # READ_ALLOWLIST, same reasoning as every prior entry.
+# Task 2.9.f [SECURITY]: app/ingest/reconcile.py added -- a genuinely
+# DIFFERENT shape from every entry above: this is the first module
+# outside app/retrieval/service.py that actually CALLS a READ-classified
+# method itself (`client.scroll()`, scrolling a tenant's own Qdrant
+# points to compare against Postgres) rather than merely holding or
+# forwarding a client. Added to BOTH allow-lists below, deliberately NOT
+# added to app/ingest/qdrant_writer.py (which stays write-only, exactly
+# as designed at Task 2.5.c) -- the nightly reconcile's own read-then-
+# compare job is a genuinely different concern from ingestion writing,
+# and keeping it in its own module preserves the write path's own
+# "never needs read access" guarantee rather than weakening it.
 CLIENT_ACCESS_ALLOWLIST: frozenset[str] = frozenset(
     {
         "app/qdrant.py",
@@ -124,12 +135,13 @@ CLIENT_ACCESS_ALLOWLIST: frozenset[str] = frozenset(
         "app/ingest/upload_adapter.py",
         "app/ingest/database_adapter.py",
         "app/ingest/repository.py",
+        "app/ingest/reconcile.py",
     }
 )
 
 # NOTE: adding a file here is a deliberate decision -- it means that file may
 # call a method classified as READ below. Review it by hand.
-READ_ALLOWLIST: frozenset[str] = frozenset({"app/retrieval/service.py"})
+READ_ALLOWLIST: frozenset[str] = frozenset({"app/retrieval/service.py", "app/ingest/reconcile.py"})
 
 # Checked in EVERY file under backend/app, regardless of the allow-lists
 # above: these attributes expose the client's raw HTTP/gRPC transport

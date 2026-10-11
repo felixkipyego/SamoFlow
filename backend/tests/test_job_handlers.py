@@ -1318,7 +1318,14 @@ async def test_scheduler_tick_enqueues_one_job_per_due_source_and_reschedules_it
         enqueued = (
             await session.execute(
                 sa.select(Job).where(
-                    Job.tenant_id == tenant_id, Job.job_type != "scheduler_tick"
+                    Job.tenant_id == tenant_id,
+                    # Task 2.9.f: "reconcile" excluded too, for the
+                    # identical already-established reason "scheduler_
+                    # tick" is -- this SAME run() iteration's own second
+                    # bootstrap sweep (ensure_reconcile_ticks_seeded())
+                    # also seeds one for this tenant, separate, expected
+                    # behavior, not what this test is about.
+                    Job.job_type.not_in(("scheduler_tick", "reconcile")),
                 )
             )
         ).scalars().all()
@@ -1440,16 +1447,20 @@ async def test_scheduler_tick_never_touches_another_tenants_sources(monkeypatch,
         tenant_b_non_tick_jobs = (
             await session.execute(
                 sa.select(Job).where(
-                    Job.tenant_id == tenant_b, Job.job_type != "scheduler_tick"
+                    Job.tenant_id == tenant_b,
+                    # Task 2.9.f: "reconcile" excluded too, for the
+                    # identical already-established reason below.
+                    Job.job_type.not_in(("scheduler_tick", "reconcile")),
                 )
             )
         ).scalars().all()
-    # Filtered to exclude "scheduler_tick" deliberately: tenant B has none
-    # of ITS OWN to begin with, so this same run() iteration's own
-    # bootstrap sweep (ensure_scheduler_ticks_seeded(), unrelated to
-    # handle_scheduler_tick() itself) correctly seeds one for tenant B too
-    # -- that is expected, separate behavior, not what this test is about.
-    # What must never happen, and is what this test actually checks: an
+    # Filtered to exclude "scheduler_tick"/"reconcile" deliberately:
+    # tenant B has none of ITS OWN to begin with, so this same run()
+    # iteration's own bootstrap sweeps (ensure_scheduler_ticks_seeded()/
+    # ensure_reconcile_ticks_seeded(), unrelated to handle_scheduler_
+    # tick() itself) correctly seed one of each for tenant B too -- that
+    # is expected, separate behavior, not what this test is about. What
+    # must never happen, and is what this test actually checks: an
     # "ingest_url" job for tenant B's own source, which would mean tenant
     # A's own scheduler_tick leaked across the tenant boundary.
     assert tenant_b_non_tick_jobs == []
@@ -1566,3 +1577,92 @@ async def test_a_source_refreshed_via_refresh_now_is_not_returned_as_due_afterwa
     async with db_session() as session:
         due_after = await get_due_sources(session, tenant_id=tenant_id)
     assert due_after == []
+
+
+# --- Task 2.9.f [SECURITY]: handle_reconcile()'s own self-re-enqueue -----
+# The real JOB_HANDLERS["reconcile"] entry, through the REAL worker.run()
+# loop -- matches handle_scheduler_tick()'s own identical proof shape
+# (test_scheduler_tick_enqueues_one_job_per_due_source_and_reschedules_
+# itself, above). reconcile_tenant()'s own real detection/deletion logic
+# is tested directly, offline-of-a-handler, in test_reconcile.py --
+# this test only proves the self-re-enqueuing shape, not the detection
+# algorithm again.
+
+
+async def test_reconcile_self_re_enqueues_through_the_real_worker_loop(
+    monkeypatch, live_test_services
+):
+    await _prepare_env(monkeypatch, live_test_services)
+    tenant_id = await _create_tenant("Reconcile Self-Re-Enqueue Proof Tenant")
+
+    async with db_session() as session:
+        repo = IngestRepository(tenant_id=tenant_id, session=session)
+        tick_job = await repo.enqueue(job_type="reconcile")
+        await session.commit()
+        tick_job_id = tick_job.id
+
+    await asyncio.wait_for(run(asyncio.Event(), max_iterations=1), timeout=10)
+
+    tick_job_after = await _fetch_job(tick_job_id)
+    assert tick_job_after.status == "succeeded"
+    assert tick_job_after.error is None
+
+    async with db_session() as session:
+        next_ticks = (
+            await session.execute(
+                sa.select(Job).where(
+                    Job.tenant_id == tenant_id,
+                    Job.job_type == "reconcile",
+                    Job.id != tick_job_id,
+                )
+            )
+        ).scalars().all()
+    # Exactly one, still "pending", not yet claimable -- matching
+    # ensure_reconcile_ticks_seeded()'s own delayed-first-next_run_at
+    # shape (mirroring ensure_scheduler_ticks_seeded()'s own already-
+    # proven reasoning, app/ingest/scheduler.py), well into the future
+    # given the default 86400s interval.
+    assert len(next_ticks) == 1
+    assert next_ticks[0].status == "pending"
+    assert next_ticks[0].next_run_at > datetime.now(UTC) + timedelta(seconds=1)
+
+
+async def test_reconcile_does_not_reenqueue_itself_once_its_tenant_is_suspended(
+    monkeypatch, _seeded_tenant
+):
+    # Mirrors test_scheduler_tick_does_not_reenqueue_itself_once_its_
+    # tenant_is_suspended's own identical proof shape -- no real Qdrant
+    # service needed at all: a suspended tenant returns before
+    # handle_reconcile() ever acquires a client or calls reconcile_
+    # tenant(), the identical layer-2 guarantee handle_scheduler_tick()
+    # already established.
+    tenant_id = _seeded_tenant
+    set_valid_env(monkeypatch, VALID_ENV)
+
+    async with db_session() as session:
+        repo = IngestRepository(tenant_id=tenant_id, session=session)
+        tick_job = await repo.enqueue(job_type="reconcile")
+        await session.commit()
+        tick_job_id = tick_job.id
+
+        await session.execute(
+            sa.update(Tenant).where(Tenant.id == tenant_id).values(status="suspended")
+        )
+        await session.commit()
+
+    await asyncio.wait_for(run(asyncio.Event(), max_iterations=1), timeout=10)
+
+    tick_job_after = await _fetch_job(tick_job_id)
+    assert tick_job_after.status == "succeeded"  # found nothing to do, not a failure
+
+    async with db_session() as session:
+        other_ticks = (
+            await session.execute(
+                sa.select(Job).where(
+                    Job.tenant_id == tenant_id,
+                    Job.job_type == "reconcile",
+                    Job.id != tick_job_id,
+                )
+            )
+        ).scalars().all()
+    assert other_ticks == []  # no self-re-enqueue once suspended

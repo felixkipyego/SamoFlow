@@ -326,6 +326,17 @@ class Settings(BaseSettings):
     # from one source being refreshed on demand -- retuned later with real
     # numbers, like every other estimate in this project.
     refresh_now_daily_allowance: int = Field(default=5, gt=0)
+    # Task 2.9.f: how often each tenant's own self-re-enqueuing
+    # `reconcile` job fires (docs/SPEC.md §5.3: "a nightly reconcile
+    # compares Postgres with Qdrant per tenant") -- mirrors
+    # `scheduler_tick_interval_seconds` directly above exactly, down to
+    # the "plain configurable number, gt=0" shape: the same self-re-
+    # enqueuing mechanism (Task 2.9.a), a different job_type and a much
+    # coarser cadence. 86400s (24 hours, i.e. "nightly" literally, not an
+    # approximation) -- retuned later with real numbers, like every other
+    # estimate in this project, most plausibly once real operational data
+    # shows how many orphaned points actually accumulate per day.
+    reconcile_interval_seconds: float = Field(default=86400.0, gt=0)
 
     @field_validator("database_url")
     @classmethod

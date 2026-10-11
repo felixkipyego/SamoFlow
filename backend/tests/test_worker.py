@@ -100,6 +100,10 @@ async def test_run_logs_only_the_exception_type_never_the_message_on_unexpected_
 
     monkeypatch.setattr(worker_module, "_ensure_scheduler_ticks_seeded", _seed_noop)
 
+    # Task 2.9.f: the nightly reconcile's own bootstrap sweep now runs
+    # every iteration too, the identical reason as both stubs above.
+    monkeypatch.setattr(worker_module, "_ensure_reconcile_ticks_seeded", _seed_noop)
+
     async def _raise_with_secret(session):
         raise ValueError("DISTINCTIVE-FAKE-SECRET-98765")
 
@@ -464,6 +468,10 @@ async def _run_one_idle_iteration(monkeypatch, heartbeat_path, iterations=1):
     monkeypatch.setattr(worker_module, "HEARTBEAT_PATH", heartbeat_path)
     monkeypatch.setattr(worker_module, "_reap_stuck_jobs", _reap_noop)
     monkeypatch.setattr(worker_module, "_ensure_scheduler_ticks_seeded", _seed_noop)
+    # Task 2.9.f: the nightly reconcile's own bootstrap sweep now runs
+    # every iteration too, the identical real-DB-free reason as both
+    # stubs above.
+    monkeypatch.setattr(worker_module, "_ensure_reconcile_ticks_seeded", _seed_noop)
     monkeypatch.setattr(worker_module, "claim_next_job", _claim_nothing)
     # 0.5s, not something tighter: check_heartbeat_fresh()'s own staleness
     # threshold is HEARTBEAT_STALE_MULTIPLIER * worker_poll_interval_seconds
