@@ -49,6 +49,31 @@ REFRESH_INTERVAL_DELTAS: dict[str, timedelta] = {
     "quarterly": timedelta(days=90),
 }
 
+# The job_type each adapter's own completed-task work already established
+# (2.6.d/2.6.e/2.7.d/2.8.e) -- `sources.type` uses the bare adapter name,
+# `jobs.job_type` uses the `ingest_` prefix (2.1.a's own decision entry:
+# "the two are deliberately not required to match 1:1"), so this mapping
+# is the one real place that translates between them. Keyed by the exact
+# four values `ck_sources_type` enforces -- an unrecognized `source.type`
+# is structurally impossible through the real schema.
+#
+# Task 2.9.c: relocated here from app/ingest/scheduler.py (its original
+# home, Task 2.9.a) -- the identical reason REFRESH_INTERVAL_DELTAS moved
+# here at Task 2.9.b: app/ingest/repository.py's new
+# request_refresh_now() needs this exact same mapping (to enqueue the
+# right adapter job type for an on-demand trigger, mirroring
+# handle_scheduler_tick()'s own use of it exactly), but scheduler.py
+# already imports IngestRepository from repository.py, so repository.py
+# importing this back from scheduler.py would be circular. Values and
+# behavior are completely unchanged -- scheduler.py and job_handlers.py
+# now both import this constant from here instead of from scheduler.py.
+JOB_TYPE_FOR_SOURCE_TYPE: dict[str, str] = {
+    "urls": "ingest_url",
+    "crawl": "ingest_crawl",
+    "upload": "ingest_upload",
+    "database": "ingest_db",
+}
+
 
 class Source(Base):
     __tablename__ = "sources"
@@ -92,6 +117,40 @@ class Source(Base):
     # plan at creation time, since create_source() hard-rejects that case
     # instead of ever persisting it).
     exceeds_plan: Mapped[bool] = mapped_column(nullable=False, server_default=text("false"))
+    # Task 2.9.c: refresh-now's own dedicated cooldown signal -- deliberately
+    # NOT `last_run_at` above (decision made and confirmed before building,
+    # see PROJECT_SPEC.md's own Step 2.9.c decision entry): `last_run_at` is
+    # written by ANY completed run, scheduled or triggered, and answers
+    # "when did this source last actually sync" -- the right signal for
+    # get_due_sources()'s own due-query, but the wrong one for cooldown
+    # gating, which needs "when was refresh-now last INVOKED on this
+    # source" specifically (set the instant a request is accepted, in
+    # request_refresh_now(), app/ingest/repository.py -- not tied to the
+    # adapter job's own later completion). Nullable, no default, matching
+    # `last_run_at`'s own exact shape: `None` means never requested.
+    last_refresh_requested_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    # Task 2.9.c: the daily-allowance counting mechanism -- a per-window
+    # counter that resets, NOT a rolling-window COUNT over a history of
+    # past events: a true rolling 24h count needs a row per past request
+    # to re-examine later (a new table), where this needs only two plain
+    # columns on the row it already governs (the smallest correct
+    # mechanism, rule 11). `refresh_now_window_started_at` marks when the
+    # CURRENT counting window began; `refresh_now_count` is the number of
+    # refresh-now requests already used inside it. request_refresh_now()
+    # resets both (to `now()`/0) the moment more than 24h have elapsed
+    # since the window started, exactly the same "recurring check, not a
+    # one-time latch" self-healing shape flag_source_if_exceeds_plan()
+    # (2.9.b) and ensure_scheduler_ticks_seeded() (2.9.a) already use.
+    # `refresh_now_count` is nullable=False with server_default=0 (mirrors
+    # `exceeds_plan`'s own shape); `refresh_now_window_started_at` is
+    # nullable, matching `last_refresh_requested_at` above -- `None` means
+    # no window has started yet (a brand-new source).
+    refresh_now_count: Mapped[int] = mapped_column(nullable=False, server_default=text("0"))
+    refresh_now_window_started_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
 
     __table_args__ = (
         CheckConstraint("type IN ('urls', 'crawl', 'upload', 'database')", name="ck_sources_type"),

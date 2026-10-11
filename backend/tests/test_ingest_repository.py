@@ -33,6 +33,8 @@ from app.ingest.repository import (
     DomainRevokedError,
     IngestRepository,
     RefreshIntervalExceedsPlanError,
+    RefreshNowAllowanceExhaustedError,
+    RefreshNowCooldownError,
     UnknownJobTypeError,
     UnknownRefreshIntervalError,
     UnknownSourceError,
@@ -1273,3 +1275,139 @@ async def test_flag_source_if_exceeds_plan_flags_without_disabling_or_touching_s
     assert row.exceeds_plan is True
     assert row.enabled is True  # not disabled
     assert row.last_run_at == last_run_at  # scheduling untouched
+
+
+# --- Task 2.9.c: refresh-now (request_refresh_now()) -----------------------
+# All live against the real test-db -- the daily-allowance/cooldown tests
+# use request_refresh_now()'s own `clock` parameter to control elapsed time
+# deterministically, matching get_due_sources()'s own identical precedent
+# (2.9.a), rather than real sleep() calls.
+
+
+async def test_request_refresh_now_enqueues_a_real_job_when_both_checks_pass(_seeded_tenants):
+    ids = _seeded_tenants
+    now = datetime(2026, 1, 15, 12, 0, 0, tzinfo=UTC)
+    async with db_session() as session:
+        repo = IngestRepository(tenant_id=ids["tenant_a"], session=session)
+        source = await repo.create_source(
+            source_type="urls", config={"urls": ["https://example.com"]},
+            refresh_interval="daily",
+        )
+        await session.commit()
+        source_id = source.id
+
+    async with db_session() as session:
+        repo = IngestRepository(tenant_id=ids["tenant_a"], session=session)
+        job = await repo.request_refresh_now(source_id, clock=lambda: now)
+        await session.commit()
+        job_id = job.id
+
+    async with db_session() as session:
+        job_row = (await session.execute(sa.select(Job).where(Job.id == job_id))).scalar_one()
+        source_row = (
+            await session.execute(sa.select(Source).where(Source.id == source_id))
+        ).scalar_one()
+    assert job_row.source_id == source_id
+    assert job_row.job_type == "ingest_url"
+    assert job_row.status == "pending"
+    assert source_row.last_refresh_requested_at == now
+    assert source_row.refresh_now_count == 1
+    assert source_row.refresh_now_window_started_at == now
+
+
+async def test_request_refresh_now_rejects_within_the_cooldown_window(_seeded_tenants):
+    ids = _seeded_tenants
+    t0 = datetime(2026, 1, 15, 12, 0, 0, tzinfo=UTC)
+    async with db_session() as session:
+        repo = IngestRepository(tenant_id=ids["tenant_a"], session=session)
+        source = await repo.create_source(
+            source_type="urls", config={"urls": ["https://example.com"]},
+            refresh_interval="daily",
+        )
+        await session.commit()
+        source_id = source.id
+
+    async with db_session() as session:
+        repo = IngestRepository(tenant_id=ids["tenant_a"], session=session)
+        await repo.request_refresh_now(source_id, clock=lambda: t0)
+        await session.commit()
+
+    # Settings.refresh_now_cooldown_seconds defaults to 60s -- 10s later is
+    # still well inside the cooldown window.
+    async with db_session() as session:
+        repo = IngestRepository(tenant_id=ids["tenant_a"], session=session)
+        with pytest.raises(RefreshNowCooldownError, match=str(source_id)):
+            await repo.request_refresh_now(
+                source_id, clock=lambda: t0 + timedelta(seconds=10)
+            )
+
+    async with db_session() as session:
+        jobs = (
+            await session.execute(sa.select(Job).where(Job.source_id == source_id))
+        ).scalars().all()
+        source_row = (
+            await session.execute(sa.select(Source).where(Source.id == source_id))
+        ).scalar_one()
+    assert len(jobs) == 1  # the rejected second call enqueued nothing
+    assert source_row.refresh_now_count == 1  # and left the row untouched
+    assert source_row.last_refresh_requested_at == t0
+
+
+async def test_request_refresh_now_rejects_once_exhausted_then_allows_again_after_the_window_resets(
+    _seeded_tenants, monkeypatch
+):
+    ids = _seeded_tenants
+    monkeypatch.setenv("REFRESH_NOW_COOLDOWN_SECONDS", "1")
+    monkeypatch.setenv("REFRESH_NOW_DAILY_ALLOWANCE", "2")
+    get_settings.cache_clear()
+
+    t0 = datetime(2026, 1, 15, 12, 0, 0, tzinfo=UTC)
+    async with db_session() as session:
+        repo = IngestRepository(tenant_id=ids["tenant_a"], session=session)
+        source = await repo.create_source(
+            source_type="urls", config={"urls": ["https://example.com"]},
+            refresh_interval="daily",
+        )
+        await session.commit()
+        source_id = source.id
+
+    # Two requests, spaced past the 1s cooldown, both within the allowance.
+    async with db_session() as session:
+        repo = IngestRepository(tenant_id=ids["tenant_a"], session=session)
+        await repo.request_refresh_now(source_id, clock=lambda: t0)
+        await session.commit()
+    async with db_session() as session:
+        repo = IngestRepository(tenant_id=ids["tenant_a"], session=session)
+        await repo.request_refresh_now(source_id, clock=lambda: t0 + timedelta(seconds=2))
+        await session.commit()
+
+    # A third, still past cooldown, but the allowance (2) is now exhausted.
+    async with db_session() as session:
+        repo = IngestRepository(tenant_id=ids["tenant_a"], session=session)
+        with pytest.raises(RefreshNowAllowanceExhaustedError, match=str(source_id)):
+            await repo.request_refresh_now(source_id, clock=lambda: t0 + timedelta(seconds=4))
+
+    async with db_session() as session:
+        source_row = (
+            await session.execute(sa.select(Source).where(Source.id == source_id))
+        ).scalar_one()
+    assert source_row.refresh_now_count == 2  # the rejected third call changed nothing
+
+    # A fourth, more than 24h after the window started (t0) -- the window
+    # has expired, so this is correctly allowed again, with a fresh count.
+    async with db_session() as session:
+        repo = IngestRepository(tenant_id=ids["tenant_a"], session=session)
+        job = await repo.request_refresh_now(
+            source_id, clock=lambda: t0 + timedelta(hours=25)
+        )
+        await session.commit()
+        job_id = job.id
+
+    async with db_session() as session:
+        job_row = (await session.execute(sa.select(Job).where(Job.id == job_id))).scalar_one()
+        source_row = (
+            await session.execute(sa.select(Source).where(Source.id == source_id))
+        ).scalar_one()
+    assert job_row.status == "pending"
+    assert source_row.refresh_now_count == 1
+    assert source_row.refresh_now_window_started_at == t0 + timedelta(hours=25)

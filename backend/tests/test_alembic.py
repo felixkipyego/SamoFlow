@@ -876,6 +876,27 @@ def test_downgrade_removes_sources_exceeds_plan_column(_test_engine):
     assert restored.returncode == 0, restored.stdout + restored.stderr
 
 
+def test_downgrade_removes_sources_refresh_now_columns(_test_engine):
+    # Task 2.9.c: the same C1 pattern as the two sources/documents
+    # downgrade tests above.
+    engine = _test_engine
+    _reset_public_schema(engine)
+    migrated = _run_alembic("upgrade", "62576f075891", engine=engine)
+    assert migrated.returncode == 0, migrated.stdout + migrated.stderr
+
+    downgraded = _run_alembic("downgrade", "-1", engine=engine)
+    assert downgraded.returncode == 0, downgraded.stdout + downgraded.stderr
+
+    inspector = sa.inspect(engine)
+    source_columns = {c["name"] for c in inspector.get_columns("sources")}
+    assert "last_refresh_requested_at" not in source_columns
+    assert "refresh_now_count" not in source_columns
+    assert "refresh_now_window_started_at" not in source_columns
+
+    restored = _run_alembic("upgrade", "head", engine=engine)
+    assert restored.returncode == 0, restored.stdout + restored.stderr
+
+
 def test_documents_row_identity_constraint_enforced_by_the_database(_test_engine):
     # Task 2.8.d: the real security/data-integrity property the new
     # partial unique index exists to protect -- the row_identity-side

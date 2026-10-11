@@ -335,10 +335,10 @@ from app.ingest.database_adapter import (
     fetch_readonly_rows,
     ingest_db_row,
 )
-from app.ingest.models import DbConnection, Job, Source
+from app.ingest.models import JOB_TYPE_FOR_SOURCE_TYPE, DbConnection, Job, Source
 from app.ingest.repository import IngestRepository
 from app.ingest.row_templates import MissingColumnError, MissingPrimaryKeyError, TemplateRenderError
-from app.ingest.scheduler import JOB_TYPE_FOR_SOURCE_TYPE, get_due_sources, is_tenant_active
+from app.ingest.scheduler import get_due_sources, is_tenant_active
 from app.ingest.upload_adapter import ingest_upload
 from app.ingest.web_adapter import ingest_url
 

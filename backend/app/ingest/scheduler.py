@@ -90,26 +90,18 @@ from app.tenancy.models import Tenant
 # REFRESH_INTERVAL_DELTAS moved to app/ingest/models.py at Task 2.9.b --
 # see that module's own header comment for why (repository.py's new
 # create_source()/update_source() need it too, and importing it from here
-# would be circular: this module already imports IngestRepository, below).
+# would be circular: this module already imports IngestRepository, above).
 # Re-used here unchanged: an unrecognized value (a config drift this task
 # cannot prevent, only detect) is still treated as "not due" rather than
 # raised -- see get_due_sources()'s own docstring.
-
-# The job_type each adapter's own completed-task work already established
-# (2.6.d/2.6.e/2.7.d/2.8.e) -- `sources.type` uses the bare adapter name,
-# `jobs.job_type` uses the `ingest_` prefix (2.1.a's own decision entry:
-# "the two are deliberately not required to match 1:1"), so this mapping
-# is the one real place that translates between them for the scheduler's
-# own use. Keyed by the exact four values `ck_sources_type` enforces --
-# an unrecognized `source.type` is structurally impossible through the
-# real schema (defensive-only, see handle_scheduler_tick()'s own handling
-# in job_handlers.py).
-JOB_TYPE_FOR_SOURCE_TYPE: dict[str, str] = {
-    "urls": "ingest_url",
-    "crawl": "ingest_crawl",
-    "upload": "ingest_upload",
-    "database": "ingest_db",
-}
+#
+# JOB_TYPE_FOR_SOURCE_TYPE (also originally defined in this module, Task
+# 2.9.a) similarly moved to models.py at Task 2.9.c, for the identical
+# circular-import reason -- app/ingest/repository.py's new
+# request_refresh_now() needs it too. This module never actually used it
+# in its own code (only ever defined it for job_handlers.py to import),
+# so there is nothing to re-import here -- job_handlers.py's own import
+# line now points straight at models.py instead of here.
 
 
 async def is_tenant_active(session: AsyncSession, tenant_id: uuid.UUID) -> bool:

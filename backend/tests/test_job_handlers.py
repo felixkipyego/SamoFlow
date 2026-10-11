@@ -44,6 +44,7 @@ from app.ingest import safe_fetch as safe_fetch_module
 from app.ingest import upload_storage
 from app.ingest.models import Document, Job, Source
 from app.ingest.repository import IngestRepository
+from app.ingest.scheduler import get_due_sources
 from app.tenancy.models import Tenant
 from app.worker import check_heartbeat_fresh, run
 from tests.conftest import (
@@ -1310,3 +1311,83 @@ async def test_run_seeds_a_scheduler_tick_for_a_tenant_with_none_during_its_own_
     assert len(ticks) == 1
     assert ticks[0].status == "pending"
     assert ticks[0].next_run_at > datetime.now(UTC) + timedelta(seconds=1)
+
+
+# --- Task 2.9.c: refresh-now's own scheduler-interaction claim ------------
+
+
+async def test_a_source_refreshed_via_refresh_now_is_not_returned_as_due_afterward(
+    monkeypatch, live_test_services
+):
+    # Decision 4, confirmed live here, not assumed: request_refresh_now()
+    # (app/ingest/repository.py) adds no coupling code of its own to the
+    # scheduler -- it just enqueues the SAME adapter job type a scheduled
+    # run would (JOB_TYPE_FOR_SOURCE_TYPE, the identical mapping
+    # handle_scheduler_tick() already uses). That job's own handler writes
+    # last_run_at at completion regardless of trigger source (the
+    # canonical per-item contract, Step 2.7/2.9.a) -- get_due_sources()
+    # then naturally excludes this source afterward, the exact same
+    # exclusion a normally-scheduled run would already produce, with
+    # neither function aware the other exists.
+    await _prepare_env(monkeypatch, live_test_services)
+
+    with local_http_server(scripted_handler({"/a": (200, _BODY_A.encode())})) as port:
+        url_a = f"http://{_LOOPBACK_HOST}:{port}/a"
+        tenant_id = await _create_tenant("Refresh-Now Scheduler-Interaction Proof Tenant")
+
+        async with db_session() as session:
+            repo = IngestRepository(tenant_id=tenant_id, session=session)
+            verified_domain = await repo.claim_domain(_LOOPBACK_HOST)
+            await session.commit()
+            domain_id = verified_domain.id
+
+        # Raw UPDATE straight to "verified" -- matches _seed_tenant_source_
+        # and_verified_domain()'s own established precedent for this exact
+        # need (DNS verification itself is not under test here).
+        async with db_session() as session:
+            await session.execute(
+                sa.text(
+                    "UPDATE verified_domains SET status = 'verified', verified_at = now() "
+                    "WHERE id = :id"
+                ),
+                {"id": domain_id},
+            )
+            await session.commit()
+
+        async with db_session() as session:
+            source = Source(
+                tenant_id=tenant_id,
+                type="urls",
+                config={"urls": [url_a]},
+                refresh_interval="daily",
+                status="active",
+            )
+            session.add(source)
+            await session.commit()
+            source_id = source.id
+
+        # Before: a never-run source is due, the ordinary case.
+        async with db_session() as session:
+            due_before = await get_due_sources(session, tenant_id=tenant_id)
+        assert {s.id for s in due_before} == {source_id}
+
+        # Triggered via request_refresh_now() -- NOT a direct enqueue()
+        # call, so this proves the real method's own full effect, not a
+        # hand-constructed stand-in for it.
+        async with db_session() as session:
+            repo = IngestRepository(tenant_id=tenant_id, session=session)
+            job = await repo.request_refresh_now(source_id)
+            await session.commit()
+            job_id = job.id
+
+        await asyncio.wait_for(run(asyncio.Event(), max_iterations=1), timeout=10)
+
+    completed_job = await _fetch_job(job_id)
+    assert completed_job.status == "succeeded"
+
+    source_row = await _fetch_source(source_id)
+    assert source_row.last_run_at is not None
+
+    async with db_session() as session:
+        due_after = await get_due_sources(session, tenant_id=tenant_id)
+    assert due_after == []

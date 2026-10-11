@@ -298,6 +298,34 @@ class Settings(BaseSettings):
     # arbitrarily restricting real usage before Task 4.3 gives this a real,
     # per-plan answer.
     refresh_interval_min_allowed: str = Field(default="daily")
+    # Task 2.9.c: refresh-now's own dedicated cooldown (docs/SPEC.md
+    # §5.4: "refresh-now (with a cooldown and a daily allowance from the
+    # plan)") -- deliberately NOT one of the plan-limit stand-in family
+    # directly above: docs/SPEC.md's own `plans.limits` enumeration (§5.4)
+    # names "refresh-now allowance" explicitly but never a cooldown
+    # duration, so this is a pure internal safety/UX mechanism (prevents a
+    # human hammering the same "refresh now" button repeatedly), same
+    # treatment as `docx_max_part_size_bytes`/`db_sync_statement_timeout_
+    # seconds` above (Settings-configurable, no corresponding plan-limit
+    # marker). 60s: long enough to absorb a rapid double-click/retry, short
+    # enough that a genuine on-demand trigger still feels immediate to a
+    # human -- retuned later with real numbers, like every other estimate
+    # in this project.
+    refresh_now_cooldown_seconds: float = Field(default=60.0, gt=0)
+    # Task 2.9.c: the fifth Settings-stand-in sibling to `crawl_page_cap`/
+    # `upload_max_size_bytes`/`db_sync_row_cap`/`refresh_interval_min_
+    # allowed` above -- deliberately NOT sourced from `plans.limits` yet,
+    # the identical already-established reason as all four (`plans.limits`
+    # is still an unstructured JSONB stub, `get_plan_limits()` is still an
+    # explicit `NotImplementedError` stub, Task 4.3's own job; see the
+    # matching Open marker). Unlike `refresh_now_cooldown_seconds` above,
+    # this genuinely IS one of docs/SPEC.md's own named `plans.limits`
+    # entries ("refresh-now allowance"). 5: generous for a real on-demand
+    # trigger (meant for occasional manual use, not a replacement for the
+    # real schedule), while still bounding worst-case daily job-queue churn
+    # from one source being refreshed on demand -- retuned later with real
+    # numbers, like every other estimate in this project.
+    refresh_now_daily_allowance: int = Field(default=5, gt=0)
 
     @field_validator("database_url")
     @classmethod

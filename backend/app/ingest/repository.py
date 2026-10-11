@@ -27,7 +27,7 @@ import json
 import secrets
 import uuid
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
@@ -41,6 +41,7 @@ from app.ingest.domain_verification import (
     check_meta_tag_verification,
 )
 from app.ingest.models import (
+    JOB_TYPE_FOR_SOURCE_TYPE,
     REFRESH_INTERVAL_DELTAS,
     AuditLog,
     DbConnection,
@@ -194,6 +195,26 @@ class RefreshIntervalExceedsPlanError(Exception):
     downgrade-flagging primitive uses the identical comparison, just reacts
     to it differently: flags an EXISTING row instead of rejecting a new
     write).
+    """
+
+
+class RefreshNowCooldownError(Exception):
+    """Raised by request_refresh_now() when `source.last_refresh_requested_at`
+    is too recent -- fewer than `Settings.refresh_now_cooldown_seconds`
+    have elapsed since the last accepted request. A plain pre-check (the
+    comparison needs only the already-fetched `source` row, no further
+    database interaction) -- matches UnknownRefreshIntervalError's own
+    shape. Distinct from RefreshNowAllowanceExhaustedError below: this is
+    "too soon since the LAST request," a time-based gate, independent of
+    how many requests remain in the current day's allowance.
+    """
+
+
+class RefreshNowAllowanceExhaustedError(Exception):
+    """Raised by request_refresh_now() when `source.refresh_now_count`
+    has already reached `Settings.refresh_now_daily_allowance` for the
+    current rolling 24h window (`source.refresh_now_window_started_at`).
+    A plain pre-check, same shape as RefreshNowCooldownError above.
     """
 
 
@@ -601,6 +622,98 @@ class IngestRepository:
         source.enabled = False
         await self.session.flush()
         return source
+
+    async def request_refresh_now(
+        self,
+        source_id: uuid.UUID,
+        *,
+        clock: DateTimeClock = lambda: datetime.now(UTC),
+    ) -> Job:
+        """Task 2.9.c. An on-demand, ahead-of-schedule refresh trigger --
+        gated by a cooldown and a daily allowance, both checked BEFORE any
+        mutation at all: either both pass and the full effect (job
+        enqueued, `last_refresh_requested_at` updated, the daily count
+        advanced) applies together in one flush, or neither check's own
+        exception is raised with the row left completely untouched. No
+        silent no-op path exists -- a failing check always raises.
+
+        Cooldown (decision 2, confirmed before building): gated on
+        `source.last_refresh_requested_at`, a field DEDICATED to this
+        check -- deliberately NOT `last_run_at` (`Source`'s own comment,
+        app/ingest/models.py, has the full reasoning: `last_run_at`
+        answers "did this source's own sync actually complete," the right
+        signal for get_due_sources()'s due-query, but the wrong one for
+        "was refresh-now INVOKED too recently," which this field alone
+        answers). `None` (never requested) always passes.
+
+        Daily allowance (decision 1, confirmed before building): a
+        Settings-stand-in, `Settings.refresh_now_daily_allowance` --
+        deliberately NOT real `plans.limits` reading, the same deferral
+        already established for `crawl_page_cap`/`upload_max_size_bytes`/
+        `db_sync_row_cap`/`refresh_interval_min_allowed` (see the matching
+        Open marker). Counted via a per-window counter that resets
+        (`source.refresh_now_count`/`refresh_now_window_started_at`, see
+        `Source`'s own comment for why this shape over a rolling-window
+        event history), not plan-aware beyond that global ceiling.
+
+        Mechanically (decision 3, confirmed before building): just an
+        immediate `enqueue()` of the source's OWN existing adapter job
+        type/config, the exact same `JOB_TYPE_FOR_SOURCE_TYPE` mapping and
+        `payload={}`-plus-`source_id` shape `handle_scheduler_tick()`
+        (job_handlers.py) already uses for a scheduled run -- no new
+        ingestion logic, this method is the trigger and gating only.
+        `enqueue()`'s own default `next_run_at=None` (claimable
+        immediately) is exactly what "on-demand" needs, no override.
+
+        Scheduler interaction (decision 4, confirmed live, not assumed):
+        no new coupling code exists, or is needed. Because this still
+        enqueues the identical adapter job type a scheduled run would,
+        that job's own handler writes `last_run_at` at completion
+        regardless of trigger source (the canonical per-item contract,
+        Step 2.7/2.9.a) -- get_due_sources() then naturally sees this
+        source as recently-run and excludes it, exactly as it would for
+        any other completed run, with zero code of its own aware that
+        refresh-now exists. Proven live, not assumed, by
+        test_ingest_repository.py's own
+        test_a_source_refreshed_via_refresh_now_is_not_returned_as_due.
+
+        No exemption for a new/never-run source (build item 3): a never-
+        requested source (`last_refresh_requested_at IS NULL`) always
+        clears the cooldown check, and create_source()'s own scheduler-
+        seeding (2.9.b) already covers getting it scheduled at all -- there
+        is nothing left for this method to special-case.
+        """
+        source = await self._get_owned_source(source_id)
+        now = clock()
+        settings = get_settings()
+
+        if source.last_refresh_requested_at is not None:
+            elapsed = (now - source.last_refresh_requested_at).total_seconds()
+            if elapsed < settings.refresh_now_cooldown_seconds:
+                raise RefreshNowCooldownError(
+                    f"source {source_id} was refreshed {elapsed:.0f}s ago; "
+                    f"the cooldown is {settings.refresh_now_cooldown_seconds:.0f}s"
+                )
+
+        window_expired = source.refresh_now_window_started_at is None or (
+            now - source.refresh_now_window_started_at >= timedelta(hours=24)
+        )
+        count_in_window = 0 if window_expired else source.refresh_now_count
+        if count_in_window >= settings.refresh_now_daily_allowance:
+            raise RefreshNowAllowanceExhaustedError(
+                f"source {source_id} has used its daily refresh-now allowance "
+                f"({settings.refresh_now_daily_allowance})"
+            )
+
+        job_type = JOB_TYPE_FOR_SOURCE_TYPE[source.type]
+        job = await self.enqueue(job_type=job_type, source_id=source.id, payload={})
+        source.last_refresh_requested_at = now
+        source.refresh_now_window_started_at = now if window_expired else (
+            source.refresh_now_window_started_at
+        )
+        source.refresh_now_count = count_in_window + 1
+        await self.session.flush()
+        return job
 
     async def get_decrypted_credentials(self, db_connection_id: uuid.UUID) -> dict[str, str]:
         # The one explicit call that unwraps the credential. Never log
