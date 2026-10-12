@@ -3499,6 +3499,271 @@ change to any other file this sub-entry does not itself name.
      regression in how this system is reasoned about, not in the code
      itself.
 
+### Correction (2026-11-12): the 3.4.c sanitiser's "STRUCTURAL" claims above were false; replaced
+
+**Not rewriting the record above — adding this dated correction instead.**
+A direct instruction to adversarially test the shipped `_StreamSanitizer`
+(the recognise-and-hold-back design described in full above) found it
+broken, contradicting its own stated STRUCTURAL guarantees:
+
+- **Cap-padding**: an over-250-character alt text (over the design's own
+  200-character hold cap), split across deltas, flushed the held `![`
+  as plain text BEFORE the closing `](url)` ever arrived; concatenating
+  the two pieces silently reassembled a complete, live markdown image.
+- **Reference-style constructs**: `![x][r]` / `[text][r]` plus a
+  `[r]: url` definition line were never recognised as dangerous AT ALL —
+  a complete blind spot in the regex-based threat model, not a timing
+  edge case.
+- **Nested brackets** (`[![inner](url1)](url2)`): the recogniser matched
+  the INNER construct, rejected its URL, emitted the REJECTED match's
+  own captured text group literally without re-scanning it, then passed
+  the leftover tail through unexamined — the two emitted pieces
+  reassembled into a brand-new image/link around `url2`, a URL **never
+  validated at all** (not scheme-checked, not citation-checked), since
+  it was never recognised as a URL in the first place, only leftover
+  text. This defeated BOTH of the design's own central claims at once
+  ("images are removed entirely"; "a link survives only if cited") —
+  for ANY URL, cited or not, including turning a legitimately cited URL
+  into a live, auto-loading IMAGE rather than a clickable link.
+
+**Verdict: the "STRUCTURAL" label on image/link safety, as written above,
+was wrong for the shipped code.** The design was REPLACED, not patched —
+patching the recognise-then-hold approach correctly would need a real
+recursive re-sanitisation pass over every emitted capture group (more
+state, not less, and no clearer proof of correctness). See the new task
+entry immediately below for the replacement and its own full verification.
+
+### Step 3.4.c redesign: escape, don't recognise (2026-11-12)
+
+Per direct, already-made decision (not a design choice re-litigated
+here): `_StreamSanitizer` and its hold-back machinery, the four
+construct regexes, and the 200-character cap are DELETED entirely (no
+dead code left behind — confirmed, `grep -n "_StreamSanitizer\|_IMAGE_RE\|
+_LINK_RE\|_AUTOLINK_RE\|_RAW_TAG_RE\|_SANITIZER_HOLD_CAP"` against
+`app/agent/graph.py` after the edit returns only this module's own
+dated correction comment, naming the old class historically, no live
+code reference). Replaced with ONE pure function, `_sanitize_answer_
+text()`: a single-pass `str.translate()` backslash-escaping the six
+characters every dangerous construct depends on — `!`, `[`, `]`, `<`,
+`>`, and the backslash itself.
+
+**Backslash escaped first is mandatory, proven, not just argued**: a
+model emitting the raw two characters `\[` would, if only `[` were
+escaped, become `\` + `\[` = `\\[` — CommonMark reads `\\` as one
+escaped backslash (a single literal `\`), leaving a FRESH, unescaped `[`
+live again, reopening the exact construct the function exists to close.
+Mapping backslash to `\\` and `[` to `\[` independently (a single-pass,
+per-character map, never re-scanning its own output) turns `\[` into
+`\\\[`, which CommonMark correctly parses as two escape pairs — literal
+`\` then literal `[`, never a live bracket. Proven directly against a
+real CommonMark parser (`markdown-it-py`, new dev-only dependency,
+4.2.0, re-verified current on PyPI at this task's own build time, pulling
+in exactly one real transitive dependency, `mdurl`; never ships in the
+production image): `test_backslash_prefixed_bracket_still_inert`,
+`test_backslash_prefixed_image_marker_still_inert`
+(`tests/test_agent_graph_citations.py`).
+
+**Backticks are NOT escaped — decided, and proven by test, not assumed.**
+CommonMark disables BOTH backslash-escape processing AND markdown/raw-
+HTML parsing entirely inside a code span's (or fenced code block's) own
+content, rendering it as literal text — so a code span can never be used
+to "open" a live construct, with or without this function's own
+escaping, and leaving backticks alone preserves the model's ability to
+show a literal code sample without visible backslash clutter inside it.
+Proven live (adversarial pass, not just the committed test): a fenced
+code block (`` ``` ``) wrapping an otherwise-dangerous construct parses
+as a single `fence` token, no `image`/`link_open`/`html_block`/
+`html_inline` token anywhere — confirmed both for an inline code span
+(`test_code_span_formatting_is_preserved_and_still_has_no_dangerous_
+constructs`) and informally for a fenced block (this task's own
+adversarial pass, not separately committed — a fenced block is the
+identical CommonMark mechanism, not a new code path to re-prove).
+
+**Properties proven directly, not merely argued**:
+`test_escape_is_split_invariant_under_random_concatenation` proves
+`escape(a) + escape(b) == escape(a + b)` over 20 random splits each of 7
+adversarial strings (every bypass below, plus pure-escape-character
+runs), fixed seed for reproducibility — this is 3.4.b's own append-only
+streaming invariant, true by construction (a context-free per-character
+map commutes with concatenation), not something that could fail for a
+split the test didn't happen to try.
+
+**Every bypass from the adversarial probe converted into a permanent
+regression test**, checked against a REAL CommonMark parser's own parse
+tree (not string inspection), `MarkdownIt("commonmark", {"html": True})`
+— the MOST PERMISSIVE realistic config (raw HTML passed through),
+deliberately not leaning on the widget's own future hardening to prove
+server-side escaping is sufficient alone: `test_cap_padding_bypass_is_
+now_closed`, `test_reference_style_image_bypass_is_now_closed`,
+`test_reference_style_link_bypass_is_now_closed`,
+`test_nested_image_in_link_text_bypass_is_now_closed`,
+`test_nested_link_in_link_text_bypass_is_now_closed`,
+`test_javascript_and_data_urls_never_become_a_link`,
+`test_raw_html_img_and_anchor_tags_are_neutralised`,
+`test_a_cited_looking_url_also_never_survives_as_an_inline_link` (the
+new design draws no cited/uncited distinction in answer TEXT at all —
+docs/SPEC.md §6.3 shows citations as a SEPARATE, server-built "Sources
+shown" list, never parsed from the model's own prose, so nothing in the
+spec requires an inline link to survive).
+
+**`_answer_node` simplified, not just re-wired**: the sanitiser no
+longer needs the citation-URL allow-list at all (it doesn't distinguish
+cited from uncited), so the `sanitizer: _StreamSanitizer | None`
+readiness state, the "cannot happen" `RuntimeError` guard, and the
+end-of-stream `finish()` flush all disappear — `_sanitize_answer_text()`
+is called directly per delta, synchronously, with no held state between
+calls. Citation-building itself (the SEPARATE, already-correct "answer"
+appearing in partial" trigger, Task 3.4.c's own earlier bug fix) is
+UNCHANGED — it still exists, for the persisted `citations` state field
+("Sources shown"), just no longer coupled to the sanitiser's own
+readiness.
+
+**This task's own adversarial pass against the NEW function** (per
+direct instruction, before reporting — six angles tried beyond the
+listed bypasses, all either closed or an already-disclosed, inherent,
+renderer-dependent limitation, none a regression):
+1. 999 raw backslashes immediately before a bracket — parity holds,
+   zero dangerous tokens (stress-tests the "backslash first" proof at
+   scale, not just a single pair).
+2. A fenced (triple-backtick) code block wrapping a dangerous construct
+   — safe, by the same CommonMark rule as inline code spans (see above).
+3. The HTML-entity trick (`&lt;img ...&gt;`) — unaffected by this
+   function either way (not ASCII `<`/`>`), confirmed still inert.
+4. Double-application (defensive, not a vulnerability: confirms
+   `_answer_node`'s own single-call-per-delta design is correct, not
+   merely assumed) — cosmetic only (doubled backslashes), never
+   dangerous.
+5. Performance: 5000 repeated image constructs (~120,000 characters)
+   sanitised in 17ms — confirms "zero added latency" empirically, not
+   only in theory.
+6. **One real, honestly-reported residual limitation, found and NOT
+   fixed**: a fullwidth Unicode look-alike construct (`！［ img ］
+   （https://attacker.example）`, none of it ASCII) passes through this
+   function completely untouched (correctly — it contains none of the
+   six escaped characters) — but IF a downstream renderer performs
+   Unicode NFKC normalisation BEFORE or instead of relying solely on
+   markdown parsing, the fullwidth characters fold to their ASCII
+   equivalents AFTER this function has already run, reconstructing a
+   live image. This is NOT a regression from the redesign — the
+   identical theoretical risk existed for the replaced design too, and
+   it is inherent to ANY server-side escaping of a fixed code-point set:
+   no transform applied before a renderer's own normalisation step can
+   close a gap that step itself reopens. **This is exactly why the new
+   §9 marker below (owner Step 5.2) states explicitly that the widget's
+   own renderer must not Unicode-normalise before markdown parsing, in
+   addition to disabling images/raw HTML/linkify** — server-side
+   escaping and renderer-side hardening are two independent layers for
+   exactly this reason, not redundant with each other.
+
+ASSUMPTION: none new. UNCERTAIN: none. TODO: none new.
+
+Verified: `make lint` clean. `backend/pyproject.toml`: `markdown-it-py
+==4.2.0` added to the dev extra only (re-verified current on PyPI at
+build time), pulling in exactly one new transitive dependency
+(`mdurl==0.1.2`) — `make lock` regenerated `backend/requirements-dev.
+lock` only (`backend/requirements.lock`, the production runtime
+lockfile, untouched — confirmed via `git diff --stat`), `make audit`:
+"No known vulnerabilities found." `tests/test_agent_graph_citations.py`
+(fully rewritten sanitiser section, net +3 tests: 21 → 24), re-run 3
+times: **24 passed** every run, zero skips. Combined with
+`test_agent_graph_answer.py`/`test_agent_graph.py`/
+`test_agent_graph_retrieve.py`/`test_chat_model.py`/
+`test_chat_model_guard.py`/`test_config_guard.py`: **68 passed, 8
+skipped**, zero regressions from the `_answer_node` rewrite. Full
+`backend/tests` without a test database: **725 passed, 327 skipped** (up
+from 722 at the prior close — exactly +3, matching the net new-test
+count, zero skips added). `make test-all` (both real services, fresh
+containers): **1052 passed, 9 warnings** (up from 1049 — exactly +3), 0
+failed, both test services confirmed fully removed afterward. `make
+hooks`: **75 markers** (unchanged — no new TODO/ASSUMPTION/UNCERTAIN/
+NOTE; this redesign is fully built, nothing stubbed). `make lock-check`:
+exit 0, clean. `make audit`: "No known vulnerabilities found." `git
+status --short` named and cross-checked file by file: `PROJECT_SPEC.md`,
+`CLAUDE.md`, `backend/pyproject.toml`, `backend/requirements-dev.lock`,
+`backend/app/agent/graph.py`, `backend/tests/
+test_agent_graph_citations.py` (all modified) — exactly the expected
+six, no `.env`, no migration, `backend/requirements.lock` confirmed
+UNCHANGED (dev-only dependency).
+
+**Senior engineer check:**
+1. **Chose not to build**: a real Markdown AST parse-then-safe-
+   reserialize in production code (the heavier, more "correct-looking"
+   alternative to escaping) — rejected because docs/SPEC.md does not
+   need inline links/images in answer TEXT at all (§6.3's citations are
+   a separate, server-built list), so there is no capability to preserve
+   that would justify a much larger dependency and a much larger proof
+   burden in the request path; also chose not to special-case fullwidth/
+   look-alike Unicode characters in this function — that gap is a
+   renderer-side responsibility (the new §9 marker), not something a
+   fixed ASCII escape table can close without becoming a general-purpose
+   Unicode normalizer of its own (scope creep rule 11 would reject).
+2. **Main trade-off accepted**: the model's own prose can never again
+   render an inline clickable link, a code span's content aside, or any
+   raw HTML — confirmed against docs/SPEC.md directly that nothing
+   requires this capability; the visible cost is that a URL the model
+   mentions now appears as literal escaped text (e.g. `\[text\](url)`)
+   rather than vanishing (image removal) or rendering as a live link —
+   a readability change, not a security one, and the two new §9 markers
+   below name exactly who needs to reverse it and where.
+3. **Pushed back on / would have done differently**: nothing — the
+   instruction's own design (escape a closed six-character set,
+   backslash included, backticks excluded on proof) was exactly right,
+   and asked for exactly the right proof (a real parser, not string
+   matching; a property test for the streaming invariant, not case-by-
+   case assertions). The one thing I'd flag unprompted: the Unicode-
+   normalization residual risk (adversarial-pass item 6 above) is real
+   and worth the user's own awareness, even though it is not this
+   function's job to close.
+4. **Highest production risk in this change**: none newly introduced —
+   this is a strict security improvement over the replaced design,
+   proven by the exact same tests that proved the replaced design
+   broken. The highest REMAINING risk is the two new §9 markers below
+   staying unresolved past their owning steps' build dates (a widget
+   that never adds its own defense-in-depth, or a dashboard/email
+   surface that forgets to unescape before displaying a transcript) —
+   both now tracked, not merely implied.
+
+### Duplication check after 3.4.a/b/c (2026-11-12)
+
+Requested per rule 9, due at n=3 (3.4.a, 3.4.b, 3.4.c). Same higher bar
+as the prior check: only (i) security-relevant findings, (ii) a genuine
+third occurrence of duplicated PRODUCTION-code logic, or (iii) a
+decision-log/code mismatch, or a prose-only deferral with no tracked
+marker.
+
+**The one finding this check's own prior pass surfaced (category i+iii:
+the 3.4.c decision log's "STRUCTURAL" claims about image/link safety
+were false for the shipped design) is now RESOLVED by this same session's
+redesign above** — the sanitiser was replaced, the record corrected with
+a dated note (not rewritten), and two new §9 markers recorded for the
+dependent surfaces. No new finding independently surfaced at this
+check's own pass beyond what the redesign already addressed: the
+touched production code (`app/agent/graph.py`'s `_sanitize_answer_text`,
+`_build_citations`, `_label_to_index`) was re-read in full — no
+duplicated logic (a single escape table, a single regex, no near-
+duplicate of either elsewhere in `app/agent/`); no other decision-log
+claim about this code was found stale; no deferral in this task's own
+work was left as prose only (both new markers recorded in the same edit
+as the decisions that created them).
+
+**Lower-value items deliberately left out: 2.** (1) The `markdown-it-py`
+test helper (`_dangerous_token_types()`, `tests/test_agent_graph_
+citations.py`) exists in exactly one file — not a duplication candidate,
+and test code besides. (2) The now-stale mention of `_StreamSanitizer`
+inside this module's own NEW header comment (the dated correction
+itself, naming the old class historically) is not a stray reference to
+flag — it is the intended historical record, matching this project's own
+"don't rewrite history" convention applied to code comments, not just
+PROJECT_SPEC.md.
+
+Counter reset to **n = 0**, instruction-driven, matching this project's
+own established pattern.
+
+Verified: see the redesign task entry's own `Verified:` paragraph
+immediately above — this check's own pass added no code and changed no
+test, so there is nothing further to re-verify beyond what that entry
+already states.
+
 ### Estimates to measure
 
 - The default limits in §9 and the budgets in §17 are starting points.
@@ -3946,7 +4211,7 @@ here.
 
 ## 8. Task counter since the last duplication check
 
-**n = 3** (3.4.a, 3.4.b, 3.4.c — all real code/tests. Reset to n=0 on 2026-11-07, instruction-driven, following the duplication check after 3.3.b/c/d; see that section above for the full findings/fix/verification record. The Step 3.4 research task and the Step 3.4 breakdown (decisions Q1-Q8) do not count, matching the established "planning-only work doesn't count" precedent — no code was written in either, only research and a decision record. The Part 0 follow-up to Task 3.4.b (fixes to an already-counted task, no new task number) does not count separately, per direct instruction. **A duplication check is now due, per rule 9 — recorded here, not run this task, per direct instruction ("record only").**)
+**n = 0** (reset 2026-11-12, instruction-driven, following the duplication check after 3.4.a/b/c — see that section above for the full findings/fix/verification record; its one finding, the 3.4.c decision log's own false "STRUCTURAL" claim about image/link safety, was resolved by the escape-based redesign recorded in the same edit, not left open. The adversarial-probe task and this redesign task together do not themselves count toward a fresh cycle — they are the resolution of the check that was already due, not new build work opening a new count.)
 
 ## 9. Open markers
 
@@ -4054,3 +4319,5 @@ here.
 - **RESOLVED/code-enforced at the PART 0 follow-up to Task 3.4.b (2026-11-11)**: the secondary chat-model provider's own field-order/incremental-streaming behavior (`app/agent/graph.py`'s own `Answer` schema -- `can_answer` first, `used_chunk_ids` second, `answer` last -- is confirmed LIVE only against real OpenAI; Anthropic's own tool-use streaming was never exercised live, no `ANTHROPIC_API_KEY` was available in either task). Originally recorded as a documented-only precondition ("do not flip this key on without running the script first") -- **now a code-enforced TWO-KEY switch**, not merely a process note a deployer could skip: `get_chat_model()` (`app/agent/chat_model.py`) wires the secondary into the fallback chain only if BOTH `Settings.anthropic_api_key` is set AND the new `Settings.chat_model_secondary_verified` (default `False`) is `True`. Setting the API key alone leaves the chain primary-only, with its own distinct startup warning naming `backend/scripts/manual_check_chat_model_streaming.py` -- the key being present is no longer, by itself, capable of silently enabling an unverified provider. That script (opt-in, real API calls, NEVER run in CI) is what `chat_model_secondary_verified` attests to: run it against the real Anthropic API, confirming `tool_call_chunks` stream incrementally AND the declared schema field order is preserved (the same two properties already proven for OpenAI), THEN set `CHAT_MODEL_SECONDARY_VERIFIED=true` -- never before.
 - Owner Step 4.1 (the real `/chat` endpoint) (recorded at Task 3.4.b, 2026-11-10): docs/SPEC.md §10's own `stream_mode=["messages","custom","updates"]` -> `messages` becomes `token` mapping assumed plain-text tokens -- confirmed, this task, that it does NOT hold for the real answer node: the real token-level `"messages"`-mode chunks for this node's own underlying model call are raw tool-call JSON fragments (including `used_chunk_ids`, which must never reach a visitor directly, and the still-unresolved `can_answer`/partial-JSON scaffolding). **Step 4.1 must never forward raw `"messages"`-mode chunks for this node to visitors** -- the `_answer_node`'s own `"custom"`-mode `{"type": "token", "text": <delta>}` events (via `get_stream_writer()`) are the one real source of visible answer text, already guaranteed append-only and never preceded by any text before `can_answer` is known true. Whoever wires up stream_mode (the same marker that already assigns that job to 4.1) must consume "custom" events for this node specifically, not "messages" ones.
 - Owner Step 4.1 (the real `/chat` endpoint) (recorded at Task 3.4.b, 2026-11-10): a mid-stream chat-model failure (`AnswerStreamFailedMidStreamError`, `app/agent/graph.py`) is confirmed, by design, to leave no completed `AIMessage` in the checkpoint and to propagate as a distinctly-named exception out of `run_turn()` -- but what the VISITOR actually sees when this happens (a generic error? a specific "something went wrong, try again" message? does the widget offer a retry reusing the same `client_message_id`, matching docs/SPEC.md §10's own dropped-connection UX?) is not decided here. This node's own job is detecting and naming the failure correctly, not rendering it -- Step 4.1 owns the real visitor-facing behavior.
+- **Owner Step 5.2 (Chat UI core [SECURITY], docs/SPEC.md §18 Phase 5)** (recorded at the 3.4.c sanitiser redesign, 2026-11-12): server-side answer-text escaping (`_sanitize_answer_text()`, `app/agent/graph.py`) must NOT be the only layer -- the widget's own message renderer (§11: "the widget strips images and allows links only to cited pages and the tenant's verified domains") needs its own INDEPENDENT enforcement: images disabled outright, raw HTML disabled outright, GFM bare-URL auto-linking ("linkify") disabled outright, and any link rendering that IS allowed restricted to the turn's own citation URLs plus the tenant's verified domains -- checked client-side regardless of what the server already escaped. **Concretely motivated by this redesign's own adversarial pass, not a generic caution**: a fullwidth Unicode look-alike construct (`！［...］（url）`) passes through the server-side escape untouched (it contains none of the six escaped ASCII characters) -- if the widget's own renderer ever applies Unicode (NFKC) normalisation BEFORE or instead of markdown parsing, the fullwidth characters fold to live ASCII `!`/`[`/`]` AFTER the server has already run, reconstructing a real construct. **Step 5.2 must therefore also confirm its own renderer does not Unicode-normalise text before markdown-parsing it** (or if it does, that normalisation happens BEFORE any trust boundary, never after) -- this is the concrete reason two independent layers matter here, not merely defense-in-depth as a general principle.
+- **Owner Step 4.4 (Escalation [SECURITY]) for the email body, and Step 6.4 (Escalation inbox and usage) for the dashboard screen** (recorded at the 3.4.c sanitiser redesign, 2026-11-12): docs/SPEC.md §7 -- `escalations.transcript snapshot` is delivered both as "an email with the transcript" (Step 4.4) and "it also appears in the dashboard inbox" (Step 6.4), **neither of which is a markdown renderer**. The persisted `AIMessage`/answer text these transcripts embed is now backslash-escaped by `_sanitize_answer_text()` (e.g. a cited URL reads as literal `\[text\](url)`, not prose) -- whoever builds these two surfaces must apply the EXACT INVERSE of this module's own escape table before display, so a transcript reads as natural prose, not literally backslash-laden text. This is a SEPARATE, additional operation from §7's own existing "Transcripts are stored as text and always escaped on output" requirement (that line is HTML-escaping, an XSS defense for inserting arbitrary visitor/model text into an email or dashboard view) -- both operations are needed together: markdown-UNescape first (to recover readable prose), then HTML-escape (to stay safe to render), never the reverse order and never only one of the two.

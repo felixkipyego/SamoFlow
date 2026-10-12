@@ -385,7 +385,10 @@ def _build_messages(retrieved_chunks: list[RetrievedChunk], question: str) -> li
 #     produced; `RetrievedChunk`'s own closed field set structurally
 #     cannot carry an upload's `file_name` or a database row's table/row
 #     identity into the prompt at all (neither field exists on that
-#     type -- confirmed by reading `app/retrieval/service.py` directly).
+#     type -- confirmed by reading `app/retrieval/service.py` directly);
+#     the answer text's own markdown/HTML-significant characters (below)
+#     are now ALSO structural -- see that section for why this moved
+#     from best-effort to structural.
 #   - BEST-EFFORT (reduces, does not eliminate, a class of confusion):
 #     the `[[DATA:cN]]` delimiter neutralisation (`_neutralize_delimiter_
 #     breakout()` above) stops EXACT-delimiter breakout specifically --
@@ -393,35 +396,99 @@ def _build_messages(retrieved_chunks: list[RetrievedChunk], question: str) -> li
 #     adversarial instructions embedded in otherwise-legitimate-looking
 #     DATA block text (that is the system instruction's own "treat as
 #     data" framing, a prompting technique, not a structural guarantee).
-#     The raw-HTML-tag regex below (`_RAW_TAG_RE`) is a plain regex, not
-#     a real HTML parser -- an adversarial tag using a `>` inside a
-#     quoted attribute value could in principle terminate the match
-#     early; accepted as a known limitation of a defense-in-depth layer,
-#     not the only one (citations/tool-forcing above already remove the
-#     main injection payoff -- an arbitrary link/image the visitor would
-#     actually click or auto-load). The link regex below (`_LINK_RE`)
-#     captures its URL non-greedily up to the FIRST `)` -- a URL
-#     containing its own literal, unescaped parenthesis (most
-#     `javascript:` URIs do, e.g. `javascript:alert(1)`) leaves a stray
-#     trailing `)` in the downgraded plain text (cosmetic only: found and
-#     accepted at this task's own test-writing stage, see
-#     `test_javascript_url_never_becomes_a_citation_or_a_link`). NOT fixed
-#     with greedy/balanced-paren matching, deliberately -- that would risk
-#     mis-parsing two real links on the same line (`[a](url1) and
-#     [b](url2)`); the SECURITY property (the scheme is never in
-#     `allowed_urls`, so the construct always downgrades to plain text,
-#     never a real clickable link) holds regardless of the stray
-#     character.
 #
-# ADDED LATENCY of `_StreamSanitizer`'s bounded hold, stated explicitly
-# per direct instruction: the hold adds no wall-clock delay of its own
-# (pure synchronous string matching over an at-most-`_SANITIZER_HOLD_CAP`-
-# character buffer, no sleep/await inside `_drain()`) -- what it adds is
-# VISIBILITY lag: up to `_SANITIZER_HOLD_CAP` (200) characters of
-# already-generated model output can sit unemitted, waiting for a
-# pending `!`/`[`/`<` construct to resolve, fail, hit the cap, or reach
-# `finish()`. Worst case, a visitor's view of the answer lags up to 200
-# characters behind what the model has actually generated, never more.
+# CORRECTION (2026-11-12, found by this task's own adversarial pass,
+# not self-caught at build time): the ORIGINAL design here was a
+# stateful `_StreamSanitizer` class that RECOGNISED dangerous constructs
+# (regex-matched `![alt](url)`/`[text](url)`/`<url>`/`<tag>`) and held
+# back an unresolved candidate up to a 200-character cap. That design's
+# own claim ("images are removed entirely, no safe rendering exists";
+# "a link survives only if its URL is cited") was FALSE as shipped: a
+# live adversarial probe found (a) cap-padding -- an over-long alt text
+# split across deltas flushes the held `![` verbatim BEFORE the closing
+# `](url)` arrives, and the two pieces silently reassemble into a
+# complete image once concatenated; (b)/(c) reference-style constructs
+# (`![x][r]` / `[text][r]` + a `[r]: url` definition line) were never
+# recognised as dangerous AT ALL, surviving untouched for a real
+# CommonMark renderer to turn into a live image/link; (d) nested
+# brackets (`[![inner](url1)](url2)`) caused the recogniser to emit a
+# REJECTED match's own captured text literally without re-scanning it,
+# then pass the leftover tail through unexamined -- the two pieces
+# reassemble into a brand-new image/link around `url2`, A URL NEVER
+# VALIDATED AT ALL (not scheme-checked, not citation-checked), because
+# it was never recognised as a URL in the first place, just leftover
+# text. This defeated BOTH of the design's own central claims
+# simultaneously and is unfixable within the "recognise, then hold"
+# approach without a real recursive re-sanitisation pass (more state,
+# not less, and no clearer proof of correctness).
+#
+# REPLACED with the design below: ESCAPE, don't recognise. Every
+# markdown/HTML-significant character the dangerous constructs above
+# all depend on (`!`, `[`, `]`, `<`, `>`, and the backslash itself) is
+# backslash-escaped, unconditionally, per character, with no lookahead
+# and no state. Since there is no longer a live, un-escaped trigger
+# character ANYWHERE in the output, there is no construct left for any
+# parser -- inline, reference-style, or nested -- to assemble, by
+# construction, not by recognition. This is why the guarantee above is
+# now STRUCTURAL: it does not depend on correctly recognising every way
+# a dangerous construct could be spelled, only on the closed, six-
+# character set above never appearing un-escaped.
+#
+# Backslash itself MUST be escaped FIRST (conceptually -- the actual
+# implementation is a single-pass, per-character `str.translate()`, so
+# there is no real "first"/"second" pass to get wrong): a model emitting
+# the two raw characters `\[` would, if only `[` were escaped, become
+# `\` + `\[` = `\\[` -- CommonMark reads `\\` as an escaped backslash
+# (one literal `\`) followed by a fresh, UNESCAPED `[`, live again. By
+# mapping backslash to `\\` and `[` to `\[` independently (never
+# re-scanning the output), `\[` correctly becomes `\\\[`, which
+# CommonMark parses as two escape pairs -- literal `\` then literal `[`
+# -- never a live bracket. Proven directly, not just reasoned about: see
+# `test_backslash_prefixed_bracket_still_inert` below.
+#
+# Decision, proven by test, not assumed: BACKTICKS ARE NOT ESCAPED.
+# CommonMark disables backslash-escape processing AND markdown/raw-HTML
+# parsing entirely inside a code span's own content (rendered as literal
+# text, HTML-entity-escaped for display) -- so a code span can never be
+# used to "open" a live construct, with or without this function's own
+# escaping, and leaving backticks alone preserves the model's ability to
+# show a literal code sample. See `test_code_span_formatting_is_preserved_
+# and_still_has_no_dangerous_constructs` below for the live proof, against
+# a real CommonMark parser, not just this reasoning.
+#
+# ADDED LATENCY: zero. `_sanitize_answer_text()` is a pure, stateless,
+# single-pass `str.translate()` call -- no buffering, no held candidate,
+# no cap, no `finish()`. A visitor's view of the answer never lags
+# behind what the model has generated, unlike the replaced design's own
+# up-to-200-character hold.
+_ANSWER_TEXT_ESCAPE_TABLE = str.maketrans(
+    {
+        "\\": "\\\\",
+        "!": "\\!",
+        "[": "\\[",
+        "]": "\\]",
+        "<": "\\<",
+        ">": "\\>",
+    }
+)
+
+
+def _sanitize_answer_text(text: str) -> str:
+    """The ONE function used for BOTH the streamed deltas and the
+    persisted `AIMessage` (`_answer_node` below accumulates every string
+    this returns into the SAME variable it both forwards to the stream
+    writer and persists) -- "what was streamed" and "what's saved" are
+    the same value by construction. A pure, context-free, per-character
+    map: `escape(a) + escape(b) == escape(a + b)` for ANY split `a`/`b`
+    (proven directly, over random splits of adversarial strings, in
+    `test_escape_is_split_invariant_under_random_concatenation` below),
+    which is exactly 3.4.b's own append-only streaming invariant restated
+    -- no special-casing needed to prove streaming safety, it falls out
+    of this function being a plain character-wise map.
+    """
+    return text.translate(_ANSWER_TEXT_ESCAPE_TABLE)
+
+
 def _label_to_index(label: str, chunk_count: int) -> int | None:
     match = re.fullmatch(r"c(\d+)", label)
     if not match:
@@ -477,136 +544,6 @@ def _build_citations(
     return citations
 
 
-# Markdown/HTML constructs this node must neutralise in the model's own
-# ANSWER TEXT (docs/SPEC.md §16: "Markdown image and link leak attempts
-# are neutralised") -- distinct from, and in addition to, the DATA-block
-# delimiter neutralisation above, which protects the PROMPT, not the
-# model's own output.
-_IMAGE_RE = re.compile(r"^!\[([^\]\n]*)\]\(([^)\n]*)\)")
-_LINK_RE = re.compile(r"^\[([^\]\n]*)\]\(([^)\n]*)\)")
-_AUTOLINK_RE = re.compile(r"^<((?:https?|ftp):[^>\s]+)>")
-_RAW_TAG_RE = re.compile(r"^<[a-zA-Z/][^>\n]*>")
-# Bounded hold: a candidate construct (anything starting "!["/"["/"<")
-# that hasn't resolved (matched a complete pattern, or definitively
-# failed to) within this many characters is emitted AS PLAIN TEXT --
-# never held indefinitely. Generous enough for a realistic markdown
-# link/image (`[reasonably long link text](https://a-fairly-long-url...)`
-# comfortably fits), bounded enough that an adversarial run of bare "["
-# characters cannot stall visible output for long.
-_SANITIZER_HOLD_CAP = 200
-
-
-class _StreamSanitizer:
-    """Task 3.4.c: the ONE function (well, class -- streaming needs
-    state across calls) used for BOTH the streamed deltas and the
-    persisted `AIMessage` -- `_answer_node` below accumulates every
-    string this yields into the SAME variable it both forwards to the
-    stream writer and persists, so "what was streamed" and "what's
-    saved" are the same value by construction, not merely tested to
-    match.
-
-    Markdown images (`![alt](url)`) are removed ENTIRELY -- an
-    auto-loaded image URL is the exfiltration channel docs/SPEC.md §16
-    names directly, so there is no "safe" rendering of one, unlike a
-    link. Markdown links (`[text](url)`) and autolinks (`<http...>`)
-    become PLAIN TEXT unless `url` is in `allowed_urls` EXACTLY (the
-    citation URL set `_build_citations()` already produced, scheme-
-    checked and deduplicated) -- a `javascript:`/`data:` URL, or any URL
-    the model did not legitimately cite, is never in that set, so it is
-    downgraded automatically, with no special-case code for any specific
-    scheme. Raw HTML tags (`<img ...>`, `<a ...>`, etc.) are removed
-    entirely (best-effort regex, see this module's own header comment
-    for the known limitation).
-
-    `feed(text)` MUST be called with append-only deltas (the same
-    invariant `_answer_node` already enforces on the raw partial-JSON
-    `answer` field before ever reaching this class) -- holds back a
-    potential construct until it resolves, definitively fails, or hits
-    `_SANITIZER_HOLD_CAP` (held as plain text in all three "not a real
-    construct" outcomes). `finish()` MUST be called exactly once, after
-    the last `feed()`, to flush whatever is still held at the natural
-    end of stream -- an unresolved candidate there is, by definition,
-    never going to complete, so it is emitted as plain text, the
-    identical treatment the cap gives it.
-    """
-
-    def __init__(self, allowed_urls: frozenset[str]) -> None:
-        self._allowed_urls = allowed_urls
-        self._pending = ""
-
-    def feed(self, text: str) -> str:
-        self._pending += text
-        return self._drain(at_end=False)
-
-    def finish(self) -> str:
-        return self._drain(at_end=True)
-
-    def _drain(self, *, at_end: bool) -> str:
-        output: list[str] = []
-        while True:
-            trigger_index = self._find_next_trigger()
-            if trigger_index is None:
-                output.append(self._pending)
-                self._pending = ""
-                break
-
-            output.append(self._pending[:trigger_index])
-            candidate = self._pending[trigger_index:]
-
-            resolved = self._try_resolve(candidate)
-            if resolved is not None:
-                transformed, consumed = resolved
-                output.append(transformed)
-                self._pending = candidate[consumed:]
-                continue  # keep scanning the remainder for more triggers
-
-            if at_end or len(candidate) >= _SANITIZER_HOLD_CAP:
-                # Ruled out: never going to resolve (end of stream), or
-                # held long enough that it isn't a real construct --
-                # emit as plain text, exactly as written.
-                output.append(candidate)
-                self._pending = ""
-                break
-
-            # Still an open candidate, possibly still growing into a
-            # match -- hold it, wait for the next feed().
-            self._pending = candidate
-            break
-        return "".join(output)
-
-    def _find_next_trigger(self) -> int | None:
-        positions = [self._pending.find(marker) for marker in ("![", "[", "<")]
-        positions = [p for p in positions if p != -1]
-        return min(positions) if positions else None
-
-    def _try_resolve(self, candidate: str) -> tuple[str, int] | None:
-        if candidate.startswith("!["):
-            match = _IMAGE_RE.match(candidate)
-            if match:
-                return "", match.end()  # images: removed entirely
-            return None
-        if candidate.startswith("["):
-            match = _LINK_RE.match(candidate)
-            if match:
-                text, url = match.group(1), match.group(2)
-                if url in self._allowed_urls:
-                    return f"[{text}]({url})", match.end()
-                return text, match.end()  # not a cited URL -- plain text
-            return None
-        if candidate.startswith("<"):
-            match = _AUTOLINK_RE.match(candidate)
-            if match:
-                url = match.group(1)
-                if url in self._allowed_urls:
-                    return f"<{url}>", match.end()
-                return url, match.end()
-            tag_match = _RAW_TAG_RE.match(candidate)
-            if tag_match:
-                return "", tag_match.end()  # raw HTML tag: removed entirely
-            return None
-        return None
-
-
 async def _answer_node(state: AgentState) -> dict:
     """The real Retrieval Specialist's own answer step (Task 3.4.b, output
     safety/citations added at Task 3.4.c): turns the Answer tool's own
@@ -624,8 +561,8 @@ async def _answer_node(state: AgentState) -> dict:
     node's own "custom" token events instead.
 
     Rules, all confirmed live before relying on them (see `Answer`'s own
-    docstring, the two exception classes, and `_StreamSanitizer`'s own
-    docstring for the full reasoning):
+    docstring, the two exception classes, and `_sanitize_answer_text()`'s
+    own docstring for the full reasoning):
       - ZERO answer-text bytes are emitted before `can_answer` is known
         to be true (the schema's own field order guarantees this).
       - `can_answer=false` emits nothing and returns immediately --
@@ -634,10 +571,13 @@ async def _answer_node(state: AgentState) -> dict:
       - Citations are built from `used_chunk_ids` the MOMENT that field
         resolves (field order: `can_answer` -> `used_chunk_ids` ->
         `answer`, confirmed live -- `used_chunk_ids` is always fully
-        known before any `answer` text starts streaming), so the
-        sanitiser's own "which links survive" allow-list is ready before
-        it is ever needed, never recomputed afterward from a second,
-        separate parse.
+        known before any `answer` text starts streaming) -- this is for
+        the persisted `citations` state field (the "Sources shown" list,
+        docs/SPEC.md §6.3), NOT a sanitiser allow-list: `_sanitize_
+        answer_text()` does not take or need one, so the answer text's
+        OWN sanitisation has no dependency on citations being ready at
+        all (a simplification from the replaced design, see this
+        module's own header comment).
       - Every emitted RAW (pre-sanitisation) delta is a strict extension
         of what came before; a non-extending partial parse fails loudly
         (`AnswerStreamNotAppendOnlyError`), never emits inconsistent text.
@@ -665,7 +605,7 @@ async def _answer_node(state: AgentState) -> dict:
     can_answer_known = False
     can_answer_value = False
     citations: list[Citation] = []
-    sanitizer: _StreamSanitizer | None = None
+    citations_built = False
     started_emitting = False
     try:
         async for chunk in model.astream(messages):
@@ -695,10 +635,10 @@ async def _answer_node(state: AgentState) -> dict:
             # is fully closed out the moment "answer" starts appearing
             # at all (that key cannot exist in valid JSON before the
             # prior one has closed), so THAT is the correct trigger.
-            if sanitizer is None and "answer" in partial:
+            if not citations_built and "answer" in partial:
+                citations_built = True
                 cited_labels = partial.get("used_chunk_ids") or []
                 citations = _build_citations(cited_labels, retrieved_chunks)
-                sanitizer = _StreamSanitizer(frozenset(c["url"] for c in citations))
 
             new_answer = partial.get("answer") or ""
             if len(new_answer) < len(emitted_raw_answer) or not new_answer.startswith(
@@ -711,19 +651,9 @@ async def _answer_node(state: AgentState) -> dict:
             if len(new_answer) > len(emitted_raw_answer):
                 delta = new_answer[len(emitted_raw_answer) :]
                 emitted_raw_answer = new_answer
-                if sanitizer is None:
-                    # Cannot happen given the schema's own confirmed
-                    # field order (used_chunk_ids always resolves before
-                    # answer) -- fail loudly rather than sanitise
-                    # against an empty, wrong allow-list if it ever did.
-                    raise RuntimeError(
-                        "answer text began streaming before used_chunk_ids resolved "
-                        "-- the Answer schema's own field order was violated"
-                    )
-                sanitized_delta = sanitizer.feed(delta)
-                if sanitized_delta:
-                    writer({"type": "token", "text": sanitized_delta})
-                    started_emitting = True
+                sanitized_delta = _sanitize_answer_text(delta)
+                writer({"type": "token", "text": sanitized_delta})
+                started_emitting = True
                 emitted_sanitized += sanitized_delta
     except AnswerStreamNotAppendOnlyError:
         raise
@@ -734,12 +664,6 @@ async def _answer_node(state: AgentState) -> dict:
                 "partial answer is persisted"
             ) from exc
         raise
-
-    if sanitizer is not None:
-        final_delta = sanitizer.finish()
-        if final_delta:
-            writer({"type": "token", "text": final_delta})
-        emitted_sanitized += final_delta
 
     final = parse_partial_json(accumulated_args) or {}
     cited_labels = final.get("used_chunk_ids") or []

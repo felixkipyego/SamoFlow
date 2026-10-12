@@ -18,6 +18,7 @@ Applies to every task, whether or not the prompt mentions it. Extends PROJECT_SP
 - Challenge the prompt, not just the design — a request that is wrong, unsafe, over-built or under-built gets said so before building, not built faithfully.
 - Think in production terms: dependency failure/slowness, cost, how it's observed and debugged, how it's rolled back, whether persisted data stays readable across library upgrades.
 - Never widen a security guard's allow-list for convenience — fix the design instead.
+- [SECURITY] work includes an adversarial pass before reporting: actively try to break what you built as an attacker would (bypasses, splits, nesting, encodings), and convert every finding into a committed regression test.
 - Every report ends with a "Senior engineer check": (1) what you chose NOT to build and why; (2) the main trade-off accepted and its later cost; (3) anything in the prompt you pushed back on or would've done differently; (4) the highest production risk in this change. "None" only with a one-line reason. A report without this section is incomplete.
 
 ## Keeping the files in sync
