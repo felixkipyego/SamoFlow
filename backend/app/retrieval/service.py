@@ -37,6 +37,7 @@
 # disabled source's soft-hidden points must never surface here, the
 # first and only real consumer of that flag.
 import uuid
+from typing import TypedDict
 
 from qdrant_client.models import (
     FieldCondition,
@@ -202,3 +203,53 @@ async def retrieve(
             "Step 3.1 closure summary)."
         )
     return result.points
+
+
+# Task 3.3.a's own retroactive fix [SECURITY-adjacent]: `RetrievedChunk` and
+# `chunk_from_scored_point()` are a small addition to this COMPLETED Step
+# 3.1 file, per rule 2 -- `retrieve()` itself above is UNCHANGED (still
+# returns `list[ScoredPoint]`; other future callers may still want the raw
+# Qdrant type). This pair exists for exactly one consumer: Step 3.3's own
+# `AgentState.retrieved_chunks` graph-state field, which must never hold a
+# raw `ScoredPoint` -- confirmed live, against the real `AsyncPostgresSaver`,
+# that doing so (a) triggers LangGraph's own "Deserializing unregistered
+# type ... This will be blocked in a future version" warning, and (b)
+# embeds `qdrant_client`'s own internal module path
+# (`qdrant_client.http.models.models`) directly into the stored checkpoint
+# bytes, permanently coupling every saved conversation's own persisted
+# state to that exact module path -- a real, not hypothetical, risk: a
+# future qdrant-client (or LangGraph) upgrade that moves/renames the class,
+# or a LangGraph upgrade that starts enforcing its own already-announced
+# strict mode, could make old checkpoints unreadable. `RetrievedChunk` is
+# a plain `TypedDict` (never an actual class instance at runtime, just a
+# dict literal) -- confirmed live it carries no such risk, serializing as
+# an ordinary msgpack map with no embedded module/class reference at all.
+# `document_id` is `str`, not `uuid.UUID`: the real stored payload key
+# (`doc_id`, `app/ingest/qdrant_writer.py`'s own `build_payload()`) is
+# already a plain string, and keeping it a string here avoids even the
+# confirmed-safe-but-still-an-extension-type `uuid.UUID` msgpack path
+# entirely -- the simplest, most format-stable choice available.
+class RetrievedChunk(TypedDict):
+    document_id: str
+    text: str
+    source_url: str | None
+    heading_path: list[str]
+    score: float
+
+
+def chunk_from_scored_point(point: ScoredPoint) -> RetrievedChunk:
+    """The one place a `ScoredPoint` (from `retrieve()`, above) is
+    converted into the plainly-serializable shape graph state actually
+    stores. `point.payload`'s own keys are a trusted internal invariant
+    (written by `app/ingest/qdrant_writer.py`'s own `build_payload()`, not
+    untrusted external input), so this reads them directly rather than
+    defensively re-validating a shape this codebase itself guarantees.
+    """
+    payload = point.payload or {}
+    return {
+        "document_id": payload["doc_id"],
+        "text": payload["text"],
+        "source_url": payload.get("source_url"),
+        "heading_path": payload.get("heading_path", []),
+        "score": point.score,
+    }

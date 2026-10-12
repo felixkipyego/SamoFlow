@@ -11,6 +11,15 @@
 3. Then docs/SPEC.md.
 If PROJECT_SPEC.md and docs/SPEC.md disagree, stop and ask me which one is right.
 
+## Senior engineer judgment
+Applies to every task, whether or not the prompt mentions it. Extends PROJECT_SPEC.md rule 11 (over-engineering/security) and rule 6 (the end-of-task report) — read those first; this does not repeat them.
+- State the simplest correct design before building, and justify every piece of complexity beyond it.
+- Scale rigor to risk: [SECURITY] work gets full proof (live tests, non-vacuous checks, failure modes); plumbing and refactors stay light.
+- Challenge the prompt, not just the design — a request that is wrong, unsafe, over-built or under-built gets said so before building, not built faithfully.
+- Think in production terms: dependency failure/slowness, cost, how it's observed and debugged, how it's rolled back, whether persisted data stays readable across library upgrades.
+- Never widen a security guard's allow-list for convenience — fix the design instead.
+- Every report ends with a "Senior engineer check": (1) what you chose NOT to build and why; (2) the main trade-off accepted and its later cost; (3) anything in the prompt you pushed back on or would've done differently; (4) the highest production risk in this change. "None" only with a one-line reason. A report without this section is incomplete.
+
 ## Keeping the files in sync
-- Do not copy rules or decisions into this file. It only points to the two files above, so nothing can drift.
+- Do not copy rules or decisions into this file, with one exception: "Senior engineer judgment" above is a standing, project-independent rule, not a SamoFlow spec decision, so it lives here directly rather than in PROJECT_SPEC.md. Everything else still only points to the two files above, so nothing can drift.
 - After every task, update PROJECT_SPEC.md as its rules describe.

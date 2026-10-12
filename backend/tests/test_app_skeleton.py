@@ -42,10 +42,14 @@ SUBPACKAGES = [
 # app.retrieval.service.retrieve is no longer a raising stub as of Task
 # 3.1.c (the real hybrid retrieve(client_id, query, k) is built, tested
 # separately in test_retrieval_service.py) -- removed the same way.
+# app.agent.graph.build_graph is no longer a raising stub as of Task
+# 3.3.b -- it now requires a real `checkpointer` argument and returns a
+# real compiled graph (tested separately in test_agent_graph.py); calling
+# it with zero arguments would raise TypeError, not NotImplementedError,
+# so it is removed from this list the same way, not left to fail here.
 STUB_ENTRY_POINTS = [
     ("app.plans.service", "get_plan_limits"),
     ("app.chat.routes", "stream_chat_response"),
-    ("app.agent.graph", "build_graph"),
     ("app.handoff.routes", "submit_escalation"),
     ("app.notifications.service", "send_email"),
     ("app.mcp.service", "search_knowledge_base"),

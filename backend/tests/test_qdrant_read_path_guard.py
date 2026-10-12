@@ -112,6 +112,19 @@ APP_DIR = BACKEND_DIR / "app"
 # deciding, that it trips rule (a) the same way every prior entry here
 # did. Calls no method on the client itself, so NOT added to
 # READ_ALLOWLIST, same reasoning as every prior entry.
+# Task 3.3.a: app/agent/graph.py was added here, then REMOVED again in the
+# same task, applying the new standing "Senior engineer judgment" rule
+# (CLAUDE.md) retroactively: it had imported qdrant_client.models.
+# ScoredPoint for a bare graph-state-field type annotation (the identical
+# "imports a type, never acquires or forwards a client" shape app/ingest/
+# qdrant_writer.py's own 2.5.c entry already established) -- but widening
+# this allow-list for a type annotation alone, when a plain project-owned
+# TypedDict (app/retrieval/service.py's own RetrievedChunk) serves the
+# identical purpose with no qdrant_client dependency at all, was judged
+# the wrong fix, not just an awkward one: see that TypedDict's own header
+# comment for the real, live-confirmed checkpoint-persistence reason this
+# mattered beyond the guard itself. app/agent/graph.py no longer imports
+# qdrant_client in any form, so it does not belong in this allow-list.
 # Task 2.9.f [SECURITY]: app/ingest/reconcile.py added -- a genuinely
 # DIFFERENT shape from every entry above: this is the first module
 # outside app/retrieval/service.py that actually CALLS a READ-classified

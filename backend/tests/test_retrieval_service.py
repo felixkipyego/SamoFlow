@@ -17,11 +17,12 @@
 import uuid
 
 import pytest
+from qdrant_client.models import ScoredPoint
 
 from app import qdrant
 from app.ingest.extract_html import extract_html
 from app.ingest.qdrant_writer import embed_and_upsert
-from app.retrieval.service import retrieve
+from app.retrieval.service import chunk_from_scored_point, retrieve
 from tests.conftest import live_qdrant_collection, patch_embed_dense, set_real_qdrant_env
 
 pytestmark = pytest.mark.usefixtures("close_the_shared_qdrant_read_client_once")
@@ -195,3 +196,135 @@ async def test_retrieve_uses_the_default_collection_name_when_not_overridden():
 
     default = inspect.signature(retrieve).parameters["collection_name"].default
     assert default == qdrant.COLLECTION_NAME
+
+
+# --- chunk_from_scored_point() [SECURITY-adjacent] (Task 3.3.a's own
+# retroactive fix) ------------------------------------------------------
+
+
+def test_chunk_from_scored_point_converts_every_field():
+    point = ScoredPoint(
+        id=str(uuid.uuid4()),
+        version=1,
+        score=0.87,
+        payload={
+            "doc_id": "11111111-1111-1111-1111-111111111111",
+            "text": "the retrieved text",
+            "source_url": "https://tenant.example/page",
+            "heading_path": ["Section", "Sub"],
+        },
+    )
+    chunk = chunk_from_scored_point(point)
+    assert chunk == {
+        "document_id": "11111111-1111-1111-1111-111111111111",
+        "text": "the retrieved text",
+        "source_url": "https://tenant.example/page",
+        "heading_path": ["Section", "Sub"],
+        "score": 0.87,
+    }
+
+
+def test_chunk_from_scored_point_defaults_missing_optional_fields():
+    # source_url is None (an upload/database-source chunk) and
+    # heading_path absent entirely -- both real, valid payload shapes
+    # (app/ingest/qdrant_writer.py's own build_payload() docstring).
+    point = ScoredPoint(
+        id=str(uuid.uuid4()),
+        version=1,
+        score=0.5,
+        payload={
+            "doc_id": "22222222-2222-2222-2222-222222222222",
+            "text": "a database row's own text",
+        },
+    )
+    chunk = chunk_from_scored_point(point)
+    assert chunk["source_url"] is None
+    assert chunk["heading_path"] == []
+
+
+async def test_chunk_from_scored_point_converts_all_four_real_source_types(monkeypatch):
+    # Senior-engineer-judgment follow-up: confirms chunk_from_scored_point()
+    # never raises for ANY of the four real source types, against payloads
+    # built by the real build_payload() (via embed_and_upsert(), never
+    # hand-built) -- not just the synthetic payloads the two tests above
+    # use. Real source_type strings and source_url/file_name combinations
+    # confirmed by reading every real adapter directly before writing this
+    # test: web_adapter.py/job_handlers.py ("urls"), crawl.py ("crawl"),
+    # upload_adapter.py ("upload", _SOURCE_TYPE), database_adapter.py
+    # ("database", _SOURCE_TYPE) -- all four route through this same
+    # embed_and_upsert()/build_payload() pair, confirmed by grepping for
+    # every real call site of build_payload() in app/: there is exactly
+    # one, shared by every adapter via finish_ingest().
+    patch_embed_dense(monkeypatch)
+    set_real_qdrant_env(monkeypatch)
+    async with live_qdrant_collection("retrieve_probe") as (client, name):
+        await qdrant.ensure_collection(client, name)
+        tenant_id = uuid.uuid4()
+
+        await embed_and_upsert(
+            extract_html(_page("URL Doc", "zebra urls content")),
+            client=client,
+            collection_name=name,
+            tenant_id=tenant_id,
+            source_id=uuid.uuid4(),
+            source_type="urls",
+            document_id=uuid.uuid4(),
+            source_url="https://tenant.example/urls-page",
+            file_name=None,
+            embedding_version="v1",
+        )
+        await embed_and_upsert(
+            extract_html(_page("Crawl Doc", "zebra crawl content")),
+            client=client,
+            collection_name=name,
+            tenant_id=tenant_id,
+            source_id=uuid.uuid4(),
+            source_type="crawl",
+            document_id=uuid.uuid4(),
+            source_url="https://tenant.example/crawl-page",
+            file_name=None,
+            embedding_version="v1",
+        )
+        await embed_and_upsert(
+            extract_html(_page("Upload Doc", "zebra upload content")),
+            client=client,
+            collection_name=name,
+            tenant_id=tenant_id,
+            source_id=uuid.uuid4(),
+            source_type="upload",
+            document_id=uuid.uuid4(),
+            source_url=None,
+            file_name="report.pdf",
+            embedding_version="v1",
+        )
+        await embed_and_upsert(
+            extract_html(_page("Database Doc", "zebra database content")),
+            client=client,
+            collection_name=name,
+            tenant_id=tenant_id,
+            source_id=uuid.uuid4(),
+            source_type="database",
+            document_id=uuid.uuid4(),
+            source_url=None,
+            file_name=None,
+            embedding_version="v1",
+        )
+
+        results = await retrieve(tenant_id, "zebra", 10, collection_name=name)
+        assert len(results) >= 4
+
+        by_source_type = {}
+        for point in results:
+            chunk = chunk_from_scored_point(point)  # must not raise, for any of the four
+            by_source_type[point.payload["source_type"]] = chunk
+
+        assert set(by_source_type) == {"urls", "crawl", "upload", "database"}
+        assert by_source_type["urls"]["source_url"] == "https://tenant.example/urls-page"
+        assert by_source_type["crawl"]["source_url"] == "https://tenant.example/crawl-page"
+        assert by_source_type["upload"]["source_url"] is None
+        assert by_source_type["database"]["source_url"] is None
+        for chunk in by_source_type.values():
+            assert isinstance(chunk["document_id"], str) and chunk["document_id"]
+            assert isinstance(chunk["text"], str) and chunk["text"]
+            assert isinstance(chunk["heading_path"], list)
+            assert isinstance(chunk["score"], float)

@@ -13,6 +13,15 @@
 # module), tested against a trivial throwaway graph built only for this
 # task's own tests.
 #
+# Task 3.3.a [SECURITY]: `_build_thread_config()` below -- a COMPLETED
+# Step 3.2 file -- is modified here, per direct instruction, to also
+# carry `tenant_id` in `configurable`, so graph nodes (built from Step
+# 3.3.b onward) can reach it via `app.agent.context.tenant_id_from_
+# config()`, the one new accessor that module exists for. See that
+# function's own docstring, and `_build_thread_config()`'s own docstring
+# below, for the full "config, not state" and "raw uuid.UUID, never
+# str()" reasoning -- both confirmed live, not assumed.
+#
 # Three thin public functions (run_turn/resume_turn/read_state), not one
 # function with an operation discriminator -- each operation has a
 # naturally different payload shape (an arbitrary graph input dict, a
@@ -101,6 +110,19 @@ def _build_thread_config(identity: VerifiedIdentity, conversation_id: uuid.UUID)
     any string is ever built -- a visitor id containing `:` could
     otherwise forge a `thread_id` colliding with another conversation's or
     visitor's own prefix.
+
+    Task 3.3.a [SECURITY]: also carries `tenant_id` (`identity.tenant_id`
+    -- the SAME value already embedded in `thread_id`) in `configurable`,
+    so graph nodes can read it via `app.agent.context.
+    tenant_id_from_config()` -- never `vid`, nothing needs it yet (rule
+    11). Config, not state: rebuilt server-side on every call, so a
+    resume (which carries no caller-supplied input at all) still
+    re-derives `tenant_id` from the CURRENT call's own `identity`, never a
+    value some prior turn happened to store in the checkpoint. Stored as
+    the raw `uuid.UUID` object, never `str(tenant_id)` -- confirmed live
+    that this is what keeps it out of LangGraph's own persisted
+    checkpoint metadata (see `app/agent/context.py`'s own header comment
+    for the full finding).
     """
     if not isinstance(identity.tenant_id, uuid.UUID):
         raise ValueError("identity.tenant_id must be a uuid.UUID")
@@ -110,7 +132,7 @@ def _build_thread_config(identity: VerifiedIdentity, conversation_id: uuid.UUID)
         raise ValueError("conversation_id must be a uuid.UUID")
 
     thread_id = f"{identity.tenant_id}:{identity.vid}:{conversation_id}"
-    return {"configurable": {"thread_id": thread_id}}
+    return {"configurable": {"thread_id": thread_id, "tenant_id": identity.tenant_id}}
 
 
 def _assert_thread_prefix_matches(config: Mapping[str, Any], identity: VerifiedIdentity) -> None:

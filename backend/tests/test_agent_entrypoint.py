@@ -31,6 +31,7 @@ from app.agent.entrypoint import (
     resume_turn,
     run_turn,
 )
+from app.agent.graph import AgentState
 from app.auth.dependencies import VerifiedIdentity
 from tests.conftest import reset_checkpoint_env
 
@@ -100,6 +101,47 @@ async def test_a_real_turn_persists_a_checkpoint_with_the_expected_thread_id(mon
 
     assert row is not None
     assert row[0] == expected_thread_id
+
+
+# --- tenant_id in config [SECURITY] (Task 3.3.a) ---------------------------
+
+
+def test_build_thread_config_includes_tenant_id_as_a_raw_uuid():
+    identity = _identity()
+    config = _build_thread_config(identity, uuid.uuid4())
+    tenant_id = config["configurable"]["tenant_id"]
+    assert tenant_id == identity.tenant_id
+    assert isinstance(tenant_id, uuid.UUID)
+    assert not isinstance(tenant_id, str)
+
+
+async def test_tenant_id_is_never_persisted_in_checkpoint_metadata(monkeypatch):
+    # The live finding this design rests on (Task 3.3.a, confirmed by
+    # reading langgraph.checkpoint.base.get_checkpoint_metadata() directly
+    # before building anything): a raw uuid.UUID value in `configurable`
+    # is silently skipped by that function's own str/int/bool/float
+    # filter, so it never reaches the checkpoint's own PERSISTED metadata
+    # column -- a real regression guard, not just a one-off manual check,
+    # against someone later "helpfully" storing str(tenant_id) instead.
+    graph = await _fresh_graph(monkeypatch)
+    identity = _identity()
+    conversation_id = uuid.uuid4()
+
+    await _collect(run_turn(graph, identity, conversation_id, {"messages": ["hi"]}))
+
+    expected_thread_id = f"{identity.tenant_id}:{identity.vid}:{conversation_id}"
+    conninfo = checkpointer.checkpointer_conninfo()
+    async with await psycopg.AsyncConnection.connect(conninfo, autocommit=True) as conn:
+        row = await (
+            await conn.execute(
+                "SELECT metadata FROM checkpoints WHERE thread_id = %s "
+                "ORDER BY checkpoint_id DESC LIMIT 1",
+                (expected_thread_id,),
+            )
+        ).fetchone()
+
+    assert row is not None
+    assert "tenant_id" not in row[0]
 
 
 # --- (b) two visitors, same tenant, same conversation_id -> separate threads
@@ -285,3 +327,71 @@ def test_run_turn_and_resume_turn_do_not_expose_stream_mode():
     # exist either.
     assert "stream_mode" not in inspect.signature(run_turn).parameters
     assert "stream_mode" not in inspect.signature(resume_turn).parameters
+
+
+# --- AgentState.retrieved_chunks is plainly serializable [SECURITY-adjacent]
+# (Task 3.3.a's own retroactive fix) ------------------------------------
+
+
+def _agent_state_node(state: AgentState) -> dict:
+    return {
+        "retrieved_chunks": [
+            {
+                "document_id": "11111111-1111-1111-1111-111111111111",
+                "text": "the retrieved text",
+                "source_url": "https://tenant.example/page",
+                "heading_path": ["Section"],
+                "score": 0.87,
+            }
+        ]
+    }
+
+
+def _build_agent_state_graph(cp):
+    builder = StateGraph(AgentState)
+    builder.add_node("node", _agent_state_node)
+    builder.add_edge(START, "node")
+    builder.add_edge("node", END)
+    return builder.compile(checkpointer=cp)
+
+
+async def test_agent_state_retrieved_chunks_round_trips_with_no_serialization_warning(
+    monkeypatch, caplog
+):
+    # The real fix this task made, proven directly against the REAL
+    # AgentState/RetrievedChunk (not a stand-in): a raw qdrant_client.
+    # models.ScoredPoint in this same field previously triggered
+    # LangGraph's own "Deserializing unregistered type ... This will be
+    # blocked in a future version" warning (confirmed live before fixing
+    # it) and embedded qdrant_client's own internal module path into the
+    # stored checkpoint bytes. A plain RetrievedChunk dict must do neither.
+    #
+    # Confirmed live, before writing this assertion: that warning is
+    # logged (logging.Logger.warning(), langgraph.checkpoint.serde.
+    # jsonplus's own _warn_once()), not raised via Python's warnings
+    # module -- warnings.catch_warnings() would silently never see it
+    # regardless of whether the underlying behavior fired; caplog is the
+    # real mechanism this needs.
+    await reset_checkpoint_env(monkeypatch)
+    await checkpointer.open_checkpointer_pool()
+    cp = checkpointer.get_checkpointer()
+    await cp.setup()
+    graph = _build_agent_state_graph(cp)
+
+    config = {"configurable": {"thread_id": str(uuid.uuid4())}}
+    with caplog.at_level("WARNING"):
+        async for _ in graph.astream({"messages": ["hi"]}, config):
+            pass
+
+    assert "unregistered type" not in caplog.text
+
+    snapshot = await graph.aget_state(config)
+    assert snapshot.values["retrieved_chunks"] == [
+        {
+            "document_id": "11111111-1111-1111-1111-111111111111",
+            "text": "the retrieved text",
+            "source_url": "https://tenant.example/page",
+            "heading_path": ["Section"],
+            "score": 0.87,
+        }
+    ]

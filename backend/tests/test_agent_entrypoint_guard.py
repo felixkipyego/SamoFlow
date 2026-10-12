@@ -58,6 +58,7 @@
 # analysis is attempted -- the live runtime backstop (layer 3) is what
 # actually catches a bypass of that shape, since it would still produce a
 # config missing the real checkpointer keys.
+#
 import ast
 from pathlib import Path
 
@@ -74,6 +75,24 @@ APP_DIR = BACKEND_DIR / "app"
 # may call a LangGraph state method, construct Command(resume=...), or
 # build a thread-config dict literal. Review it by hand.
 ALLOWED_GRAPH_RUN_CALLERS: frozenset[str] = frozenset({"app/agent/entrypoint.py"})
+
+# Rule 4 (Task 3.3.a [SECURITY]): a SUBSCRIPT with the string constant
+# "configurable" (e.g. `config["configurable"]`) may appear only in
+# app/agent/entrypoint.py (builds it) and app/agent/context.py (the one
+# accessor, tenant_id_from_config(), that reads tenant_id back out of it)
+# -- a separate, narrower allow-list from ALLOWED_GRAPH_RUN_CALLERS above,
+# since no other file needs the run/state-method or config-literal
+# permissions that list grants. Deliberately scoped to SUBSCRIPT access
+# only, matching the exact wording this rule was specified with -- a
+# `.get("configurable")` method call elsewhere is not caught by this rule
+# (a known, narrower scope, not an oversight): config-literal construction
+# is already banned everywhere by rule 2, and the only way another file
+# legitimately holds a config object at all is as a node's own `config`
+# parameter, which a node author bypassing the one blessed accessor would
+# have to reach for deliberately.
+ALLOWED_CONFIGURABLE_SUBSCRIPT_ACCESSORS: frozenset[str] = frozenset(
+    {"app/agent/entrypoint.py", "app/agent/context.py"}
+)
 
 # Layer 1: every public STATE method on the installed langgraph==1.2.14's
 # CompiledStateGraph that is NOT also a generic Runnable method -- confirmed
@@ -145,6 +164,24 @@ def _config_literal_violations(path: Path, rel: str) -> list[str]:
     return violations
 
 
+def _configurable_subscript_violations(path: Path, rel: str) -> list[str]:
+    if rel in ALLOWED_CONFIGURABLE_SUBSCRIPT_ACCESSORS:
+        return []
+    tree = ast.parse(path.read_text(), filename=str(path))
+    violations = []
+    for node in ast.walk(tree):
+        if (
+            isinstance(node, ast.Subscript)
+            and isinstance(node.slice, ast.Constant)
+            and node.slice.value == "configurable"
+        ):
+            violations.append(
+                f"{path}:{node.lineno}: subscripts 'configurable' but {rel!r} is not in "
+                "ALLOWED_CONFIGURABLE_SUBSCRIPT_ACCESSORS"
+            )
+    return violations
+
+
 def scan_entrypoint_guard(root: Path) -> list[str]:
     """Pure static AST scan, no IO beyond reading the given tree's own .py
     files. `root` is the directory ALLOWED_GRAPH_RUN_CALLERS' paths are
@@ -165,6 +202,7 @@ def scan_entrypoint_guard(root: Path) -> list[str]:
         rel = path.relative_to(root).as_posix()
         violations.extend(_command_resume_violations(path, rel))
         violations.extend(_config_literal_violations(path, rel))
+        violations.extend(_configurable_subscript_violations(path, rel))
     return violations
 
 
@@ -286,3 +324,52 @@ def test_passes_for_an_unrelated_llm_ainvoke_call_with_a_config_keyword(tmp_path
         "    return await llm.ainvoke(messages, config=config)\n",
     )
     assert scan_entrypoint_guard(tmp_path) == []
+
+
+# --- Rule 4 (Task 3.3.a [SECURITY]): "configurable" subscripts --------------
+
+
+def test_fails_on_a_configurable_subscript_outside_the_allowlist(tmp_path):
+    write_guard_tree_file(
+        tmp_path, "app/other.py", 'def f(config):\n    return config["configurable"]\n'
+    )
+    violations = scan_entrypoint_guard(tmp_path)
+    assert len(violations) == 1
+    assert "subscripts 'configurable'" in violations[0]
+    assert "app/other.py" in violations[0]
+
+
+def test_passes_for_a_configurable_subscript_inside_entrypoint(tmp_path):
+    write_guard_tree_file(
+        tmp_path,
+        "app/agent/entrypoint.py",
+        'def f(config):\n    return config["configurable"]\n',
+    )
+    assert scan_entrypoint_guard(tmp_path) == []
+
+
+def test_passes_for_a_configurable_subscript_inside_the_accessor_module(tmp_path):
+    write_guard_tree_file(
+        tmp_path,
+        "app/agent/context.py",
+        'def f(config):\n    return config["configurable"]\n',
+    )
+    assert scan_entrypoint_guard(tmp_path) == []
+
+
+def test_passes_for_an_unrelated_subscript_key(tmp_path):
+    # Control: this rule matches the exact string "configurable" only, not
+    # any subscript anywhere.
+    write_guard_tree_file(tmp_path, "app/other.py", 'def f(d):\n    return d["other_key"]\n')
+    assert scan_entrypoint_guard(tmp_path) == []
+
+
+def test_fails_on_a_nested_configurable_subscript_outside_the_allowlist(tmp_path):
+    # The same node shape _build_thread_config()'s own callers would
+    # write if bypassing tenant_id_from_config() directly.
+    write_guard_tree_file(
+        tmp_path, "app/other.py", 'def f(config):\n    return config["configurable"]["tenant_id"]\n'
+    )
+    violations = scan_entrypoint_guard(tmp_path)
+    assert len(violations) == 1
+    assert "subscripts 'configurable'" in violations[0]
