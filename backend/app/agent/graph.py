@@ -22,11 +22,14 @@
 # RetrievedChunk/chunk_from_scored_point() header comment for the full
 # live-confirmed finding). Fixed: this module no longer imports
 # qdrant_client at all, and is REMOVED from CLIENT_ACCESS_ALLOWLIST again.
+from langchain_core.messages import BaseMessage, HumanMessage
+from langchain_core.runnables import RunnableConfig
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 from langgraph.graph import END, START, MessagesState, StateGraph
 from langgraph.graph.state import CompiledStateGraph
 
-from app.retrieval.service import RetrievedChunk
+from app.agent.context import tenant_id_from_config
+from app.retrieval.service import RetrievedChunk, chunk_from_scored_point, retrieve
 
 
 class AgentState(MessagesState):
@@ -111,12 +114,79 @@ def _coordinator_node(state: AgentState) -> dict:
     )
 
 
-def _retrieve_node(state: AgentState) -> dict:
-    # Becomes real in Task 3.3.c (this same Step) -- the retrieve node
-    # calling retrieve() (Task 3.1.c) for real, with tenant_id from
-    # app.agent.context.tenant_id_from_config() and the latest human
-    # message as the query.
-    raise NotImplementedError("retrieve node not built yet (Task 3.3.c)")
+def _latest_human_message_text(messages: list[BaseMessage]) -> str:
+    """Task 3.3.c: the query text for the retrieve node below -- the
+    latest `HumanMessage`'s own content, walked backward since `prepare`
+    (Step 3.5, not yet inserted) will eventually rewrite follow-ups but
+    nothing here assumes that has happened.
+
+    Fails loudly (a plain `ValueError`, never silently empty chunks) on
+    three distinct malformed-input shapes, each named explicitly rather
+    than lumped into one generic message -- decided deliberately, not
+    assumed, because none of these three are docs/SPEC.md §6.3's own "no
+    relevant answer" case (that is a well-formed query that genuinely
+    matches nothing in the tenant's content -- Step 3.4's gate node owns
+    that, not this function). These three are INPUT-SHAPE problems from
+    this node's own caller, not content-relevance problems:
+      - no `HumanMessage` at all: nothing upstream guarantees one exists
+        yet (`prepare` isn't built, and nothing validates this graph's own
+        `input` today) -- a caller/upstream-contract violation, not a
+        visitor-facing scenario.
+      - empty/whitespace-only content: a degenerate input that would
+        still mechanically "work" (embed an empty string, query Qdrant)
+        but wastes a real, paid OpenAI call on garbage and produces a
+        meaningless ranking -- caught before that call, not after.
+      - non-`str` content (LangChain messages can carry a list of
+        multimodal content blocks): docs/SPEC.md's own v1 scope is
+        English text only, no multimodal input anywhere in the spec --
+        building real block-text-extraction now would be speculative
+        (rule 11); this fails clearly instead of silently guessing which
+        block is "the text".
+    """
+    for message in reversed(messages):
+        if isinstance(message, HumanMessage):
+            content = message.content
+            if not isinstance(content, str):
+                raise ValueError(
+                    "the latest HumanMessage's content is not a plain string "
+                    f"(got {type(content).__name__}) -- multimodal content blocks "
+                    "are not supported"
+                )
+            query = content.strip()
+            if not query:
+                raise ValueError("the latest HumanMessage's content is empty or whitespace-only")
+            return query
+    raise ValueError("no HumanMessage found in state['messages']")
+
+
+async def _retrieve_node(state: AgentState, config: RunnableConfig) -> dict:
+    """The real Retrieval Specialist's own search step (Task 3.3.c),
+    calling `retrieve()` (Task 3.1.c) for real. `tenant_id` comes ONLY
+    from `tenant_id_from_config(config)` -- the one accessor (Task
+    3.3.a) -- no other source of tenant identity exists anywhere in this
+    function, matching `retrieve()`'s own identical obligation for
+    `client_id`.
+
+    Production lens, confirmed live, not assumed, stated plainly rather
+    than silently absorbed: if Qdrant or the OpenAI embedding call is down
+    or slow during this call, nothing here catches it -- the exception
+    propagates uncaught through this node, through `astream()`, to this
+    graph's own caller. Confirmed live: Qdrant's own client default
+    timeout is 5s (`AsyncQdrantRemote.DEFAULT_GRPC_TIMEOUT`); OpenAI's own
+    default is far longer (`openai._constants.DEFAULT_TIMEOUT`, `read=600`
+    seconds), with the SDK's own built-in retry (`embed_dense()`'s own
+    header comment: 2 retries) potentially compounding that further on a
+    slow-but-not-fully-down provider -- a visitor-facing turn could hang
+    for minutes in the worst case, today, with no visitor-facing fallback
+    behavior decided. See PROJECT_SPEC.md's own new §9 marker -- not
+    decided or built here, deliberately: this node's own job is the
+    search call itself, not a retry/circuit-breaker policy spanning
+    arbitrary future nodes.
+    """
+    tenant_id = tenant_id_from_config(config)
+    query = _latest_human_message_text(state["messages"])
+    points = await retrieve(tenant_id, query)
+    return {"retrieved_chunks": [chunk_from_scored_point(point) for point in points]}
 
 
 def _gate_answer_node(state: AgentState) -> dict:

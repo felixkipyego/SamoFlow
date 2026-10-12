@@ -2,8 +2,18 @@
 # Task 3.3.b: the rule-based router (pure-function tests) and
 # build_graph() (end to end, through the real guarded entry point, with a
 # real checkpointer against test-db). Plumbing, not [SECURITY] -- no
-# isolation/tenant-identity proof here, since no node reads tenant_id yet
-# (Task 3.3.c's own job).
+# isolation/tenant-identity proof here; that is test_agent_graph_
+# retrieve.py's own job (Task 3.3.c), now that the retrieve node is real.
+#
+# Task 3.3.c: this file's own `test_run_turn_reaches_the_retrieve_stub_
+# for_an_ordinary_message` is REMOVED, not updated -- its entire premise
+# (retrieve is still a stub raising NotImplementedError) is now false,
+# the same situation test_app_skeleton.py's own header comment already
+# documents for `build_graph` itself. An ordinary message reaching a
+# WORKING retrieve node needs real Qdrant/OpenAI-shaped env (seeded
+# content, patch_embed_dense()), which does not belong in this file's own
+# plumbing-only suite -- that proof lives in test_agent_graph_retrieve.py
+# instead, end to end through run_turn()/read_state().
 import uuid
 
 import pytest
@@ -98,13 +108,6 @@ async def _fresh_real_graph(monkeypatch):
     cp = checkpointer.get_checkpointer()
     await cp.setup()
     return build_graph(cp)
-
-
-async def test_run_turn_reaches_the_retrieve_stub_for_an_ordinary_message(monkeypatch):
-    graph = await _fresh_real_graph(monkeypatch)
-    identity = _identity()
-    with pytest.raises(NotImplementedError, match="3.3.c"):
-        await _collect(run_turn(graph, identity, uuid.uuid4(), {"messages": ["hello"]}))
 
 
 async def test_run_turn_reaches_the_fallback_stub_when_quota_exhausted(monkeypatch):

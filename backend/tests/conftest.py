@@ -398,7 +398,7 @@ def require_test_database() -> str:
     return url
 
 
-async def reset_checkpoint_env(monkeypatch) -> str:
+async def reset_checkpoint_env(monkeypatch, **extra_overrides) -> str:
     # Duplication check after 3.2.b/c/d (2026-11-02), finding A.1: this
     # "point DATABASE_URL at the real test-db, then drop the four
     # checkpoint tables for a deterministic starting state" preamble
@@ -410,8 +410,22 @@ async def reset_checkpoint_env(monkeypatch) -> str:
     # app/db.py's Base.metadata, so reset_test_database()'s own drop_all/
     # create_all never touches these -- every live checkpointer-adjacent
     # test needs this same reset, not that one.
+    #
+    # `**extra_overrides` (Task 3.3.c): threaded into the SAME set_valid_env()
+    # call as DATABASE_URL, matching _prepare_env()'s own established
+    # "one set_valid_env() call carrying every override together" discipline
+    # (test_job_handlers.py) -- found live while building test_agent_graph_
+    # retrieve.py: that file needs BOTH this reset AND set_real_qdrant_env()'s
+    # own overrides active at once (the real retrieve node calls
+    # get_qdrant_read_client() internally), and calling set_real_qdrant_env()
+    # as a SEPARATE second set_valid_env() call after this one re-applies
+    # VALID_ENV's own fake DATABASE_URL wholesale, silently clobbering the
+    # real one just set here -- confirmed live (a real connection-refused
+    # failure against the fake default port) before adding this parameter.
+    # Every existing caller passes none, so this is purely additive -- no
+    # existing caller's behavior changes.
     url = require_test_database()
-    set_valid_env(monkeypatch, VALID_ENV, DATABASE_URL=url)
+    set_valid_env(monkeypatch, VALID_ENV, DATABASE_URL=url, **extra_overrides)
     conninfo = checkpointer.checkpointer_conninfo()
     async with await psycopg.AsyncConnection.connect(conninfo, autocommit=True) as conn:
         await conn.execute(
