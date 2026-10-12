@@ -27,11 +27,14 @@
 # REAL app.qdrant.COLLECTION_NAME, not a disposable per-test collection
 # name: _retrieve_node calls retrieve(tenant_id, query) with no
 # collection_name override (matching production), so there is no way to
-# point it at a throwaway collection -- matching this project's own
-# established precedent (test_job_handlers.py, test_upload_e2e.py, both
-# already write real points into COLLECTION_NAME against test-qdrant with
-# no per-point cleanup), relying on fresh random tenant_id/document_id
-# values for isolation between runs, not on a disposable collection name.
+# point it at a throwaway collection.
+#
+# Task 3.3.d: unlike test_job_handlers.py/test_upload_e2e.py (which leave
+# their own seeded points in COLLECTION_NAME permanently), this file's own
+# two tests delete what they seed, by client_id, in a try/finally -- so a
+# long-lived local test-qdrant doesn't accumulate data from repeated runs
+# of this file specifically. Reuses `app.qdrant.tenant_filter()` directly
+# (the same filter retrieve() itself is scoped by), not a hand-built one.
 import uuid
 
 import pytest
@@ -68,6 +71,13 @@ def _page(title: str, body: str) -> str:
 
 async def _collect(aiter):
     return [x async for x in aiter]
+
+
+async def _delete_tenants_points(client, *tenant_ids: uuid.UUID) -> None:
+    for tenant_id in tenant_ids:
+        await client.delete(
+            collection_name=qdrant.COLLECTION_NAME, points_selector=qdrant.tenant_filter(tenant_id)
+        )
 
 
 async def _fresh_real_graph(monkeypatch):
@@ -118,16 +128,21 @@ async def _seed_tenant(client, tenant_id: uuid.UUID, title: str, body: str, url:
 
 
 async def _seed_two_tenants_with_non_overlapping_content(
-    client,
-) -> tuple[uuid.UUID, uuid.UUID, uuid.UUID, uuid.UUID]:
+    client, tenant_a: uuid.UUID, tenant_b: uuid.UUID
+) -> tuple[uuid.UUID, uuid.UUID]:
     # Distinct, non-overlapping vocabulary per tenant (matching Task
     # 3.1.c/3.1.d's own established pattern): dense is stubbed to a
     # constant vector by patch_embed_dense(), so the real sparse (BM25)
     # side of the hybrid query is what makes tenant_filter() the only
     # thing standing between a cross-topic query and the other tenant's
     # content.
-    tenant_a = uuid.uuid4()
-    tenant_b = uuid.uuid4()
+    #
+    # Takes tenant_a/tenant_b as PARAMETERS (Task 3.3.d), not generated
+    # here: both callers now generate them before entering their own
+    # try/finally, so the finally's own cleanup knows both tenant ids
+    # even if this function raises partway through (e.g. tenant_a's own
+    # embed_and_upsert() succeeds, tenant_b's then fails) -- the points
+    # already written for tenant_a must still be deleted, not orphaned.
     doc_a = await _seed_tenant(
         client, tenant_a, "Tenant A Doc", "zebra giraffe elephant safari wildlife",
         "https://tenant-a.example/page",
@@ -136,7 +151,7 @@ async def _seed_two_tenants_with_non_overlapping_content(
         client, tenant_b, "Tenant B Doc", "mortgage interest rate amortization loan",
         "https://tenant-b.example/page",
     )
-    return tenant_a, doc_a, tenant_b, doc_b
+    return doc_a, doc_b
 
 
 async def test_run_turn_as_tenant_a_with_a_query_matching_tenant_bs_topic_stays_scoped_to_tenant_a(
@@ -147,32 +162,38 @@ async def test_run_turn_as_tenant_a_with_a_query_matching_tenant_bs_topic_stays_
     client = qdrant.build_qdrant_client(url, key)
     await qdrant.ensure_collection(client, qdrant.COLLECTION_NAME)
 
-    tenant_a, doc_a, _tenant_b, doc_b = await _seed_two_tenants_with_non_overlapping_content(client)
-    await client.close()
-
-    graph = await _fresh_real_graph(monkeypatch)
-    identity_a = _identity(tenant_a)
-    conversation_id = uuid.uuid4()
-
-    # Proves the retrieve -> gate_answer edge fired for real (3.3.b's own
-    # trade-off item 2): the query text matches tenant B's own topic, so
-    # if tenant scoping were broken this would still "succeed" at
-    # retrieval -- the gate_answer stub's own NotImplementedError is only
-    # reached if the real retrieve node itself completed without raising.
-    with pytest.raises(NotImplementedError, match="Step 3.4"):
-        await _collect(
-            run_turn(
-                graph, identity_a, conversation_id, {"messages": ["mortgage interest rate"]}
-            )
+    tenant_a, tenant_b = uuid.uuid4(), uuid.uuid4()
+    try:
+        doc_a, doc_b = await _seed_two_tenants_with_non_overlapping_content(
+            client, tenant_a, tenant_b
         )
+        graph = await _fresh_real_graph(monkeypatch)
+        identity_a = _identity(tenant_a)
+        conversation_id = uuid.uuid4()
 
-    snapshot = await read_state(graph, identity_a, conversation_id)
-    chunks = snapshot.values["retrieved_chunks"]
-    assert len(chunks) >= 1
-    assert all(chunk["document_id"] == str(doc_a) for chunk in chunks)
-    assert all(chunk["document_id"] != str(doc_b) for chunk in chunks)
-    assert any("zebra" in chunk["text"] for chunk in chunks)
-    assert all("mortgage" not in chunk["text"] for chunk in chunks)
+        # Proves the retrieve -> gate_answer edge fired for real (3.3.b's
+        # own trade-off item 2): the query text matches tenant B's own
+        # topic, so if tenant scoping were broken this would still
+        # "succeed" at retrieval -- the gate_answer stub's own
+        # NotImplementedError is only reached if the real retrieve node
+        # itself completed without raising.
+        with pytest.raises(NotImplementedError, match="Step 3.4"):
+            await _collect(
+                run_turn(
+                    graph, identity_a, conversation_id, {"messages": ["mortgage interest rate"]}
+                )
+            )
+
+        snapshot = await read_state(graph, identity_a, conversation_id)
+        chunks = snapshot.values["retrieved_chunks"]
+        assert len(chunks) >= 1
+        assert all(chunk["document_id"] == str(doc_a) for chunk in chunks)
+        assert all(chunk["document_id"] != str(doc_b) for chunk in chunks)
+        assert any("zebra" in chunk["text"] for chunk in chunks)
+        assert all("mortgage" not in chunk["text"] for chunk in chunks)
+    finally:
+        await _delete_tenants_points(client, tenant_a, tenant_b)
+        await client.close()
 
 
 async def test_run_turn_as_tenant_b_with_a_query_matching_tenant_as_topic_stays_scoped_to_tenant_b(
@@ -183,24 +204,29 @@ async def test_run_turn_as_tenant_b_with_a_query_matching_tenant_as_topic_stays_
     client = qdrant.build_qdrant_client(url, key)
     await qdrant.ensure_collection(client, qdrant.COLLECTION_NAME)
 
-    _tenant_a, doc_a, tenant_b, doc_b = await _seed_two_tenants_with_non_overlapping_content(client)
-    await client.close()
-
-    graph = await _fresh_real_graph(monkeypatch)
-    identity_b = _identity(tenant_b)
-    conversation_id = uuid.uuid4()
-
-    with pytest.raises(NotImplementedError, match="Step 3.4"):
-        await _collect(
-            run_turn(
-                graph, identity_b, conversation_id, {"messages": ["zebra giraffe safari"]}
-            )
+    tenant_a, tenant_b = uuid.uuid4(), uuid.uuid4()
+    try:
+        doc_a, doc_b = await _seed_two_tenants_with_non_overlapping_content(
+            client, tenant_a, tenant_b
         )
+        graph = await _fresh_real_graph(monkeypatch)
+        identity_b = _identity(tenant_b)
+        conversation_id = uuid.uuid4()
 
-    snapshot = await read_state(graph, identity_b, conversation_id)
-    chunks = snapshot.values["retrieved_chunks"]
-    assert len(chunks) >= 1
-    assert all(chunk["document_id"] == str(doc_b) for chunk in chunks)
-    assert all(chunk["document_id"] != str(doc_a) for chunk in chunks)
-    assert any("mortgage" in chunk["text"] for chunk in chunks)
-    assert all("zebra" not in chunk["text"] for chunk in chunks)
+        with pytest.raises(NotImplementedError, match="Step 3.4"):
+            await _collect(
+                run_turn(
+                    graph, identity_b, conversation_id, {"messages": ["zebra giraffe safari"]}
+                )
+            )
+
+        snapshot = await read_state(graph, identity_b, conversation_id)
+        chunks = snapshot.values["retrieved_chunks"]
+        assert len(chunks) >= 1
+        assert all(chunk["document_id"] == str(doc_b) for chunk in chunks)
+        assert all(chunk["document_id"] != str(doc_a) for chunk in chunks)
+        assert any("mortgage" in chunk["text"] for chunk in chunks)
+        assert all("zebra" not in chunk["text"] for chunk in chunks)
+    finally:
+        await _delete_tenants_points(client, tenant_a, tenant_b)
+        await client.close()
