@@ -3764,6 +3764,215 @@ immediately above — this check's own pass added no code and changed no
 test, so there is nothing further to re-verify beyond what that entry
 already states.
 
+### Step 3.4.d research (2026-11-13): what signal tells "relevant" from "nothing relevant"
+
+Research only, per the task's own scope — **no gate code built**. A real
+experiment against a real, disposable `test-qdrant` collection and real
+OpenAI dense embeddings (`backend/scripts/manual_research_gate_signal.py`,
+new, opt-in, never-in-CI, matching `manual_check_chat_model_streaming.py`'s
+own established convention exactly — reuses the REAL `retrieve()`,
+`embed_dense()`/`embed_sparse()`/`embed_sparse_query()`,
+`_retrieval_filter()`, `build_payload()`/`build_point()`/
+`upsert_points()`/`ensure_collection()` unmodified; the only new logic is
+the corpus/query data plus two EXTRA, non-fused diagnostic queries no
+production path needs, to recover the dense-only/sparse-only scores a
+fused `QueryResponse` does not expose — confirmed live by reading
+qdrant-client 1.19.1's own installed `ScoredPoint`/`QueryResponse` models
+directly: exactly one `score` field, no pre-fusion score anywhere).
+
+**Confirmed live, qdrant-client 1.19.1**: `score_threshold` exists at
+BOTH the per-`Prefetch` level and the top-level `query_points()` call
+(both fields read directly off the installed library's own Pydantic
+models); `Fusion.RRF` runs "with default parameters" — no tunable RRF
+constant is exposed by this library version.
+
+**Corpus**: one fake tenant, 32 hand-authored chunks across 4 clearly
+distinct topics (Pricing, Returns Policy, Shipping, Hours & Support) —
+a small business's own knowledge base, realistic prose, 8 chunks/topic.
+**Queries**: 30 total, 10 each — (A) clearly answerable, (B) related but
+genuinely unanswerable (same domain, the specific fact is absent from
+the corpus, confirmed by construction), (C) off-topic/nonsense. For each
+query's TOP (fused) hit: its RRF score, its own dense cosine score (a
+separate, non-fused dense-only `query_points()` call against the same
+point id), and its own sparse/BM25-style score (same, sparse-only).
+
+**Real results** (full per-query rows in the script's own stdout, not
+reproduced here — group stats only):
+
+| Group | RRF (min–max, mean) | Dense cosine (min–max, mean) | Sparse (min–max, mean) |
+|---|---|---|---|
+| A: answerable | 0.70–1.00, 0.92 | 0.5056–0.7276, 0.602 | 5.27–14.56, 9.67 |
+| B: related, unanswerable | 0.54–1.00, 0.76 | 0.1614–0.5295, 0.383 | 1.97–8.39, 5.69 |
+| C: off-topic/nonsense | 0.50–1.00, 0.58 | 0.0545–0.1630, 0.113 | None (7/10) or 4.17–8.62 (3/10) |
+
+**Finding 1 — RRF does not separate the groups; ruled out.** Confirmed,
+not assumed: ALL THREE groups contain a query whose top hit scored the
+maximum possible RRF value, **1.0** — including a pure nonsense query
+("Can you explain how quantum entanglement works in simple terms?"),
+identical to four of Group A's ten clearly-answerable queries. RRF is
+also coarse-grained (only a handful of distinct values appear across 30
+queries, an artifact of summing reciprocals of small integer ranks from
+exactly 2 channels) — too few distinct values to threshold meaningfully
+even setting the ceiling-effect problem aside.
+
+**Finding 2 — sparse/BM25 alone is unreliable and exploitable by
+coincidence; ruled out as a standalone signal.** Confirmed by a real,
+named example: the nonsense query "What's the best way to train for a
+marathon in three months?" scored dense=0.125 (correctly near-zero,
+clustered with the rest of Group C) but sparse=8.62 — HIGHER than four
+of Group A's own ten sparse scores and well inside Group A's range —
+purely from incidental token overlap, not relevance. This is the exact
+failure mode named in the research question ("a sparse-only keyword
+match on nonsense"), now demonstrated live rather than hypothesised.
+7 of 10 Group C queries scored no sparse match at all within the
+prefetch window (a genuinely good signal when present), but the 3 that
+DID match prove the scale is not trustworthy as a threshold on its own.
+
+**Finding 3 — dense cosine cleanly separates "nothing relevant" from
+"something relevant," with a real, empirical gap.** Sorted, all 30
+values: Group C's ten scores cluster at 0.0545–0.1630; exactly ONE
+Group B value (0.1614, "What is your policy on price matching a
+competitor's lower price?") falls inside that same narrow band; every
+OTHER Group B value (9 of 10) and every Group A value sit at 0.2669 or
+above. **A real, empirical gap of roughly [0.163, 0.267] exists in this
+sample** — a floor anywhere in that range rejects 10/10 of Group C and
+only 1/10 of Group B, admitting 10/10 of Group A and 9/10 of Group B.
+Group A and Group B are NOT cleanly separated from each other by dense
+score alone (three Group B values, 0.5087/0.5099/0.5295, interleave with
+Group A's own lowest, 0.5056) — expected and correct: a topically-
+related-but-unanswerable question SHOULD retrieve genuinely relevant
+context; distinguishing "answerable" from "topically close but not
+actually answered" is `can_answer`'s own job (Task 3.4.b), not the
+gate's. The gate's one job, per docs/SPEC.md §6.3's own wording ("if the
+best hit is below the relevance threshold"), is catching "nothing
+relevant exists at all" cheaply, before paying for a model call — dense
+cosine does exactly that, cleanly, in this sample.
+
+**Recommendation 1 — signal: dense cosine floor on the fused top hit,
+not RRF, not sparse, not a blended combination, and not "only
+`can_answer`."** RRF and sparse are ruled out by Findings 1/2 above.
+A blended/combination signal (e.g. folding sparse into the gate's own
+decision, matching what RRF already does) is explicitly NOT recommended
+**because** sparse is the more exploitable half (Finding 2) — blending
+it back in reopens the identical coincidental-keyword risk the
+experiment demonstrates. "Only `can_answer`, no gate at all" is not
+recommended either: it would mean paying for a real model call on every
+pure-nonsense turn too, exactly the cost docs/SPEC.md's own gate bullet
+exists to avoid — a dense floor is a cheap, pre-model filter, and
+`can_answer` remains the independent, already-built second layer for
+everything the gate lets through.
+
+**Recommendation 2 — provisional default: 0.20, ASSUMPTION, tuned for
+real at Step 3.7's golden set.** Sits inside the empirical gap found at
+Finding 3 (0.163–0.267), closer to its lower edge — a deliberate,
+asymmetric choice: a false positive here (nonsense slips past the gate)
+costs one wasted model call that `can_answer` still correctly resolves
+to the fixed fallback; a false negative (real content wrongly gated)
+denies a visitor an answer outright, a worse outcome for the same
+failure budget. **ASSUMPTION, stated plainly**: 0.20 is anchored to ONE
+hand-authored 32-chunk corpus in ONE domain with 30 hand-written
+queries — not validated against real visitor phrasing, other domains,
+multiple languages, near-duplicate content, or a meaningful sample size.
+Step 3.7's golden set is where this gets tuned for real, per docs/
+SPEC.md §6.3's own wording exactly ("tuned in Phase 3 using the golden
+set") — this number is a defensible starting point, not a conclusion.
+
+**Recommendation 3 — where it lives: `RetrievedChunk`/`retrieve()` gain
+a new field, NOT the gate node re-embedding the query itself.** Three
+options considered: **(1) thread a `dense_score` field onto
+`RetrievedChunk`, populated by `retrieve()` issuing one EXTRA, cheap,
+Qdrant-only dense-only sub-query reusing the SAME already-computed dense
+vector (zero extra OpenAI cost — only one more local Qdrant round-trip,
+negligible against the existing §17 budget)** — touches two completed
+files (`app/retrieval/service.py`, Task 3.1.c; `RetrievedChunk`, Task
+3.3.a), **flagged here per rule 2, exactly as anticipated**; **(2) the
+gate node re-embeds the query itself and issues its own dense-only
+query** — touches neither completed file, but costs a SECOND real
+OpenAI embedding call on EVERY turn (not just gated-out ones), actively
+worsening the exact p50 latency risk 3.4.b/3.4.g already flagged, for no
+offsetting benefit; **(3) a `score_threshold` on the dense `Prefetch`
+inside `retrieve()` alone, no new field** — cheapest, but does NOT
+solve Finding 2's own failure mode: filtering the DENSE candidate pool
+does nothing to stop a sparse-only coincidental match from still
+becoming the sole surviving (and therefore "top-ranked") fused
+candidate, reproducing the marathon-query false positive via fusion
+rather than preventing it. **Recommend option (1)** — the only one that
+gives the gate a reliable, specific, already-correctly-scoped signal
+without a recurring extra API cost. A possible further optimization
+(Qdrant's `FormulaQuery`, confirmed to exist as an accepted `query_points
+()` input type, MIGHT be able to surface both sub-scores in one round-
+trip instead of two) is **not** confirmed live by this task — flagged as
+worth checking live at 3.4.d's actual build time, not assumed to work.
+
+**Zero retrieved chunks → fallback directly, no model call** — stated
+plainly as a requirement, independent of which signal is chosen: the
+graph already has the exact precedent (`can_answer=false` routing,
+Task 3.4.b); `_gate_node` reading `len(state["retrieved_chunks"]) == 0`
+and routing to `_no_answer_fallback_node` needs no new mechanism, only
+the existing conditional-edge pattern reused.
+
+**What this experiment proves and does not, stated plainly per direct
+instruction.** PROVES: for THIS one hand-authored corpus/domain/tenant
+and these 30 queries, real measured numbers showing RRF fails cleanly
+(Finding 1), sparse fails cleanly (Finding 2), and dense cosine
+separates "nothing relevant" from "something relevant" with a real,
+named empirical gap (Finding 3) — directional evidence strong enough to
+pick a signal and a defensible starting threshold. DOES NOT PROVE: that
+0.20 (or any fixed number) generalizes to other tenants' real domains,
+real visitor phrasing (hand-authored queries are cleaner than messy
+real input), multiple languages, near-duplicate/overlapping content, or
+holds at any meaningful sample size with real precision/recall
+confidence — 30 queries is an exploratory probe, not a calibration. This
+is explicitly **NOT** the golden set (Step 3.7) and does not substitute
+for it.
+
+ASSUMPTION: the 0.20 provisional dense-cosine floor (above). UNCERTAIN:
+whether Qdrant's `FormulaQuery` can surface both sub-scores in one
+round-trip (above, flagged for live re-check at build time). TODO: none
+new — 3.4.d's own `TODO(3.4.d)` comment on `_gate_node` already names
+this exact work.
+
+Verified: real output, not simulated. Script run once, live, against a
+fresh `test-qdrant` (port 56333, literal test keys) and real OpenAI
+`text-embedding-3-small` — 32 corpus chunks + 30 queries = 62 dense
+embedding calls, batched into few HTTP requests, well under a cent at
+published pricing; sparse embedding fully local (fastembed), zero
+network cost. Collection created via the real `ensure_collection()`,
+deleted in the script's own `finally` block (confirmed cleaned up,
+collection absent after the run); `test-qdrant` stopped and removed via
+`make test-qdrant-down` afterward. `make lint`: clean on the new script.
+`git status --short`: `PROJECT_SPEC.md` (modified, this entry plus the
+Part 0 marker extension below), `backend/scripts/
+manual_research_gate_signal.py` (new) — exactly the expected two, no
+`.env`, no production code touched (no gate built, per the task's own
+scope), no test added (nothing to commit to the suite — this is a
+one-off research script, not a regression test).
+
+**Senior engineer check:**
+1. **Chose not to build**: any gate code at all, including the Settings
+   field for the threshold, the gate node's own real logic, or the
+   `RetrievedChunk`/`retrieve()` field this research recommends —
+   exactly the task's own stated scope (research, then report, stop).
+2. **Main trade-off accepted**: Recommendation 3's own option (1) adds
+   one extra Qdrant round-trip to every real turn (not just gated-out
+   ones) — a real, if small, latency cost against the same budget
+   3.4.g's own upcoming measurement is already watching; accepted
+   because the alternative (option 2) costs a full extra OpenAI call
+   instead, a strictly worse trade on both latency and money.
+3. **Pushed back on / would have done differently**: nothing in the
+   prompt's own design — it correctly anticipated the two hardest parts
+   (how to recover a sub-score qdrant-client doesn't expose; that
+   touching `retrieve()`/`RetrievedChunk` needs a rule-2 flag) before I
+   had to discover either myself. I would not have chosen a larger or
+   more varied corpus than asked — 30-40 chunks across 3-4 topics was
+   exactly enough to produce a clean, reportable gap on the first run.
+4. **Highest production risk in this change**: none — no production
+   code changed. The highest risk THIS RESEARCH surfaces for 3.4.d's own
+   future build is the asymmetric-cost judgment call embedded in the
+   0.20 default (Recommendation 2) being carried forward uncritically
+   past Step 3.7 without the golden set actually re-validating it, which
+   is exactly why it is recorded here as an ASSUMPTION, not a decision.
+
 ### Estimates to measure
 
 - The default limits in §9 and the budgets in §17 are starting points.
@@ -4320,4 +4529,4 @@ here.
 - Owner Step 4.1 (the real `/chat` endpoint) (recorded at Task 3.4.b, 2026-11-10): docs/SPEC.md §10's own `stream_mode=["messages","custom","updates"]` -> `messages` becomes `token` mapping assumed plain-text tokens -- confirmed, this task, that it does NOT hold for the real answer node: the real token-level `"messages"`-mode chunks for this node's own underlying model call are raw tool-call JSON fragments (including `used_chunk_ids`, which must never reach a visitor directly, and the still-unresolved `can_answer`/partial-JSON scaffolding). **Step 4.1 must never forward raw `"messages"`-mode chunks for this node to visitors** -- the `_answer_node`'s own `"custom"`-mode `{"type": "token", "text": <delta>}` events (via `get_stream_writer()`) are the one real source of visible answer text, already guaranteed append-only and never preceded by any text before `can_answer` is known true. Whoever wires up stream_mode (the same marker that already assigns that job to 4.1) must consume "custom" events for this node specifically, not "messages" ones.
 - Owner Step 4.1 (the real `/chat` endpoint) (recorded at Task 3.4.b, 2026-11-10): a mid-stream chat-model failure (`AnswerStreamFailedMidStreamError`, `app/agent/graph.py`) is confirmed, by design, to leave no completed `AIMessage` in the checkpoint and to propagate as a distinctly-named exception out of `run_turn()` -- but what the VISITOR actually sees when this happens (a generic error? a specific "something went wrong, try again" message? does the widget offer a retry reusing the same `client_message_id`, matching docs/SPEC.md §10's own dropped-connection UX?) is not decided here. This node's own job is detecting and naming the failure correctly, not rendering it -- Step 4.1 owns the real visitor-facing behavior.
 - **Owner Step 5.2 (Chat UI core [SECURITY], docs/SPEC.md §18 Phase 5)** (recorded at the 3.4.c sanitiser redesign, 2026-11-12): server-side answer-text escaping (`_sanitize_answer_text()`, `app/agent/graph.py`) must NOT be the only layer -- the widget's own message renderer (§11: "the widget strips images and allows links only to cited pages and the tenant's verified domains") needs its own INDEPENDENT enforcement: images disabled outright, raw HTML disabled outright, GFM bare-URL auto-linking ("linkify") disabled outright, and any link rendering that IS allowed restricted to the turn's own citation URLs plus the tenant's verified domains -- checked client-side regardless of what the server already escaped. **Concretely motivated by this redesign's own adversarial pass, not a generic caution**: a fullwidth Unicode look-alike construct (`！［...］（url）`) passes through the server-side escape untouched (it contains none of the six escaped ASCII characters) -- if the widget's own renderer ever applies Unicode (NFKC) normalisation BEFORE or instead of markdown parsing, the fullwidth characters fold to live ASCII `!`/`[`/`]` AFTER the server has already run, reconstructing a real construct. **Step 5.2 must therefore also confirm its own renderer does not Unicode-normalise text before markdown-parsing it** (or if it does, that normalisation happens BEFORE any trust boundary, never after) -- this is the concrete reason two independent layers matter here, not merely defense-in-depth as a general principle.
-- **Owner Step 4.4 (Escalation [SECURITY]) for the email body, and Step 6.4 (Escalation inbox and usage) for the dashboard screen** (recorded at the 3.4.c sanitiser redesign, 2026-11-12): docs/SPEC.md §7 -- `escalations.transcript snapshot` is delivered both as "an email with the transcript" (Step 4.4) and "it also appears in the dashboard inbox" (Step 6.4), **neither of which is a markdown renderer**. The persisted `AIMessage`/answer text these transcripts embed is now backslash-escaped by `_sanitize_answer_text()` (e.g. a cited URL reads as literal `\[text\](url)`, not prose) -- whoever builds these two surfaces must apply the EXACT INVERSE of this module's own escape table before display, so a transcript reads as natural prose, not literally backslash-laden text. This is a SEPARATE, additional operation from §7's own existing "Transcripts are stored as text and always escaped on output" requirement (that line is HTML-escaping, an XSS defense for inserting arbitrary visitor/model text into an email or dashboard view) -- both operations are needed together: markdown-UNescape first (to recover readable prose), then HTML-escape (to stay safe to render), never the reverse order and never only one of the two.
+- **Owner Step 4.4 (Escalation [SECURITY]) for the email body, and Step 6.4 (Escalation inbox and usage) for the dashboard screen** (recorded at the 3.4.c sanitiser redesign, 2026-11-12): docs/SPEC.md §7 -- `escalations.transcript snapshot` is delivered both as "an email with the transcript" (Step 4.4) and "it also appears in the dashboard inbox" (Step 6.4), **neither of which is a markdown renderer**. The persisted `AIMessage`/answer text these transcripts embed is now backslash-escaped by `_sanitize_answer_text()` (e.g. a cited URL reads as literal `\[text\](url)`, not prose) -- whoever builds these two surfaces must apply the EXACT INVERSE of this module's own escape table before display, so a transcript reads as natural prose, not literally backslash-laden text. This is a SEPARATE, additional operation from §7's own existing "Transcripts are stored as text and always escaped on output" requirement (that line is HTML-escaping, an XSS defense for inserting arbitrary visitor/model text into an email or dashboard view) -- both operations are needed together: markdown-UNescape first (to recover readable prose), then HTML-escape (to stay safe to render), never the reverse order and never only one of the two. **Extended (2026-11-13) to a third, non-display surface**: Step 3.5 (follow-up rewrite) feeds prior conversation history back into a model prompt, not a renderer — that history must be markdown-unescaped first too, or the rewrite model reads backslash-laden prose and a naive re-application of `_sanitize_answer_text()` to its own output would compound the escaping turn over turn.
