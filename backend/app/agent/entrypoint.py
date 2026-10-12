@@ -50,6 +50,35 @@ from langgraph.types import Command, StateSnapshot
 
 from app.auth.dependencies import VerifiedIdentity
 
+# Duplication check after 3.2.b/c/d (2026-11-02), finding C.1: pinned
+# explicitly rather than left at astream()'s own implicit default --
+# confirmed live, by comparing all three options directly against the
+# installed langgraph, that leaving stream_mode unset resolves to this
+# exact "updates" shape (CompiledStateGraph's own default resolution,
+# distinct from the plain Pregel-level "values" default), not something
+# that could silently drift. Exposing stream_mode as a parameter on
+# run_turn()/resume_turn() would require adding a prefix check on
+# streamed chunks too (today, only read_state()'s own aget_state()-
+# returned config is checked, confirmed empirically to never carry a
+# "configurable" key under this stream mode) -- not built, so the
+# parameter must not exist either; test_run_turn_and_resume_turn_do_not_
+# expose_stream_mode (tests/test_agent_entrypoint.py) asserts this
+# directly against both signatures.
+_STREAM_MODE = "updates"
+
+
+class NoResumableInterruptError(Exception):
+    """Raised by resume_turn() (Task 3.2.b/c/d duplication check, finding
+    C.2) when the thread has no pending interrupt to resume -- confirmed
+    live, against the real installed langgraph, that Command(resume=...)
+    on a thread with no pending interrupt does NOT raise on its own: a
+    never-started thread silently restarts the graph from scratch (the
+    resume value is discarded, the graph re-hits the same interrupt
+    point); an already-fully-completed thread silently no-ops (zero
+    chunks, zero state change). Neither surfaces as an error without this
+    explicit check.
+    """
+
 
 def _build_thread_config(identity: VerifiedIdentity, conversation_id: uuid.UUID) -> RunnableConfig:
     """The ONE place a LangGraph config dict is ever constructed in this
@@ -104,6 +133,25 @@ def _assert_thread_prefix_matches(config: Mapping[str, Any], identity: VerifiedI
         )
 
 
+async def _read_verified_state(
+    graph: CompiledStateGraph,
+    identity: VerifiedIdentity,
+    conversation_id: uuid.UUID,
+) -> StateSnapshot:
+    """Shared by read_state() and resume_turn() (Task 3.2.b/c/d duplication
+    check, finding C.2) -- builds the config, reads state via
+    `aget_state()`, and asserts the returned config's own thread prefix
+    before returning it. Extracted so both operations that need a
+    verified current snapshot share the identical sequence, rather than
+    `resume_turn()`'s own pending-interrupt check duplicating
+    `read_state()`'s three-line body.
+    """
+    config = _build_thread_config(identity, conversation_id)
+    snapshot = await graph.aget_state(config)
+    _assert_thread_prefix_matches(snapshot.config, identity)
+    return snapshot
+
+
 async def run_turn(
     graph: CompiledStateGraph,
     identity: VerifiedIdentity,
@@ -118,7 +166,7 @@ async def run_turn(
     ever determines which thread a run executes against.
     """
     config = _build_thread_config(identity, conversation_id)
-    async for chunk in graph.astream(input, config):
+    async for chunk in graph.astream(input, config, stream_mode=_STREAM_MODE):
         yield chunk
 
 
@@ -131,9 +179,27 @@ async def resume_turn(
     """Resumes an interrupted turn on the correct thread via
     `Command(resume=resume_value)` -- the construction this module's own
     AST guard confines to this file alone.
+
+    First reads the current state through `_read_verified_state()` (the
+    same config builder, with its prefix assertion applied) and raises
+    `NoResumableInterruptError` if there is no pending interrupt
+    (`snapshot.next` empty) -- see that exception's own docstring for why
+    this check exists: confirmed live that LangGraph itself does not
+    raise on a resume with nothing to resume. **Known limitation,
+    recorded as an Open marker (owner Step 4.1), not fixed here**:
+    concurrent duplicate resumes on the same thread can both pass this
+    check before either one actually applies -- per-conversation turn
+    serialization is the `/chat` endpoint's own job, not this function's.
     """
+    snapshot = await _read_verified_state(graph, identity, conversation_id)
+    if not snapshot.next:
+        raise NoResumableInterruptError(
+            f"no pending interrupt to resume for this thread (next={snapshot.next!r})"
+        )
     config = _build_thread_config(identity, conversation_id)
-    async for chunk in graph.astream(Command(resume=resume_value), config):
+    async for chunk in graph.astream(
+        Command(resume=resume_value), config, stream_mode=_STREAM_MODE
+    ):
         yield chunk
 
 
@@ -143,11 +209,8 @@ async def read_state(
     conversation_id: uuid.UUID,
 ) -> StateSnapshot:
     """Reads the current state (`graph.aget_state`) for one thread --
-    `_assert_thread_prefix_matches()` re-checks the SNAPSHOT'S OWN config
+    `_read_verified_state()` re-checks the SNAPSHOT'S OWN config
     (something the graph/checkpointer handed back, not this function's own
     input) before returning it.
     """
-    config = _build_thread_config(identity, conversation_id)
-    snapshot = await graph.aget_state(config)
-    _assert_thread_prefix_matches(snapshot.config, identity)
-    return snapshot
+    return await _read_verified_state(graph, identity, conversation_id)

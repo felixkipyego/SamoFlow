@@ -58,6 +58,7 @@ from contextlib import aclosing, asynccontextmanager, contextmanager
 from pathlib import Path
 from urllib.parse import urlsplit
 
+import psycopg
 import pytest
 import sqlalchemy as sa
 from httpx import ASGITransport, AsyncClient
@@ -73,6 +74,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 # (the exact fragility app/all_models.py exists to remove -- see its own
 # and app/worker.py's header comments).
 from app import all_models, db, qdrant  # noqa: F401
+from app.agent import checkpointer
 from app.config import POSTGRES_SCHEME, Settings, get_settings
 from app.ingest import embedding
 from app.ingest.ip_safety import is_unsafe_destination_ip
@@ -396,6 +398,29 @@ def require_test_database() -> str:
     return url
 
 
+async def reset_checkpoint_env(monkeypatch) -> str:
+    # Duplication check after 3.2.b/c/d (2026-11-02), finding A.1: this
+    # "point DATABASE_URL at the real test-db, then drop the four
+    # checkpoint tables for a deterministic starting state" preamble
+    # existed as three separate inline copies inside test_checkpointer.py's
+    # own live tests, plus a fourth, reordered variant assembled inside
+    # test_agent_entrypoint.py's own _fresh_graph() helper. AsyncPostgres-
+    # Saver.setup() owns its own raw-SQL schema (checkpoints/
+    # checkpoint_blobs/checkpoint_writes/checkpoint_migrations) outside
+    # app/db.py's Base.metadata, so reset_test_database()'s own drop_all/
+    # create_all never touches these -- every live checkpointer-adjacent
+    # test needs this same reset, not that one.
+    url = require_test_database()
+    set_valid_env(monkeypatch, VALID_ENV, DATABASE_URL=url)
+    conninfo = checkpointer.checkpointer_conninfo()
+    async with await psycopg.AsyncConnection.connect(conninfo, autocommit=True) as conn:
+        await conn.execute(
+            "DROP TABLE IF EXISTS checkpoint_writes, checkpoint_blobs, "
+            "checkpoints, checkpoint_migrations CASCADE"
+        )
+    return conninfo
+
+
 def require_test_qdrant() -> tuple[str, str]:
     # Same shape as require_test_database() above, for the same reason (the
     # live authentication proof in test_qdrant_auth.py must never run
@@ -494,6 +519,26 @@ def close_the_shared_qdrant_read_client_once():
     if qdrant.get_qdrant_read_client.cache_info().currsize:
         asyncio.run(qdrant.get_qdrant_read_client().close())
     qdrant.get_qdrant_read_client.cache_clear()
+
+
+@pytest.fixture
+async def close_any_checkpointer_pool_left_open():
+    # Duplication check after 3.2.b/c/d (2026-11-02), finding A.2: existed
+    # as two separate, byte-identical fixtures -- test_checkpointer.py's
+    # and test_agent_entrypoint.py's own `_close_any_pool_left_open()`.
+    # checkpointer._checkpointer_pool is a plain module global (Task 3.2.b
+    # decision 1 -- deliberately not an @lru_cache singleton), so this
+    # needs the same close-once discipline this project's lru_cache
+    # singletons get from their own fixtures, just FUNCTION-scoped (the
+    # default, unlike close_the_shared_qdrant_read_client_once's own
+    # module scope immediately above) -- each test here opens its own
+    # pool against its own env, not one shared instance per module.
+    # Deliberately NOT `autouse=True`, matching that same fixture's own
+    # reasoning: opt in explicitly via `pytestmark = pytest.mark.
+    # usefixtures("close_any_checkpointer_pool_left_open")`.
+    yield
+    if checkpointer._checkpointer_pool is not None:
+        await checkpointer.close_checkpointer_pool()
 
 
 def _exception_chain(exc):

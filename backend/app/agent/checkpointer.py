@@ -28,9 +28,7 @@
 # source: AsyncConnectionPool holds no cached running loop), so only the
 # pool is a real singleton; the thin AsyncPostgresSaver wrapper around it
 # is cheap to rebuild per call.
-import asyncio
 import logging
-import sys
 from urllib.parse import urlsplit, urlunsplit
 
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
@@ -38,6 +36,7 @@ from psycopg import AsyncConnection
 from psycopg.rows import dict_row
 from psycopg_pool import AsyncConnectionPool
 
+from app.cli import run_cli
 from app.config import POSTGRES_SCHEME, SettingsError, get_settings
 
 logger = logging.getLogger(__name__)
@@ -161,8 +160,12 @@ async def run_checkpointer_setup() -> None:
     "migrate" case, not from the long-running api/worker process. Genuinely
     idempotent, confirmed live at Task 3.2.a by reading
     AsyncPostgresSaver.setup()'s own migration-version bookkeeping and its
-    11 real migrations directly (every one of them individually written
-    `IF NOT EXISTS`/version-tracked) -- safe to run on every deploy.
+    10 real migrations directly (every one of them individually written
+    `IF NOT EXISTS`/version-tracked) -- safe to run on every deploy. (A
+    prior draft of this comment said 11, from an approximate grep over
+    mixed single-line/triple-quoted strings in MIGRATIONS -- corrected to
+    the real, live-queried count at the duplication check after
+    3.2.b/c/d, finding A.5; see PROJECT_SPEC.md's own matching correction.)
     """
     async with await AsyncConnection.connect(
         checkpointer_conninfo(), **CHECKPOINTER_CONNECTION_KWARGS
@@ -172,20 +175,15 @@ async def run_checkpointer_setup() -> None:
 
 
 def main() -> None:
-    """`python -m app.agent.checkpointer`. Mirrors app/qdrant.py's own
-    main(): a clean one-line message on a configuration problem, no
-    traceback -- SettingsError's own message is already proven free of
-    secrets (see get_settings()'s own docstring), so printing it directly
-    is safe.
+    """`python -m app.agent.checkpointer`. A clean one-line message on a
+    configuration problem, no traceback -- SettingsError's own message is
+    already proven free of secrets (see get_settings()'s own docstring),
+    so printing it directly is safe. Duplication check after 3.2.b/c/d,
+    finding A.3: this shape was byte-for-byte identical to app/qdrant.py's
+    own main() except for the coroutine and exception tuple -- both now
+    share run_cli() (app/cli.py).
     """
-    logging.basicConfig(
-        level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s"
-    )
-    try:
-        asyncio.run(run_checkpointer_setup())
-    except SettingsError as exc:
-        print(str(exc), file=sys.stderr)
-        sys.exit(1)
+    run_cli(run_checkpointer_setup, SettingsError)
 
 
 if __name__ == "__main__":

@@ -48,6 +48,7 @@ from collections.abc import Awaitable, Callable
 from pathlib import Path
 
 from app import all_models  # noqa: F401
+from app.cli import configure_cli_logging
 from app.config import SettingsError, get_settings
 from app.db import _session_factory
 from app.ingest.job_handlers import (
@@ -414,9 +415,12 @@ async def run(stop: asyncio.Event | None = None, max_iterations: int | None = No
 
 
 def main() -> None:
-    logging.basicConfig(
-        level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s"
-    )
+    # Duplication check after 3.2.b/c/d, finding A.3: only the logging
+    # setup was genuinely identical to app/qdrant.py's/app/agent/
+    # checkpointer.py's own main() -- this function's signal-handling/
+    # custom-event-loop control flow stays its own, not a candidate for
+    # app/cli.py's own run_cli() helper.
+    configure_cli_logging()
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     stop = asyncio.Event()

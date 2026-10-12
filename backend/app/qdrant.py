@@ -33,10 +33,8 @@
 # is filtered here, narrowly (exact message, scoped to this one
 # construction via warnings.catch_warnings(), never a global filter) rather
 # than left to print on every client construction.
-import asyncio
 import logging
 import re
-import sys
 import uuid
 import warnings
 from collections.abc import Mapping
@@ -57,6 +55,7 @@ from qdrant_client.http.models import (
     VectorParams,
 )
 
+from app.cli import run_cli
 from app.config import SettingsError, get_settings
 
 logger = logging.getLogger(__name__)
@@ -364,20 +363,16 @@ async def _ensure_collection_and_close() -> None:
 
 
 def main() -> None:
-    """`python -m app.qdrant`. Mirrors app/worker.py's own main(): a clean
-    one-line message on a configuration or schema problem, no traceback --
-    SettingsError and CollectionSchemaMismatch's own messages are both
-    already proven free of secrets (see get_settings()'s and this module's
-    own docstrings), so printing them directly is safe.
+    """`python -m app.qdrant`. A clean one-line message on a configuration
+    or schema problem, no traceback -- SettingsError and
+    CollectionSchemaMismatch's own messages are both already proven free
+    of secrets (see get_settings()'s and this module's own docstrings), so
+    printing them directly is safe. Duplication check after 3.2.b/c/d,
+    finding A.3: this shape was byte-for-byte identical to app/agent/
+    checkpointer.py's own main() except for the coroutine and exception
+    tuple -- both now share run_cli() (app/cli.py).
     """
-    logging.basicConfig(
-        level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s"
-    )
-    try:
-        asyncio.run(_ensure_collection_and_close())
-    except (SettingsError, CollectionSchemaMismatch) as exc:
-        print(str(exc), file=sys.stderr)
-        sys.exit(1)
+    run_cli(_ensure_collection_and_close, SettingsError, CollectionSchemaMismatch)
 
 
 if __name__ == "__main__":

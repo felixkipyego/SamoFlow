@@ -12,6 +12,7 @@
 # prove thread scoping (tests a-d) without needing every turn to run to
 # completion, and enough to give resume_turn() (test e) something real to
 # resume.
+import inspect
 import operator
 import uuid
 from typing import Annotated, TypedDict
@@ -23,6 +24,7 @@ from langgraph.types import interrupt
 
 from app.agent import checkpointer
 from app.agent.entrypoint import (
+    NoResumableInterruptError,
     _assert_thread_prefix_matches,
     _build_thread_config,
     read_state,
@@ -30,7 +32,9 @@ from app.agent.entrypoint import (
     run_turn,
 )
 from app.auth.dependencies import VerifiedIdentity
-from tests.test_checkpointer import _drop_checkpoint_tables, _set_real_database_env
+from tests.conftest import reset_checkpoint_env
+
+pytestmark = pytest.mark.usefixtures("close_any_checkpointer_pool_left_open")
 
 _ORG = "https://tenant.example"
 
@@ -53,21 +57,8 @@ def _build_test_graph(cp):
     return builder.compile(checkpointer=cp)
 
 
-@pytest.fixture(autouse=True)
-async def _close_any_pool_left_open():
-    # Duplicated from test_checkpointer.py's own identical fixture -- a
-    # 2nd occurrence now, flagged here (not fixed mid-task) as a
-    # duplication-check candidate, matching this project's own established
-    # "flag, don't fix mid-task" discipline for a 2nd-3rd occurrence.
-    yield
-    if checkpointer._checkpointer_pool is not None:
-        await checkpointer.close_checkpointer_pool()
-
-
 async def _fresh_graph(monkeypatch):
-    _set_real_database_env(monkeypatch)
-    conninfo = checkpointer.checkpointer_conninfo()
-    await _drop_checkpoint_tables(conninfo)
+    await reset_checkpoint_env(monkeypatch)
     await checkpointer.open_checkpointer_pool()
     cp = checkpointer.get_checkpointer()
     await cp.setup()
@@ -177,6 +168,10 @@ async def test_input_keys_named_thread_id_or_configurable_have_no_effect(monkeyp
 
 
 async def test_resume_lands_on_the_correct_thread(monkeypatch):
+    # Also re-proves, incidentally, that resume_turn()'s own new pending-
+    # interrupt pre-check (duplication check after 3.2.b/c/d, finding
+    # C.2) does not falsely reject a real, genuinely-pending interrupt --
+    # this test already exercises exactly that case.
     graph = await _fresh_graph(monkeypatch)
     identity = _identity()
     conversation_id = uuid.uuid4()
@@ -192,6 +187,33 @@ async def test_resume_lands_on_the_correct_thread(monkeypatch):
 
     other_snapshot = await read_state(graph, identity, other_conversation_id)
     assert other_snapshot.values.get("resumed", []) == []
+
+
+async def test_resume_on_a_never_started_thread_raises(monkeypatch):
+    # Confirmed live at the duplication check after 3.2.b/c/d (finding
+    # C.2): without this pre-check, LangGraph itself does not raise here
+    # -- it silently restarts the graph from scratch and re-hits the same
+    # interrupt, discarding the resume value with no error at all.
+    graph = await _fresh_graph(monkeypatch)
+    identity = _identity()
+    conversation_id = uuid.uuid4()
+
+    with pytest.raises(NoResumableInterruptError):
+        await _collect(resume_turn(graph, identity, conversation_id, "early answer"))
+
+
+async def test_resume_on_an_already_completed_thread_raises(monkeypatch):
+    # Confirmed live: without this pre-check, LangGraph itself silently
+    # no-ops here -- zero chunks, zero state change, no error.
+    graph = await _fresh_graph(monkeypatch)
+    identity = _identity()
+    conversation_id = uuid.uuid4()
+
+    await _collect(run_turn(graph, identity, conversation_id, {"messages": ["start"]}))
+    await _collect(resume_turn(graph, identity, conversation_id, "first answer"))
+
+    with pytest.raises(NoResumableInterruptError):
+        await _collect(resume_turn(graph, identity, conversation_id, "second answer"))
 
 
 # --- (f) delimiter-injection rejection --------------------------------------
@@ -248,3 +270,18 @@ async def test_a_graph_invoked_with_no_thread_config_raises_the_real_checkpointe
     with pytest.raises(ValueError, match="Checkpointer requires"):
         async for _ in graph.astream({"messages": ["hi"]}):
             pass
+
+
+# --- stream_mode is pinned, never caller-controllable (duplication check
+# after 3.2.b/c/d, finding C.1) -----------------------------------------------
+
+
+def test_run_turn_and_resume_turn_do_not_expose_stream_mode():
+    # Pinned to an explicit, hardcoded stream_mode (app/agent/entrypoint.py's
+    # own _STREAM_MODE) rather than left as a caller-controllable
+    # parameter: exposing it would require adding a prefix check on
+    # streamed chunks too (today, only read_state()'s own aget_state()-
+    # returned config is checked) -- not built, so the parameter must not
+    # exist either.
+    assert "stream_mode" not in inspect.signature(run_turn).parameters
+    assert "stream_mode" not in inspect.signature(resume_turn).parameters
