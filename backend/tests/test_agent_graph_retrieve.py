@@ -21,13 +21,16 @@
 #
 # Real content, real embed_and_upsert() writes, real retrieve() call, a
 # real compiled graph, a real checkpointer against test-db -- only
-# embed_dense()'s own paid OpenAI call is stubbed (patch_embed_dense(),
-# this project's own established convention); embed_sparse()/
-# embed_sparse_query() both make real fastembed calls. Seeded into the
-# REAL app.qdrant.COLLECTION_NAME, not a disposable per-test collection
-# name: _retrieve_node calls retrieve(tenant_id, query) with no
-# collection_name override (matching production), so there is no way to
-# point it at a throwaway collection.
+# embed_dense()'s own paid OpenAI call is stubbed (originally patch_
+# embed_dense(), this project's own established convention -- changed at
+# Task 3.4.d to a LOCAL, non-zero-constant variant, see _patch_embed_
+# dense_constant_nonzero()'s own header comment for why the shared
+# all-zero helper stopped being safe to use here once the gate became
+# real); embed_sparse()/embed_sparse_query() both make real fastembed
+# calls. Seeded into the REAL app.qdrant.COLLECTION_NAME, not a
+# disposable per-test collection name: _retrieve_node calls
+# retrieve(tenant_id, query) with no collection_name override (matching
+# production), so there is no way to point it at a throwaway collection.
 #
 # Task 3.3.d: unlike test_job_handlers.py/test_upload_e2e.py (which leave
 # their own seeded points in COLLECTION_NAME permanently), this file's own
@@ -57,12 +60,12 @@ from app.agent import graph as graph_module
 from app.agent.entrypoint import read_state, run_turn
 from app.agent.graph import build_graph
 from app.auth.dependencies import VerifiedIdentity
+from app.ingest import embedding
 from app.ingest.extract_html import extract_html
 from app.ingest.qdrant_writer import embed_and_upsert
 from tests.conftest import (
     FakeAnswerToolChatModel,
     build_fake_answer_arg_chunks,
-    patch_embed_dense,
     require_test_qdrant,
     require_test_qdrant_read_only_key,
     reset_checkpoint_env,
@@ -86,6 +89,48 @@ def _page(title: str, body: str) -> str:
 
 async def _collect(aiter):
     return [x async for x in aiter]
+
+
+class _ConstantNonZeroEmbeddingItem:
+    def __init__(self, vector: list[float]) -> None:
+        self.embedding = vector
+
+
+class _ConstantNonZeroEmbeddingResponse:
+    def __init__(self, vectors: list[list[float]]) -> None:
+        self.data = [_ConstantNonZeroEmbeddingItem(v) for v in vectors]
+
+
+class _ConstantNonZeroEmbeddingsResource:
+    async def create(self, *, model, input):  # noqa: A002 -- matches the real SDK's own param name
+        vector = [1.0] + [0.0] * (qdrant.DENSE_VECTOR_SIZE - 1)
+        return _ConstantNonZeroEmbeddingResponse([vector for _ in input])
+
+
+class _ConstantNonZeroEmbeddingClient:
+    def __init__(self) -> None:
+        self.embeddings = _ConstantNonZeroEmbeddingsResource()
+
+
+def _patch_embed_dense_constant_nonzero(monkeypatch) -> None:
+    # Task 3.4.d [SECURITY] follow-up: `patch_embed_dense()` (tests/
+    # conftest.py), this file's own original choice, returns an ALL-ZERO
+    # vector -- fine when the gate was a pass-through stub, but Task
+    # 3.4.d's real gate reads `best_dense_score` (a real Qdrant cosine
+    # score), and an all-zero query against all-zero points scores
+    # exactly 0.0, BELOW the gate's own default threshold -- confirmed
+    # live, this broke both of this file's own tests (routed to the
+    # `no_answer_fallback` stub instead of reaching the real answer node,
+    # which is NOT what either test is trying to prove). NOT fixed by
+    # changing the shared `patch_embed_dense()` helper itself (other
+    # files rely on its exact all-zero/degenerate behavior) -- a local,
+    # scoped replacement instead: a FIXED, non-zero vector, identical for
+    # every input, same as before (dense is still uninformative/constant,
+    # so the real sparse/BM25 channel is still what differentiates
+    # tenants, unchanged from this file's own original intent) but with a
+    # real, defined, comfortably-above-threshold cosine score (1.0,
+    # identical vectors) instead of an undefined-in-spirit 0.0.
+    monkeypatch.setattr(embedding, "_get_client", lambda: _ConstantNonZeroEmbeddingClient())
 
 
 def _patch_fake_answer_model(monkeypatch) -> None:
@@ -181,7 +226,7 @@ async def _seed_two_tenants_with_non_overlapping_content(
 async def test_run_turn_as_tenant_a_with_a_query_matching_tenant_bs_topic_stays_scoped_to_tenant_a(
     monkeypatch,
 ):
-    patch_embed_dense(monkeypatch)
+    _patch_embed_dense_constant_nonzero(monkeypatch)
     _patch_fake_answer_model(monkeypatch)
     url, key = require_test_qdrant()
     client = qdrant.build_qdrant_client(url, key)
@@ -226,7 +271,7 @@ async def test_run_turn_as_tenant_a_with_a_query_matching_tenant_bs_topic_stays_
 async def test_run_turn_as_tenant_b_with_a_query_matching_tenant_as_topic_stays_scoped_to_tenant_b(
     monkeypatch,
 ):
-    patch_embed_dense(monkeypatch)
+    _patch_embed_dense_constant_nonzero(monkeypatch)
     _patch_fake_answer_model(monkeypatch)
     url, key = require_test_qdrant()
     client = qdrant.build_qdrant_client(url, key)

@@ -35,6 +35,7 @@ from tests.conftest import live_qdrant_collection, set_real_qdrant_env
 from tests.test_qdrant_isolation import (
     QUERY_DENSE,
     QUERY_SPARSE,
+    _mixed,
     _near_miss,
     _seed_two_tenants,
 )
@@ -125,7 +126,7 @@ async def test_dense_only_leak_attempt_is_blocked_through_retrieve(monkeypatch):
             wait=True,
         )
 
-        results = await retrieve(tenant_a, _QUERY_TEXT, 1000, collection_name=name)
+        results = (await retrieve(tenant_a, _QUERY_TEXT, 1000, collection_name=name)).points
 
         assert _result_ids(results) == {str(a_point)}
         assert all(p.payload.get("client_id") == str(tenant_a) for p in results)
@@ -162,7 +163,7 @@ async def test_sparse_only_leak_attempt_is_blocked_through_retrieve(monkeypatch)
             wait=True,
         )
 
-        results = await retrieve(tenant_a, _QUERY_TEXT, 1000, collection_name=name)
+        results = (await retrieve(tenant_a, _QUERY_TEXT, 1000, collection_name=name)).points
 
         assert _result_ids(results) == {str(a_point)}
         assert all(p.payload.get("client_id") == str(tenant_a) for p in results)
@@ -185,7 +186,7 @@ async def test_hybrid_fusion_leak_attempt_is_blocked_through_retrieve(monkeypatc
     async with live_qdrant_collection("retrieve_isolation_hybrid") as (client, name):
         ids = await _seed_two_tenants(client, name)
 
-        results = await retrieve(ids.tenant_a, _QUERY_TEXT, 1000, collection_name=name)
+        results = (await retrieve(ids.tenant_a, _QUERY_TEXT, 1000, collection_name=name)).points
 
         assert _result_ids(results) == ids.a_ids
         assert all(p.payload.get("client_id") == str(ids.tenant_a) for p in results)
@@ -208,7 +209,7 @@ async def test_retrieve_for_the_other_tenant_also_returns_only_their_own_results
     async with live_qdrant_collection("retrieve_isolation_hybrid_b") as (client, name):
         ids = await _seed_two_tenants(client, name)
 
-        results = await retrieve(ids.tenant_b, _QUERY_TEXT, 1000, collection_name=name)
+        results = (await retrieve(ids.tenant_b, _QUERY_TEXT, 1000, collection_name=name)).points
 
         assert _result_ids(results) == ids.b_ids
         assert all(p.payload.get("client_id") == str(ids.tenant_b) for p in results)
@@ -225,7 +226,7 @@ async def test_retrieve_a_tenant_with_no_points_gets_an_empty_result(monkeypatch
     async with live_qdrant_collection("retrieve_isolation_empty") as (client, name):
         ids = await _seed_two_tenants(client, name)
 
-        results = await retrieve(ids.tenant_c, _QUERY_TEXT, 1000, collection_name=name)
+        results = (await retrieve(ids.tenant_c, _QUERY_TEXT, 1000, collection_name=name)).points
 
         assert results == []
 
@@ -240,7 +241,10 @@ async def test_retrieve_a_near_miss_client_id_matches_nothing(monkeypatch):
     async with live_qdrant_collection("retrieve_isolation_near_miss") as (client, name):
         ids = await _seed_two_tenants(client, name)
 
-        results = await retrieve(_near_miss(ids.tenant_a), _QUERY_TEXT, 1000, collection_name=name)
+        retrieval = await retrieve(
+            _near_miss(ids.tenant_a), _QUERY_TEXT, 1000, collection_name=name
+        )
+        results = retrieval.points
 
         assert results == []
 
@@ -277,6 +281,91 @@ async def test_retrieve_never_returns_a_hidden_points_even_for_its_own_tenant(mo
             wait=True,
         )
 
-        results = await retrieve(tenant_a, _QUERY_TEXT, 1000, collection_name=name)
+        results = (await retrieve(tenant_a, _QUERY_TEXT, 1000, collection_name=name)).points
 
         assert _result_ids(results) == {str(visible_point)}
+
+
+# --- Task 3.4.d [SECURITY]: best_dense_score isolation ----------------------
+# A tenant's OWN gate score (retrieve()'s new RetrievalResult.
+# best_dense_score) must never be influenced by another tenant's content, or
+# by this tenant's own soft-hidden points -- otherwise the fallback-vs-answer
+# outcome becomes a real side channel: a visitor could learn "another tenant
+# has content closely matching this topic" purely from whether THEIR OWN turn
+# was gated or answered, without ever seeing that other tenant's data
+# directly. `_mixed({0: 1.0, 1: 1.0})` gives a known, exact, non-trivial
+# cosine against QUERY_DENSE (a pure one-hot at index 0): dot product = 1.0,
+# norm = sqrt(2), cosine = 1/sqrt(2) -- a real, non-degenerate "weak but
+# genuine" match, never coincidentally equal to a perfect match's 1.0.
+
+_KNOWN_WEAK_COSINE = 1.0 / (2.0**0.5)
+
+
+async def test_best_dense_score_unaffected_by_another_tenants_perfect_dense_match(
+    monkeypatch,
+):
+    _pin_query_embeddings(monkeypatch)
+    set_real_qdrant_env(monkeypatch)
+    async with live_qdrant_collection("retrieve_isolation_gate_cross_tenant") as (client, name):
+        await qdrant.ensure_collection(client, name)
+        tenant_a, tenant_b = uuid.uuid4(), uuid.uuid4()
+        a_point, b_point = uuid.uuid4(), uuid.uuid4()
+        await client.upsert(
+            collection_name=name,
+            points=[
+                PointStruct(
+                    id=str(a_point),
+                    vector={"dense": _mixed({0: 1.0, 1: 1.0})},
+                    payload={"client_id": str(tenant_a)},
+                ),
+                PointStruct(
+                    id=str(b_point),
+                    # Tenant B's own PERFECT dense match for the pinned
+                    # query -- if the dense-only request's own filter were
+                    # ever dropped, THIS point's 1.0 score would leak into
+                    # tenant A's own gate decision.
+                    vector={"dense": QUERY_DENSE},
+                    payload={"client_id": str(tenant_b)},
+                ),
+            ],
+            wait=True,
+        )
+
+        result = await retrieve(tenant_a, _QUERY_TEXT, 1000, collection_name=name)
+
+        assert result.best_dense_score == pytest.approx(_KNOWN_WEAK_COSINE)
+
+
+async def test_best_dense_score_unaffected_by_a_hidden_point_for_the_same_tenant(
+    monkeypatch,
+):
+    _pin_query_embeddings(monkeypatch)
+    set_real_qdrant_env(monkeypatch)
+    async with live_qdrant_collection("retrieve_isolation_gate_hidden") as (client, name):
+        await qdrant.ensure_collection(client, name)
+        tenant_a = uuid.uuid4()
+        visible_point, hidden_point = uuid.uuid4(), uuid.uuid4()
+        await client.upsert(
+            collection_name=name,
+            points=[
+                PointStruct(
+                    id=str(visible_point),
+                    vector={"dense": _mixed({0: 1.0, 1: 1.0})},
+                    payload={"client_id": str(tenant_a)},
+                ),
+                PointStruct(
+                    id=str(hidden_point),
+                    # A soft-hidden point belonging to the SAME tenant,
+                    # with a PERFECT dense match -- the gate score must
+                    # not be raised by content the HIDDEN_FIELD exclusion
+                    # has otherwise taken out of circulation.
+                    vector={"dense": QUERY_DENSE},
+                    payload={"client_id": str(tenant_a), HIDDEN_FIELD: True},
+                ),
+            ],
+            wait=True,
+        )
+
+        result = await retrieve(tenant_a, _QUERY_TEXT, 1000, collection_name=name)
+
+        assert result.best_dense_score == pytest.approx(_KNOWN_WEAK_COSINE)

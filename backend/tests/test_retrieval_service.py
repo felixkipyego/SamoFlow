@@ -84,13 +84,13 @@ async def test_retrieve_returns_only_the_requesting_tenants_own_ranked_results(
 
         tenant_a, _tenant_b = await _seed_two_tenants_with_real_content(client, name)
 
-        results = await retrieve(tenant_a, "zebra giraffe safari", 8, collection_name=name)
+        result = await retrieve(tenant_a, "zebra giraffe safari", 8, collection_name=name)
 
-        assert len(results) >= 1
-        assert all(point.payload["client_id"] == str(tenant_a) for point in results)
-        assert any("zebra" in point.payload["text"] for point in results)
+        assert len(result.points) >= 1
+        assert all(point.payload["client_id"] == str(tenant_a) for point in result.points)
+        assert any("zebra" in point.payload["text"] for point in result.points)
         # Ranked: scores non-increasing down the real, server-fused result.
-        scores = [point.score for point in results]
+        scores = [point.score for point in result.points]
         assert scores == sorted(scores, reverse=True)
 
 
@@ -104,11 +104,11 @@ async def test_retrieve_scoped_to_the_other_tenant_returns_only_that_tenants_own
 
         _tenant_a, tenant_b = await _seed_two_tenants_with_real_content(client, name)
 
-        results = await retrieve(tenant_b, "mortgage interest rate", 8, collection_name=name)
+        result = await retrieve(tenant_b, "mortgage interest rate", 8, collection_name=name)
 
-        assert len(results) >= 1
-        assert all(point.payload["client_id"] == str(tenant_b) for point in results)
-        assert any("mortgage" in point.payload["text"] for point in results)
+        assert len(result.points) >= 1
+        assert all(point.payload["client_id"] == str(tenant_b) for point in result.points)
+        assert any("mortgage" in point.payload["text"] for point in result.points)
 
 
 async def test_retrieve_a_tenant_with_no_points_gets_an_empty_result(
@@ -135,11 +135,12 @@ async def test_retrieve_a_tenant_with_no_points_gets_an_empty_result(
             embedding_version="v1",
         )
 
-        results = await retrieve(
+        result = await retrieve(
             tenant_with_nothing, "zebra giraffe safari", 8, collection_name=name
         )
 
-        assert results == []
+        assert result.points == []
+        assert result.best_dense_score is None
 
 
 async def test_retrieve_with_reranker_disabled_behaves_unchanged(monkeypatch):
@@ -167,10 +168,10 @@ async def test_retrieve_with_reranker_disabled_behaves_unchanged(monkeypatch):
             embedding_version="v1",
         )
 
-        results = await retrieve(tenant_a, "zebra giraffe safari", 8, collection_name=name)
+        result = await retrieve(tenant_a, "zebra giraffe safari", 8, collection_name=name)
 
-        assert len(results) >= 1
-        assert all(point.payload["client_id"] == str(tenant_a) for point in results)
+        assert len(result.points) >= 1
+        assert all(point.payload["client_id"] == str(tenant_a) for point in result.points)
 
 
 async def test_retrieve_with_reranker_enabled_raises_not_implemented(monkeypatch):
@@ -310,11 +311,11 @@ async def test_chunk_from_scored_point_converts_all_four_real_source_types(monke
             embedding_version="v1",
         )
 
-        results = await retrieve(tenant_id, "zebra", 10, collection_name=name)
-        assert len(results) >= 4
+        result = await retrieve(tenant_id, "zebra", 10, collection_name=name)
+        assert len(result.points) >= 4
 
         by_source_type = {}
-        for point in results:
+        for point in result.points:
             chunk = chunk_from_scored_point(point)  # must not raise, for any of the four
             by_source_type[point.payload["source_type"]] = chunk
 

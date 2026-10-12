@@ -3148,7 +3148,7 @@ Researched first (the prior Step 3.4 research task, reported and accepted before
 | 3.4.a [SECURITY] | Dependencies (`langchain`/`langchain-openai`/`langchain-anthropic`); `Settings` fields; the one model-construction module with explicit keys and `.with_fallbacks()`; the construction-confinement + explicit-`api_key` guard; live mechanism proofs with fakes (structured output through the fallback chain; `stream_mode="messages"` token emission through a real graph node) | Done |
 | 3.4.b [SECURITY] | The answer node: resolved the structured-output-vs-token-streaming tension (`.bind_tools()` + incremental `tool_call_chunks` parsing, not `.with_structured_output()`); §8's data/instruction delimiting with delimiter-breakout neutralisation; `can_answer=false` → fallback stub; mid-stream-failure handling; carry-over fixes to 3.4.a's own `chat_model.py` | Done |
 | 3.4.c [SECURITY] | Citations and output safety: citations built only from the overlap of `used_chunk_ids` and the chunks actually retrieved; web pages only; no upload filenames/database table names leaked; server-side markdown image/link neutralisation | Done |
-| 3.4.d | Gate: light research first (RRF scores are rank-based, not relevance-calibrated — evaluate a calibrated signal, e.g. top dense cosine similarity or a Qdrant `score_threshold` floor, confirm live what 1.19.1 supports) and report before building; then the mechanism, a platform-default `Settings` field, provisional threshold + ASSUMPTION, tuned in 3.7 | Not started |
+| 3.4.d [SECURITY] | Gate: light research first (RRF scores are rank-based, not relevance-calibrated — evaluate a calibrated signal, e.g. top dense cosine similarity or a Qdrant `score_threshold` floor, confirm live what 1.19.1 supports) and report before building; then the mechanism, a platform-default `Settings` field, provisional threshold + ASSUMPTION, tuned in 3.7 | Done |
 | 3.4.e | Fallback text template (dashboard support details) + the fixed dependency-failure reply | Not started |
 | 3.4.f | Rule 2: greeting/thanks deterministic phrase list (short messages only); unsafe/abusive — research first (OpenAI's moderation endpoint: latency measured live, cost, fit with §6.2's "no LLM hop"), report before building | Not started |
 | 3.4.g | Close-out: acceptance against §6.3/§16's injection lines, closure summary; opt-in, NOT-in-CI, FULL-TURN (embedding + Qdrant + chat model) time-to-first-visible-text measurement against real services — N real runs (N stated when run), real p50 AND p95 against §17's own 1.5s/3s targets, prompt input size recorded per run; if p50 misses, name the candidate levers (fewer/shorter retrieved chunks, a different primary model, trimming the `can_answer`/`used_chunk_ids` preamble) rather than picking one speculatively | Not started |
@@ -3973,6 +3973,278 @@ one-off research script, not a regression test).
    past Step 3.7 without the golden set actually re-validating it, which
    is exactly why it is recorded here as an ASSUMPTION, not a decision.
 
+### Step 3.4.d [SECURITY]: the gate, built (2026-11-13)
+
+Built exactly to the research task's own recommendations above, with one
+refinement made by direct instruction and confirmed against the
+research's own data before building: the signal is the BEST dense cosine
+score ANYWHERE in the tenant's corpus for a query (a dedicated, non-
+fused dense-only query, `limit=1`), never the fused hybrid top hit's own
+dense score — the research task's own corpus/query set never captured
+this distinction (it only recorded the fused winner's own dense score),
+so this was re-run and directly confirmed, not assumed from the
+refinement's own stated reasoning alone.
+
+**Confirmed, live, re-running the research experiment with the fused-
+winner-vs-true-best distinction added**: the fused top hit was NOT the
+corpus's own best dense match in 2/10 "answerable" queries, 6/10
+"related but unanswerable" queries, and 1/10 "nonsense" queries — the
+divergence rate is HIGHEST exactly in the ambiguous "related but
+unanswerable" zone, where a wrong gate decision matters most. Using the
+TRUE best dense score instead of the fused winner's own score WIDENED
+the empirical separation gap found at the research stage: Group C
+(nonsense) max moved from 0.1630 to still 0.1630 (one query's own best
+score rose slightly, 0.1247→0.1582, still comfortably low), but Group B
+(related/unanswerable)'s own MINIMUM rose from 0.1614 (a near-tie with
+Group C's own max) to 0.3013 — the gap widened from a razor-thin
+[0.163, 0.267] to a comfortable [0.163, 0.301], strictly safer in both
+directions (never lets more nonsense through, catches strictly more
+genuinely-relevant content that a sparse-coincidence might otherwise
+have suppressed). The provisional default (0.20) was re-confirmed to
+still sit safely inside this now-WIDER gap, not merely inside the
+original narrower one.
+
+**1. Signal, confirmed, not merely argued**: `best_dense_score` —
+proven, with real numbers above, to strictly dominate the fused top
+hit's own dense score as a gate signal: it is never worse (mathematically
+guaranteed, since the whole-corpus best can only be ≥ any single point's
+own score, including the fused winner's) and is sometimes meaningfully
+better, specifically in the case the research task's own adversarial
+finding named (a sparse-keyword coincidence winning fusion while a
+genuinely relevant chunk scores higher on dense alone, ranking second
+or worse in the fused order and therefore invisible to a fused-top-hit-
+only signal).
+
+**2. Latency: ONE round trip, confirmed live, not assumed.** `client.
+query_batch_points()` (qdrant-client 1.19.1, confirmed to exist on the
+installed `AsyncQdrantClient` and proven live, before writing production
+code, to return two independent `QueryResponse`s from one HTTP exchange)
+carries BOTH the existing fused hybrid `QueryRequest` and a new dense-
+only (`limit=1`) `QueryRequest` in a single call — `asyncio.gather()`
+over two separate `query_points()` calls was considered and rejected:
+concurrent, but still two round trips, where `query_batch_points()` is
+genuinely one. The dense-only request reuses the SAME already-computed
+`dense_vector` — no second embedding call, so the only added cost is one
+extra (small, same-network, no-payload) Qdrant-side query inside the
+one round trip already being paid for.
+
+**Real bug found and fixed while building this, not assumed correct**:
+a bare `QueryRequest` built directly (required for `query_batch_points()`)
+does NOT inherit `query_points()`'s own Python-level `with_payload=True`
+default — confirmed live the hard way: every point came back with
+`payload=None` before this was caught (`QueryRequest.with_payload`'s own
+installed-library default is `None`, its own docstring reading "Default
+is false"). Fixed: `with_payload=True` set explicitly on the hybrid
+request (the dense-only request doesn't need it — only `.score` is read
+from it, saving a little payload bandwidth on that one).
+
+**3. Isolation [SECURITY], proven live, not assumed.** The new dense-only
+request lives inside `retrieve()` itself (`app/retrieval/service.py`,
+already the one file the read-path guard allows to hold a Qdrant client
+and call a read method), uses the same `get_qdrant_read_client()`, and
+shares the IDENTICAL `query_filter` (`_retrieval_filter(client_id)`,
+computed once, passed to both requests — never a second, re-derived
+filter). Two new isolation tests added to `test_retrieval_isolation.py`
+(reusing `_mixed({0: 1.0, 1: 1.0})` for a known, exact, non-perfect
+cosine, `1/√2 ≈ 0.70711`, against the file's own existing `QUERY_DENSE`
+one-hot convention): `test_best_dense_score_unaffected_by_another_
+tenants_perfect_dense_match` (tenant B holds a PERFECT dense match for
+the pinned query; tenant A's own `best_dense_score` must stay at its own
+weaker, known value, not leak tenant B's 1.0) and `test_best_dense_
+score_unaffected_by_a_hidden_point_for_the_same_tenant` (a soft-hidden
+point for the SAME tenant, also a perfect match, must not raise that
+tenant's own score either). **Both proven non-vacuous**: the new dense-
+only request's own `filter=query_filter` was temporarily removed,
+confirming both new tests failed with the exact leaked value (1.0
+instead of the expected 0.70711), then restored, confirmed byte-
+identical via `diff` before re-running clean.
+
+**4. Shape: `RetrievalResult` (NamedTuple), flagged per rule 2.**
+`retrieve()`'s own return type changes from a bare `list[ScoredPoint]` to
+`RetrievalResult(points, best_dense_score)` — `app/retrieval/service.py`
+(Task 3.1.c) is a completed file, touched here deliberately, flagged
+plainly, not silently. **`RetrievedChunk` (Task 3.3.a) is deliberately
+NOT touched** — `best_dense_score` is a single, QUERY-LEVEL value (the
+best score anywhere in the tenant's corpus), not a per-chunk value;
+putting it on `RetrievedChunk` would be semantically wrong (duplicated
+identically onto every chunk, or misleadingly implying it is that
+chunk's own score) — a `RetrievedChunk`-level field was one of the two
+options the prompt itself floated, not chosen, for exactly this reason.
+`AgentState` gains `best_dense_score: float | None` (plain, OVERWRITE
+semantics, matching every other per-turn field — a stale score from an
+earlier turn must never linger).
+
+**5. Gate node, built**: `_gate_node` (`app/agent/graph.py`) replaces the
+`TODO(3.4.d)` pass-through stub. Zero retrieved chunks, or `best_dense_
+score` below `Settings.gate_relevance_threshold` (new field, default
+0.20, `ge=0.0, le=1.0`) → the SAME short-circuit dict shape `_answer_
+node`'s own `can_answer=False` branch already returns (`cited_chunk_
+labels=[]`, `citations=[]` — never left stale). Otherwise → `{"can_
+answer": True}`, a ROUTING signal only (read by the new `_route_after_
+gate()` in the same turn; the real answer node unconditionally overwrites
+`can_answer` with its own genuine verdict moments later) — returning `{}`
+here instead would have been a real bug, found and fixed during this
+task's own build (not shipped): an earlier turn's stale `can_answer`
+value, true or false, would otherwise leak into THIS turn's own routing
+decision. A new conditional edge, `build_graph()`'s own `add_edge("gate",
+"answer")` replaced with `add_conditional_edges("gate", _route_after_
+gate, _AFTER_GATE_PATH_MAP)` (`{"answered": "answer", "no_answer_
+fallback": "no_answer_fallback"}` — a SEPARATE function/map from `_route_
+after_answer`'s own, deliberately: the two call sites route the "true"
+path to DIFFERENT targets, reusing one function under two names would be
+more confusing, not less).
+
+**6. Logging**: one `logger.info()` call per gate decision — `passed`,
+`best_dense_score`, `threshold`, `chunk_count` — deliberately NEVER the
+query text or chunk text (a visitor message/retrieved content may carry
+personal data), proven by a dedicated test asserting a distinctive chunk
+sentence never appears in the captured log message.
+
+**This task's own adversarial pass, per CLAUDE.md's new standing rule
+(added at the prior task), before reporting**: sabotaged the gate TWICE,
+confirmed real failures, then restored byte-identical both times — (1)
+the dense-only request's own filter dropped (see point 3 above: both new
+isolation tests failed with the exact leaked score, 1.0 instead of
+0.70711); (2) the gate's own threshold comparison replaced with `passed =
+True` unconditionally — confirmed this made BOTH `test_gate_below_
+threshold_routes_to_fallback_shape` (pure) and `test_below_threshold_
+reaches_fallback_with_zero_model_calls`/`test_zero_chunks_routes_to_
+fallback_through_the_real_graph` (live, through the real graph) fail with
+the "zero model calls" spy's own `AssertionError` (`get_chat_model()`
+called when the gate should have blocked it) — proving the spy itself is
+a real, working proof, not a vacuous assertion that would pass regardless
+of gate behavior.
+
+**New tests**: `tests/test_agent_graph_gate.py` (new, 9 tests): 6 pure,
+offline, no live services (`_gate_node`/`_route_after_gate` fed hand-
+built state dicts — zero chunks, below threshold, above threshold,
+exactly-at-threshold boundary, an inconsistent `None`-score-with-chunks
+defensive case, and the no-leaked-text logging proof) plus 3 live (test-
+db + test-qdrant, deterministic fake dense vectors with KNOWN exact
+cosine values via `_onehot()` — real embeddings would make cosine values
+meaningless for a deterministic CI assertion, matching this project's
+own established convention): below-threshold reaches the fallback stub
+with the chat model spy never invoked; above-threshold reaches a real
+completed answer through the REAL `retrieve()` (not a fake one) end to
+end via `run_turn()`; an empty collection (zero chunks) reaches the
+fallback stub, also with zero model calls. `tests/test_retrieval_
+isolation.py`: +2 (point 3's own isolation cases, detailed above).
+
+**Regressions found and fixed, not newly introduced, all flagged
+clearly**: inserting a REAL gate broke three existing tests that relied
+on the gate being a harmless pass-through, each fixed for its own
+specific reason, not papered over:
+- `tests/test_agent_graph_retrieve.py`'s own two tenant-isolation tests
+  used the shared `patch_embed_dense()` helper (`tests/conftest.py`),
+  which returns an ALL-ZERO vector — harmless when the gate was a
+  stub, but an all-zero query against all-zero points scores EXACTLY
+  0.0 through a real Qdrant cosine computation, below the new gate's
+  own default threshold, routing both tests into the `no_answer_
+  fallback` stub instead of the real answer node their own job actually
+  needs to reach. Fixed with a NEW, LOCAL, scoped replacement (`_patch_
+  embed_dense_constant_nonzero`) returning a FIXED, non-zero vector
+  instead — NOT a change to the shared `patch_embed_dense()` helper
+  itself (other files rely on its exact all-zero/degenerate behavior) —
+  preserving these tests' own original intent exactly
+  (dense stays uninformative/constant, the real sparse/BM25 channel is
+  still what differentiates tenants), just with a real, defined,
+  comfortably-above-threshold score instead of an undefined-in-spirit
+  0.0.
+- `tests/test_agent_graph_answer.py`'s own shared `_patch_retrieve_
+  with_fixed_chunks()` fake retrieve node returned `{"retrieved_chunks":
+  chunks}` only — `_gate_node` now reads `state["best_dense_score"]`
+  unconditionally, raising `KeyError` for every caller. Fixed: the fake
+  now also returns `best_dense_score` (a fixed, comfortably-above-
+  threshold value when chunks are present, matching every caller's own
+  real intent of reaching the answer node; `None` when empty, matching
+  `retrieve()`'s own real semantics). One caller (`test_can_answer_
+  false_routes_to_the_no_answer_fallback_stub`) ALSO had its own chunks
+  argument changed from `[]` to one real chunk: with empty chunks, the
+  GATE's own zero-chunk check would reach the SAME fallback stub first,
+  for the WRONG reason (never reaching the fake model's own configured
+  `can_answer=False` at all) — this test's actual job is proving the
+  ANSWER node's own `can_answer=false` routing, not the gate's, so it
+  needed real chunks to let the gate pass the turn through to the real
+  test subject.
+
+ASSUMPTION: `Settings.gate_relevance_threshold`'s own default, 0.20 (see
+that field's own comment, `app/config.py`, and its dedicated §9 marker).
+UNCERTAIN: none new (the research task's own `FormulaQuery` single-
+round-trip question was not revisited — `query_batch_points()` already
+answers the "one round trip" requirement cleanly, so there was no need
+to resolve that separate, harder question to complete this task). TODO:
+none new — this task builds its own scope fully, nothing stubbed.
+
+Verified: `make lint` clean. New/changed test files, re-run 3 times
+together (test-db + test-qdrant up): **188 passed** every run, zero
+skips. Full `backend/tests` without a test database: **730 passed, 332
+skipped** (up from 725 passed, 327 skipped at the prior close — exactly
++6 passed/+5 skipped: 6 new offline-safe pure gate tests, 3 new live
+gate tests + 2 new live isolation tests that skip without real services,
+minus 1 removed stale stub test — the arithmetic: 725+6-1=730 passed;
+327+3+2=332 skipped, both confirmed exact). `make test-all` (both real
+services, fresh containers): **1062 passed, 9 warnings** (up from 1052 —
+exactly +10: the same 6+3+2−1 accounting, this time all live tests
+actually running instead of skipping), 0 failed, both test services
+confirmed fully removed afterward. `make hooks`: **75 markers**
+(unchanged net, confirmed by direct `git diff` inspection, not assumed
+from the total alone — 2 removed: the old `_gate_node` stub's own
+`TODO(3.4.d)` line, and the deleted stale test's own `TODO(3.4.d)`
+comment in `test_agent_graph.py`; 2 added: the new `ASSUMPTION` lines in
+`app/config.py` and `app/agent/graph.py` describing the 0.20 default —
+net zero is a real coincidence of these four specific changes, not a
+sign nothing changed). `make lock-check`: exit 0, clean (no new
+dependency). `make audit`: "No known vulnerabilities found". `git
+status --short` named and cross-checked file by file: `backend/app/
+agent/graph.py`, `backend/app/config.py`, `backend/app/retrieval/
+service.py`, `backend/scripts/manual_research_gate_signal.py` (updated
+to match `retrieve()`'s new return shape), `backend/tests/
+test_agent_graph.py`, `backend/tests/test_agent_graph_answer.py`,
+`backend/tests/test_agent_graph_retrieve.py`, `backend/tests/
+test_retrieval_isolation.py`, `backend/tests/test_retrieval_service.py`
+(all modified), `backend/tests/test_agent_graph_gate.py` (new) —
+exactly the expected ten, no `.env`, no migration, no new dependency.
+
+**Senior engineer check:**
+1. **Chose not to build**: the `FormulaQuery`-based single-round-trip
+   optimization floated as an open question at the research stage —
+   `query_batch_points()` already delivers the one-round-trip
+   requirement cleanly and provably, so chasing a possibly-more-clever
+   mechanism with an unconfirmed API shape would have been speculative
+   engineering against a requirement already met (rule 11); also chose
+   not to re-litigate or rebuild anything from the already-closed 3.4.c
+   redesign, strictly additive to it.
+2. **Main trade-off accepted**: `retrieve()` now issues one extra,
+   small, same-round-trip Qdrant query on EVERY real turn (not just
+   gated-out ones) — a real, if small, latency cost against the same
+   budget 3.4.g's own upcoming measurement is already watching, accepted
+   because it buys a provably more-correct gate signal (never worse,
+   sometimes meaningfully better than the fused top hit's own score) at
+   a cost confirmed to be one Qdrant-side query, not a second embedding
+   call.
+3. **Pushed back on / would have done differently**: nothing — the
+   prompt's own refinement (best-anywhere dense score, not the fused
+   top hit's) was the right call, and its own instruction to "confirm
+   against the experiment's data" caught something this task would
+   otherwise have shipped on reasoning alone: the refinement didn't
+   just avoid a theoretical risk, it measurably WIDENED the real
+   separation gap (0.163–0.267 → 0.163–0.301), which the original
+   research task's own data could not show because it never measured
+   this specific distinction.
+4. **Highest production risk in this change**: the provisional 0.20
+   threshold remains an ASSUMPTION, now resting on a WIDER empirical gap
+   than at the research stage but still from the same one hand-authored
+   corpus and 30 queries — not validated at scale, not re-validated
+   against real visitor phrasing, and specific to the current embedding
+   model (both now tracked by dedicated §9 markers, not merely implied).
+   A second, smaller risk: the two existing-test fixes (constant-nonzero
+   dense stub; best_dense_score added to a fake retrieve node) are
+   exactly the kind of ripple a new graph-level gate was always going to
+   cause — found and fixed here, but a reminder that any FUTURE change
+   to the gate's own default threshold could silently re-break fixtures
+   built around today's specific 0.20 value, elsewhere in the suite,
+   without a test file dedicated to watching for it.
+
 ### Estimates to measure
 
 - The default limits in §9 and the budgets in §17 are starting points.
@@ -3996,9 +4268,9 @@ one-off research script, not a regression test).
 
 ## 7. Current task and next task
 
-Current: Step 3.4.d (the gate: light research first on a calibrated relevance signal, report before building, then the mechanism) — 3.4.a/3.4.b/3.4.c are all Done.
-Next: Step 3.4.e (fallback text template + fixed dependency-failure reply), once 3.4.d is confirmed good.
-Do not modify (completed tasks): 1.1.a, 1.1.b, 1.1.c, 1.1.d, 1.1.e, 1.1.f, 1.1.g, 1.1.h, 1.1.i, 1.1.j, 1.1.k, 1.1.l, 1.1.m, 1.1.n, 1.1.o.a, 1.1.o.b, 1.1.o.c, 1.1.o.d, 1.1.o.e, 1.1.o.f, 1.1.o.g, 1.1.o.h, 1.1b, 1.1c, 1.2.a, 1.2.b, 1.2.c, 1.2.d, 1.2.e, 1.2.f, 1.3.a1, 1.3.a2, 1.3.b, 1.3.c, 1.3.d, 1.3.e, 1.3.f, 1.4.a, 1.4.b, 1.4.c, 1.4.d, 1.4.e, 1.4.f, 1.4.g, 1.4.h, 1.4.i, 1.4.j, 1.4.k, 1.4.l, 1.5.a, 1.5.b, 1.5.c, 1.5.d, 1.5.e, 1.5.f, 1.6.a, 1.6.b, 1.6.c, 1.6.d, 1.6.e, 2.1.a, 2.1.b, 2.1.c, 2.1.d, 2.1.e, 2.1.f, 2.1.g, 2.1.h, 2.2.a, 2.2.b, 2.2.c, 2.2.d, 2.2.e, 2.2.f, 2.2.g, 2.2.h, 2.2.i, 2.3.a, 2.3.b, 2.3.c, 2.3.d, 2.3.e, 2.4.a, 2.4.b, 2.4.c, 2.4.d, 2.4.e, 2.4.f, 2.4.g, 2.5.a, 2.5.b, 2.5.c, 2.5.d, 2.5.e, 2.5.f, 2.6.a, 2.6.b, 2.6.c, 2.6.d, 2.6.e, 2.6.f, 2.7.a, 2.7.b, 2.7.c, 2.7.d, 2.7.e, 2.7.f, 2.8.a, 2.8.b, 2.8.c, 2.8.d, 2.8.e, 2.8.f, 2.9.a, 2.9.b, 2.9.c, 2.9.d, 2.9.e, 2.9.f, 2.9.g, 2.10.a, 2.10.b, 2.10.c, 3.1.a, 3.1.b, 3.1.c, 3.1.d, 3.1.e, 3.1.f, 3.2.a, 3.2.b, 3.2.c, 3.2.d, 3.3.a, 3.3.b, 3.3.c, 3.3.d, 3.4.a, 3.4.b, 3.4.c.
+Current: Step 3.4.e (fallback text template + fixed dependency-failure reply) — 3.4.a/3.4.b/3.4.c/3.4.d are all Done.
+Next: Step 3.4.f (Rule 2 greeting/thanks/unsafe-input handling), once 3.4.e is confirmed good.
+Do not modify (completed tasks): 1.1.a, 1.1.b, 1.1.c, 1.1.d, 1.1.e, 1.1.f, 1.1.g, 1.1.h, 1.1.i, 1.1.j, 1.1.k, 1.1.l, 1.1.m, 1.1.n, 1.1.o.a, 1.1.o.b, 1.1.o.c, 1.1.o.d, 1.1.o.e, 1.1.o.f, 1.1.o.g, 1.1.o.h, 1.1b, 1.1c, 1.2.a, 1.2.b, 1.2.c, 1.2.d, 1.2.e, 1.2.f, 1.3.a1, 1.3.a2, 1.3.b, 1.3.c, 1.3.d, 1.3.e, 1.3.f, 1.4.a, 1.4.b, 1.4.c, 1.4.d, 1.4.e, 1.4.f, 1.4.g, 1.4.h, 1.4.i, 1.4.j, 1.4.k, 1.4.l, 1.5.a, 1.5.b, 1.5.c, 1.5.d, 1.5.e, 1.5.f, 1.6.a, 1.6.b, 1.6.c, 1.6.d, 1.6.e, 2.1.a, 2.1.b, 2.1.c, 2.1.d, 2.1.e, 2.1.f, 2.1.g, 2.1.h, 2.2.a, 2.2.b, 2.2.c, 2.2.d, 2.2.e, 2.2.f, 2.2.g, 2.2.h, 2.2.i, 2.3.a, 2.3.b, 2.3.c, 2.3.d, 2.3.e, 2.4.a, 2.4.b, 2.4.c, 2.4.d, 2.4.e, 2.4.f, 2.4.g, 2.5.a, 2.5.b, 2.5.c, 2.5.d, 2.5.e, 2.5.f, 2.6.a, 2.6.b, 2.6.c, 2.6.d, 2.6.e, 2.6.f, 2.7.a, 2.7.b, 2.7.c, 2.7.d, 2.7.e, 2.7.f, 2.8.a, 2.8.b, 2.8.c, 2.8.d, 2.8.e, 2.8.f, 2.9.a, 2.9.b, 2.9.c, 2.9.d, 2.9.e, 2.9.f, 2.9.g, 2.10.a, 2.10.b, 2.10.c, 3.1.a, 3.1.b, 3.1.c, 3.1.d, 3.1.e, 3.1.f, 3.2.a, 3.2.b, 3.2.c, 3.2.d, 3.3.a, 3.3.b, 3.3.c, 3.3.d, 3.4.a, 3.4.b, 3.4.c, 3.4.d.
 
 ### Step 1.1 task list (approved)
 
@@ -4420,7 +4692,7 @@ here.
 
 ## 8. Task counter since the last duplication check
 
-**n = 0** (reset 2026-11-12, instruction-driven, following the duplication check after 3.4.a/b/c — see that section above for the full findings/fix/verification record; its one finding, the 3.4.c decision log's own false "STRUCTURAL" claim about image/link safety, was resolved by the escape-based redesign recorded in the same edit, not left open. The adversarial-probe task and this redesign task together do not themselves count toward a fresh cycle — they are the resolution of the check that was already due, not new build work opening a new count.)
+**n = 1** (3.4.d — real code/tests. Reset to n=0 on 2026-11-12, following the duplication check after 3.4.a/b/c; see that section above for the full findings/fix/verification record.)
 
 ## 9. Open markers
 
@@ -4522,7 +4794,8 @@ here.
 - **Owner Step 3.4 (narrowed from "undecided" at Task 3.3.d, 2026-11-06, per direct instruction): bounded timeouts and limited retries on EVERY external call in the turn path** — `embed_dense()` (OpenAI), the Qdrant query inside `retrieve()`, and the chat-model call Step 3.4 itself introduces — set once as a single turn-level budget measured against docs/SPEC.md §17's own "Time to first token" target (first turn p50 under 1.5s, p95 under 3s), not against each library's own unrelated installed default. Originally recorded at Task 3.3.c (2026-11-05), confirmed live: Qdrant's own client default timeout is 5 seconds (`AsyncQdrantRemote.DEFAULT_GRPC_TIMEOUT`); OpenAI's own SDK default is far longer (`openai._constants.DEFAULT_TIMEOUT`, `read=600` seconds), with the SDK's own built-in retry potentially compounding that further on a slow-but-not-fully-down provider — a visitor-facing turn could hang for minutes in the worst case, today, with nothing bounding it. **Load-bearing note, not a detail to drop**: `embed_dense()` (`app/ingest/embedding.py`, Task 2.5.a) is SHARED with ingestion, which genuinely tolerates much longer waits (a background job, not a visitor waiting on a stream) — so the tight budget almost certainly belongs on the query-path CALL SITE (inside `_retrieve_node`, or a wrapper it uses), as a per-request override, never as a change to `embed_dense()`'s own global client default, which would wrongly tighten ingestion's own timeout too. Step 3.4 decides the real mechanism (a per-call `timeout=` override, an `asyncio.wait_for()` wrapper, or something else) and the real budget split across embedding + Qdrant + chat-model within the overall 1.5s/3s figure — not decided or guessed at here.
 - **Split owner (narrowed from "undecided" at Task 3.3.d, 2026-11-06, per direct instruction): the fixed visitor-facing fallback reply on a dependency failure → Step 3.4 (it owns the Fallback & Guardrail specialist's own fixed, never-model-written replies, docs/SPEC.md §6.1); the overall request timeout and stream error handling → Step 4.1 (the real `/chat` endpoint, which owns the SSE stream itself and whatever happens when a turn fails mid-stream or never completes).** Originally recorded at Task 3.3.c (2026-11-05) as a single undecided marker — split here because the two concerns have genuinely different owners and different shapes: "what fixed text does a visitor see when retrieval fails" is a Fallback & Guardrail specialist reply (the same mechanism already used for quota-exhausted/greeting/unsafe-input replies), while "how long does the endpoint wait before giving up, and what does the SSE stream itself do (close the connection? send an error event?) if a node raises or hangs" is endpoint/transport-layer behavior with no connection to the Guardrail specialist's own reply content. `_retrieve_node` (`app/agent/graph.py`) itself still has no retry/timeout/circuit-breaker logic — that remains the marker immediately above's own job to resolve, not this one's.
 - Owner Phase 7 (recorded at the Step 3.4 breakdown, 2026-11-08, decision Q2): the secondary chat-model provider (Anthropic, configured only when `ANTHROPIC_API_KEY` is set) does not protect against a full OpenAI outage, because the query embedding `_retrieve_node` (`app/agent/graph.py`) calls in the SAME turn is also OpenAI (`embed_dense()`, Task 2.5.a) — a chat-model-only fallback leaves the turn dead at the retrieval step before the chat model is ever reached. Real vendor-outage resilience would need an embedding fallback too, which is a materially larger problem than swapping chat providers: a different embedding provider's own vectors are not interchangeable with what is already stored in Qdrant (different model, different dimensionality, different semantic space), so an embedding-provider fallback implies RE-INDEXING the tenant's entire corpus with the fallback provider, not a same-turn swap. Not designed or built here, deliberately out of scope for Step 3.4 — recorded as a real, currently-unresolved gap in this project's own vendor-outage story.
-- Owner Phase 6's admin screen (recorded at the Step 3.4 breakdown, 2026-11-08, decision Q4): the gate's own relevance threshold (docs/SPEC.md §6.3: "a platform default that only the platform admin can override per tenant... stored as a nullable per-tenant field in `tenants.config`... edited only in the platform admin screen... every change is logged") has its platform-DEFAULT half built at 3.4.d (a `Settings` field, tuned via 3.7's golden set). The PER-TENANT override half — the nullable `tenants.config` field, the admin-screen edit UI, and the audit-log entry every change requires — cannot be built before Phase 6's own platform admin screen exists (the same "no real admin-identity system yet" constraint already governing every other platform-admin-owned marker in this file, e.g. the temporary `admin_api_key` mechanism). Whoever builds Phase 6's admin screen must wire this override directly into whatever reads the gate's own effective threshold at answer time, not just expose a UI with nothing reading it.
+- **PARTIALLY RESOLVED at Task 3.4.d (2026-11-13)**: owner Phase 6's admin screen (recorded at the Step 3.4 breakdown, 2026-11-08, decision Q4): the gate's own relevance threshold (docs/SPEC.md §6.3: "a platform default that only the platform admin can override per tenant... stored as a nullable per-tenant field in `tenants.config`... edited only in the platform admin screen... every change is logged") now has its platform-DEFAULT half built and real: `Settings.gate_relevance_threshold` (`app/config.py`, default 0.20, an ASSUMPTION, see the dedicated §9 marker immediately below), read by the real `_gate_node` (`app/agent/graph.py`). The PER-TENANT override half — the nullable `tenants.config` field, the admin-screen edit UI, and the audit-log entry every change requires — still cannot be built before Phase 6's own platform admin screen exists (the same "no real admin-identity system yet" constraint already governing every other platform-admin-owned marker in this file, e.g. the temporary `admin_api_key` mechanism). Whoever builds Phase 6's admin screen must wire this override directly into `_gate_node`'s own threshold read, not just expose a UI with nothing reading it.
+- **Owner: whichever step first changes the embedding model or `EMBEDDING_VERSION`; also Step 3.7 for the first real tuning** (recorded at Task 3.4.d, 2026-11-13): `Settings.gate_relevance_threshold`'s own default (0.20) is a raw cosine-similarity floor against ONE specific embedding model (`EMBEDDING_MODEL`, `app/ingest/embedding.py`, currently `"text-embedding-3-small"`) and the content currently indexed under ONE `EMBEDDING_VERSION` (`app/ingest/web_adapter.py`, currently `"v1"`) — a different embedding model has a different cosine-similarity distribution entirely (different dimensionality, different training objective, no reason to share a meaningful scale), so this number does NOT transfer across a model change. Whoever changes either must re-tune this threshold from scratch (ideally against Step 3.7's own golden set, once it exists) before trusting the gate's own decisions again — never carry the old number forward silently across a re-embedding.
 - Owner Step 3.6 (recorded at the Step 3.4 breakdown, 2026-11-08, decision Q7): 3.4's own answer call binds no tools (a single, non-agentic model call, matching §6.2's own "no LLM hop" router design) — but docs/SPEC.md §8's own "the only tool is knowledge search" bullet implies a SEPARATE, MCP-exposed search capability exists somewhere, and how it relates to the router-driven `retrieve()` path 3.1/3.3/3.4 already use was explicitly left unresolved at the Step 3.4 research task: are these two entirely separate, non-interacting mechanisms (the likely reading, given §6.2's own routing design and this task's own Q7 decision), or does something else bind them together (e.g. a different caller altogether, external MCP clients rather than this project's own chat model calling back into itself)? Step 3.6 must research and resolve this explicitly, not assume one reading silently.
 - Owner Phase 6's admin screen (recorded at the Step 3.4.b research task, 2026-11-09, carry-over review of 3.4.a): `get_chat_model()` (`app/agent/chat_model.py`) is a single, process-wide `@lru_cache` singleton built once from platform-level `Settings` fields (`chat_model_primary`/`chat_model_secondary`) -- it has no mechanism for PER-TENANT model/provider choice, even though docs/SPEC.md §6.3's own "Models" bullet says "per-tenant config via `init_chat_model`." Not built here, deliberately: no per-tenant settings storage or admin-editing surface exists yet for this (the identical "no real admin screen yet" constraint already governing the gate-threshold override marker, recorded at the Step 3.4 breakdown's own Q4 decision) -- matching that marker's own reasoning and owner exactly, since both are per-tenant `tenants.config` fields that can only be built and edited once Phase 6's platform admin screen exists. Whoever builds that screen must decide the real mechanism: does a per-tenant override replace `get_chat_model()`'s own singleton with a per-tenant-keyed cache, or does it stay process-wide with the override applied as a per-call parameter? Not decided here.
 - **RESOLVED/code-enforced at the PART 0 follow-up to Task 3.4.b (2026-11-11)**: the secondary chat-model provider's own field-order/incremental-streaming behavior (`app/agent/graph.py`'s own `Answer` schema -- `can_answer` first, `used_chunk_ids` second, `answer` last -- is confirmed LIVE only against real OpenAI; Anthropic's own tool-use streaming was never exercised live, no `ANTHROPIC_API_KEY` was available in either task). Originally recorded as a documented-only precondition ("do not flip this key on without running the script first") -- **now a code-enforced TWO-KEY switch**, not merely a process note a deployer could skip: `get_chat_model()` (`app/agent/chat_model.py`) wires the secondary into the fallback chain only if BOTH `Settings.anthropic_api_key` is set AND the new `Settings.chat_model_secondary_verified` (default `False`) is `True`. Setting the API key alone leaves the chain primary-only, with its own distinct startup warning naming `backend/scripts/manual_check_chat_model_streaming.py` -- the key being present is no longer, by itself, capable of silently enabling an unverified provider. That script (opt-in, real API calls, NEVER run in CI) is what `chat_model_secondary_verified` attests to: run it against the real Anthropic API, confirming `tool_call_chunks` stream incrementally AND the declared schema field order is preserved (the same two properties already proven for OpenAI), THEN set `CHAT_MODEL_SECONDARY_VERIFIED=true` -- never before.

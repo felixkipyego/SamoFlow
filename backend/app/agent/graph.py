@@ -38,6 +38,7 @@ from pydantic import BaseModel, Field
 
 from app.agent.chat_model import get_chat_model
 from app.agent.context import tenant_id_from_config
+from app.config import get_settings
 from app.retrieval.service import RetrievedChunk, chunk_from_scored_point, retrieve
 
 logger = logging.getLogger(__name__)
@@ -62,6 +63,14 @@ class Citation(TypedDict):
 
 class AgentState(MessagesState):
     retrieved_chunks: list[RetrievedChunk]
+    # Task 3.4.d: the gate's own signal -- retrieve()'s `RetrievalResult.
+    # best_dense_score` (app/retrieval/service.py), carried through
+    # `_retrieve_node` alongside `retrieved_chunks` above. Plain
+    # (OVERWRITE semantics, identical reasoning to every other per-turn
+    # field here): a stale score from an earlier turn must never linger.
+    # `None` only when `retrieved_chunks` is also empty (no point for the
+    # dense-only query to score at all).
+    best_dense_score: float | None
     # Task 3.4.b: both plain, non-`Annotated` (OVERWRITE semantics, same
     # reasoning as `retrieved_chunks` above) -- a tenant's own can_answer
     # verdict or cited labels from an earlier turn must never linger once
@@ -233,20 +242,95 @@ async def _retrieve_node(state: AgentState, config: RunnableConfig) -> dict:
     """
     tenant_id = tenant_id_from_config(config)
     query = _latest_human_message_text(state["messages"])
-    points = await retrieve(tenant_id, query)
-    return {"retrieved_chunks": [chunk_from_scored_point(point) for point in points]}
+    result = await retrieve(tenant_id, query)
+    return {
+        "retrieved_chunks": [chunk_from_scored_point(point) for point in result.points],
+        "best_dense_score": result.best_dense_score,
+    }
+
+
+_NO_ANSWER_SHORT_CIRCUIT = {"can_answer": False, "cited_chunk_labels": [], "citations": []}
 
 
 def _gate_node(state: AgentState) -> dict:
-    # TODO(3.4.d): docs/SPEC.md §6.3's own "gate" bullet -- skip the AI
-    # call and route to the fixed fallback if the best retrieved hit is
-    # below a relevance threshold. Light research first (3.4.d's own
-    # scope, recorded at the Step 3.4 breakdown): RRF fusion scores are
-    # rank-based, not relevance-calibrated, so a naive score threshold may
-    # not mean what it looks like it means -- not decided or guessed at
-    # here. A plain pass-through for now: every turn reaches the real
-    # answer node below regardless of retrieval quality.
-    return {}
+    """Task 3.4.d [SECURITY]: docs/SPEC.md §6.3's own "gate" bullet --
+    "if the best hit is below the relevance threshold, skip the AI call
+    and return the fallback." Built per the Step 3.4.d research task's
+    own findings (PROJECT_SPEC.md's own dated research entry, not
+    repeated here in full):
+
+      - Signal: `state["best_dense_score"]` (`retrieve()`'s own
+        `RetrievalResult.best_dense_score`, Task 3.4.d) -- the BEST dense
+        cosine similarity anywhere in the tenant's corpus for this
+        query, never the RRF fusion score (confirmed, live, not
+        relevance-calibrated -- a pure nonsense query scored the same
+        maximum RRF value as several clearly-answerable ones) and never
+        the sparse/BM25 score alone (confirmed exploitable by incidental
+        keyword overlap on nonsense input).
+      - Two short-circuit cases, each routing straight to the fixed
+        fallback with ZERO model calls -- `_route_after_gate()` below
+        reads this node's own `can_answer` output, identical to how
+        `_route_after_answer()` already reads the answer node's: (1)
+        zero retrieved chunks at all (nothing to score); (2)
+        `best_dense_score` below `Settings.gate_relevance_threshold`
+        (default 0.20, an ASSUMPTION -- see that field's own comment,
+        `app/config.py`, and PROJECT_SPEC.md's own §9 marker for the
+        re-tuning obligation).
+      - The short-circuit dict is byte-identical to `_answer_node`'s own
+        `can_answer=False` early return (`cited_chunk_labels`/
+        `citations` reset to `[]`, never left stale from an earlier turn
+        in the same conversation thread) -- both routes must look
+        identical to anything downstream reading this state, regardless
+        of WHICH node decided `can_answer=False`.
+      - Logged at INFO (useful for Step 3.7's own tuning): the pass/fail
+        decision, the score and the threshold, and the chunk count --
+        deliberately NEVER the query text or chunk text (a visitor
+        message/retrieved content may carry personal data).
+    """
+    chunk_count = len(state["retrieved_chunks"])
+    score = state["best_dense_score"]
+    threshold = get_settings().gate_relevance_threshold
+    passed = chunk_count > 0 and score is not None and score >= threshold
+
+    logger.info(
+        "gate decision: passed=%s best_dense_score=%s threshold=%s chunk_count=%d",
+        passed,
+        score,
+        threshold,
+        chunk_count,
+    )
+
+    if not passed:
+        return dict(_NO_ANSWER_SHORT_CIRCUIT)
+    # `can_answer=True` here is a ROUTING signal only, read by
+    # `_route_after_gate()` immediately below, in this same turn -- the
+    # real answer node unconditionally overwrites `can_answer` with its
+    # own genuine verdict moments later, before anything else ever reads
+    # it. Returning `{}` here instead would be a real bug: `can_answer`
+    # is OVERWRITE-semantics state persisted across the whole
+    # conversation thread, so an earlier turn's stale value (True OR
+    # False) would leak into this turn's own routing decision -- a
+    # "retrieval was good enough" verdict could be silently discarded
+    # (or a bad one silently accepted) based on what a PRIOR, unrelated
+    # turn happened to leave behind, never this turn's own real decision.
+    return {"can_answer": True}
+
+
+def _route_after_gate(state: AgentState) -> str:
+    """Mirrors `_route_after_answer()`'s own logic exactly (read `state
+    ["can_answer"]`, route accordingly) but a SEPARATE function, not a
+    shared one: the two call sites route to DIFFERENT targets on the
+    "true" path (`_route_after_answer` -> `END`, since the answer node
+    already produced the final `AIMessage`; this one -> the `answer`
+    node itself, which has not run yet) -- the identical one-line body
+    reused under two names would be more confusing, not less, since
+    `_AFTER_ANSWER_PATH_MAP` and `_AFTER_GATE_PATH_MAP` below are
+    deliberately different.
+    """
+    return "answered" if state["can_answer"] else "no_answer_fallback"
+
+
+_AFTER_GATE_PATH_MAP = {"answered": "answer", "no_answer_fallback": "no_answer_fallback"}
 
 
 # Task 3.4.b [SECURITY]: the Answer tool schema docs/SPEC.md §6.3's own
@@ -711,7 +795,7 @@ def build_graph(checkpointer: AsyncPostgresSaver) -> CompiledStateGraph:
     builder.add_node("no_answer_fallback", _no_answer_fallback_node)
     builder.add_conditional_edges(START, route, _ROUTE_PATH_MAP)
     builder.add_edge("retrieve", "gate")
-    builder.add_edge("gate", "answer")
+    builder.add_conditional_edges("gate", _route_after_gate, _AFTER_GATE_PATH_MAP)
     builder.add_conditional_edges("answer", _route_after_answer, _AFTER_ANSWER_PATH_MAP)
     builder.add_edge("no_answer_fallback", END)
     for node in ("fallback", "guardrail", "coordinator"):

@@ -14,6 +14,16 @@
 # content, patch_embed_dense()), which does not belong in this file's own
 # plumbing-only suite -- that proof lives in test_agent_graph_retrieve.py
 # instead, end to end through run_turn()/read_state().
+#
+# Task 3.4.d [SECURITY]: this file's own `test_gate_node_is_a_pass_
+# through_stub` is REMOVED, not updated -- its entire premise (the gate
+# is a pass-through stub) is now false, the same pattern as the 3.3.c
+# removal immediately above. The gate's real logic is [SECURITY]
+# (a tenant-isolation-sensitive signal, a model-call-cost decision), so
+# its own tests live in a new, dedicated file, `test_agent_graph_gate.py`
+# -- matching this project's own established pattern of giving a new
+# security-relevant mechanism its own test file (e.g. `test_agent_graph_
+# citations.py` for Task 3.4.c), not folded into this plumbing-only suite.
 import uuid
 
 import pytest
@@ -99,12 +109,6 @@ def test_coordinator_node_names_its_destination_and_owning_step():
 def test_no_answer_fallback_node_names_its_destination_and_owning_step():
     with pytest.raises(NotImplementedError, match="Step 3.4.e"):
         graph_module._no_answer_fallback_node({})
-
-
-def test_gate_node_is_a_pass_through_stub():
-    # Task 3.4.b: TODO(3.4.d) -- no relevance-threshold check yet, every
-    # turn continues to the real answer node regardless of input.
-    assert graph_module._gate_node({}) == {}
 
 
 # --- end to end, through the real guarded entry point -----------------------

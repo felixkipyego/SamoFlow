@@ -273,30 +273,17 @@ async def _seed_corpus(write_client) -> None:
     print(f"Seeded {len(points)} chunks into {PROBE_COLLECTION!r} for tenant {TENANT_ID}.\n")
 
 
-async def _dense_only_score(client, dense_vector: list[float], target_id, query_filter: Filter):
-    settings = get_settings()
-    result = await client.query_points(
+async def _dense_only_query(client, dense_vector: list[float], query_filter: Filter, limit: int):
+    return await client.query_points(
         collection_name=PROBE_COLLECTION,
         query=dense_vector,
         using=DENSE_VECTOR_NAME,
         query_filter=query_filter,
-        limit=settings.retrieval_prefetch_limit,
+        limit=limit,
     )
-    for point in result.points:
-        if point.id == target_id:
-            return point.score
-    return None
 
 
-async def _sparse_only_score(client, sparse_vector, target_id, query_filter: Filter):
-    settings = get_settings()
-    result = await client.query_points(
-        collection_name=PROBE_COLLECTION,
-        query=SparseVector(indices=sparse_vector.indices, values=sparse_vector.values),
-        using=SPARSE_VECTOR_NAME,
-        query_filter=query_filter,
-        limit=settings.retrieval_prefetch_limit,
-    )
+def _score_for_id(result, target_id):
     for point in result.points:
         if point.id == target_id:
             return point.score
@@ -304,7 +291,11 @@ async def _sparse_only_score(client, sparse_vector, target_id, query_filter: Fil
 
 
 async def _run_one_query(client, query_text: str) -> dict:
-    points = await retrieve(client_id=TENANT_ID, query=query_text, collection_name=PROBE_COLLECTION)
+    settings = get_settings()
+    retrieval = await retrieve(
+        client_id=TENANT_ID, query=query_text, collection_name=PROBE_COLLECTION
+    )
+    points = retrieval.points
     if not points:
         return {"query": query_text, "no_hits": True}
 
@@ -313,8 +304,29 @@ async def _run_one_query(client, query_text: str) -> dict:
     sparse_vector = (await embed_sparse_query([query_text]))[0]
     query_filter = _retrieval_filter(TENANT_ID)
 
-    dense_score = await _dense_only_score(client, dense_vector, top.id, query_filter)
-    sparse_score = await _sparse_only_score(client, sparse_vector, top.id, query_filter)
+    # Two separate things, deliberately: (a) the FUSED top hit's own raw
+    # dense score (was it well-supported on the dense channel too, or did
+    # it win fusion mostly on sparse?); (b) the BEST dense score anywhere
+    # in this tenant's corpus for this query (limit=1, independent of
+    # which point won fusion) -- these can legitimately differ when a
+    # sparse-coincidental point wins the fused ranking while a different,
+    # genuinely relevant point scores higher on dense alone.
+    dense_pool = await _dense_only_query(
+        client, dense_vector, query_filter, settings.retrieval_prefetch_limit
+    )
+    dense_score_of_fused_top = _score_for_id(dense_pool, top.id)
+    best_dense_result = await _dense_only_query(client, dense_vector, query_filter, 1)
+    best_dense_score = best_dense_result.points[0].score if best_dense_result.points else None
+    best_dense_id = best_dense_result.points[0].id if best_dense_result.points else None
+
+    sparse_pool = await client.query_points(
+        collection_name=PROBE_COLLECTION,
+        query=SparseVector(indices=sparse_vector.indices, values=sparse_vector.values),
+        using=SPARSE_VECTOR_NAME,
+        query_filter=query_filter,
+        limit=settings.retrieval_prefetch_limit,
+    )
+    sparse_score = _score_for_id(sparse_pool, top.id)
 
     return {
         "query": query_text,
@@ -322,7 +334,9 @@ async def _run_one_query(client, query_text: str) -> dict:
         "top_topic": (top.payload or {}).get("title"),
         "top_text": (top.payload or {}).get("text", "")[:70],
         "rrf_score": top.score,
-        "dense_score": dense_score,
+        "dense_score": dense_score_of_fused_top,
+        "best_dense_score": best_dense_score,
+        "fused_top_is_best_dense": top.id == best_dense_id,
         "sparse_score": sparse_score,
     }
 
@@ -333,18 +347,23 @@ def _fmt(value) -> str:
 
 def _print_group_table(group_name: str, rows: list[dict]) -> None:
     print(f"\n=== {group_name} ===")
-    print(f"{'query':<55} {'topic':<18} {'rrf':>8} {'dense':>8} {'sparse':>8}")
+    print(
+        f"{'query':<55} {'topic':<18} {'rrf':>8} {'fused_dense':>11} "
+        f"{'best_dense':>10} {'same_pt':>8} {'sparse':>8}"
+    )
     for row in rows:
         if row.get("no_hits"):
             print(f"{row['query'][:54]:<55} {'NO HITS':<18}")
             continue
         print(
             f"{row['query'][:54]:<55} {str(row['top_topic'])[:17]:<18} "
-            f"{_fmt(row['rrf_score']):>8} {_fmt(row['dense_score']):>8} "
+            f"{_fmt(row['rrf_score']):>8} {_fmt(row['dense_score']):>11} "
+            f"{_fmt(row['best_dense_score']):>10} "
+            f"{str(row['fused_top_is_best_dense']):>8} "
             f"{_fmt(row['sparse_score']):>8}"
         )
 
-    for signal in ("rrf_score", "dense_score", "sparse_score"):
+    for signal in ("rrf_score", "dense_score", "best_dense_score", "sparse_score"):
         values = [r[signal] for r in rows if not r.get("no_hits") and r.get(signal) is not None]
         if not values:
             print(f"  {signal}: no values")
@@ -353,6 +372,8 @@ def _print_group_table(group_name: str, rows: list[dict]) -> None:
             f"  {signal}: min={min(values):.4f} max={max(values):.4f} "
             f"mean={statistics.mean(values):.4f} median={statistics.median(values):.4f}"
         )
+    divergent = [r for r in rows if not r.get("no_hits") and not r.get("fused_top_is_best_dense")]
+    print(f"  fused top hit != best-dense point: {len(divergent)}/{len(rows)} queries")
 
 
 async def main() -> None:

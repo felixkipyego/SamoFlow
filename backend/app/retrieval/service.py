@@ -36,8 +36,16 @@
 # condition, in the identical both-prefetches-plus-outer shape -- a
 # disabled source's soft-hidden points must never surface here, the
 # first and only real consumer of that flag.
+#
+# Task 3.4.d [SECURITY] addition: retrieve() now ALSO returns the best
+# dense cosine score anywhere in the tenant's corpus for this query (the
+# gate's own signal), via a second QueryRequest batched into the SAME
+# query_batch_points() round trip as the fused hybrid query -- same
+# filter discipline applies to it unconditionally (see RetrievalResult's
+# and retrieve()'s own docstrings for the full reasoning and the
+# isolation tests this task added).
 import uuid
-from typing import TypedDict
+from typing import NamedTuple, TypedDict
 
 from qdrant_client.models import (
     FieldCondition,
@@ -46,6 +54,7 @@ from qdrant_client.models import (
     FusionQuery,
     MatchValue,
     Prefetch,
+    QueryRequest,
     ScoredPoint,
     SparseVector,
 )
@@ -82,13 +91,31 @@ def _retrieval_filter(client_id: uuid.UUID) -> Filter:
     )
 
 
+class RetrievalResult(NamedTuple):
+    """Task 3.4.d [SECURITY]: `retrieve()`'s own return shape, changed
+    from a bare `list[ScoredPoint]` -- flagged per rule 2, this function
+    (Task 3.1.c) is a completed file. `RetrievedChunk` (Task 3.3.a) is
+    deliberately NOT touched: `best_dense_score` is a single, QUERY-LEVEL
+    value (the best dense cosine similarity anywhere in this tenant's
+    corpus for this query), not a per-chunk value -- putting it on
+    `RetrievedChunk` would be semantically wrong, either duplicated
+    identically onto every chunk or misleadingly implying it is THAT
+    chunk's own score. A small result type alongside the existing points
+    list is the minimal, structurally correct shape; `points` keeps the
+    exact same meaning `retrieve()` always returned.
+    """
+
+    points: list[ScoredPoint]
+    best_dense_score: float | None
+
+
 async def retrieve(
     client_id: uuid.UUID,
     query: str,
     k: int | None = None,
     *,
     collection_name: str = COLLECTION_NAME,
-) -> list[ScoredPoint]:
+) -> RetrievalResult:
     """The only code path in this codebase that reads Qdrant (docs/SPEC.md
     §6.3). All calls are async, and the filter is built fresh inside this
     function on every call -- never cached, never built in a global
@@ -145,6 +172,24 @@ async def retrieve(
     labeling, is the answer node's own job (Step 3.4), not this
     function's.
 
+    Task 3.4.d [SECURITY]: alongside the fused hybrid query, this
+    function ALSO issues a second, plain dense-only query (`limit=1`,
+    the SAME already-computed `dense_vector`, no extra embedding call)
+    to find the single BEST dense cosine score anywhere in this tenant's
+    corpus for this query -- this is NOT necessarily the fused top hit's
+    own dense score (confirmed live, research task 2026-11-13: a
+    sparse-keyword coincidence can win the fused ranking while a
+    different, genuinely relevant chunk scores higher on dense alone).
+    Both queries share the IDENTICAL `query_filter` built once above --
+    never a second, re-derived filter -- and are sent together in ONE
+    network round trip via `client.query_batch_points()` (confirmed live
+    against qdrant-client 1.19.1 before relying on it: one HTTP exchange,
+    two independent `QueryResponse`s back), not two separate `query_
+    points()` calls even run concurrently, which would still cost two
+    round trips. The gate node (Step 3.4.d) is this field's one real
+    consumer -- see `RetrievalResult`'s own docstring for why it is not
+    threaded onto `RetrievedChunk` instead.
+
     Reranker hook (Task 3.1.e): `Settings.reranker_enabled`, default
     `False` -- when off (the only real behavior today), this function is
     unchanged from Task 3.1.c/3.1.d. When on, this function raises
@@ -154,8 +199,8 @@ async def retrieve(
     that it is "enabled only if" the golden set, Step 3.7, measures the
     top-result quality as poor -- there is no real signal yet to justify
     one). The raise sits at the exact spot a real reranker will
-    eventually occupy: immediately after `client.query_points()` returns,
-    before this function hands its own result back.
+    eventually occupy: immediately after `client.query_batch_points()`
+    returns, before this function hands its own result back.
     """
     settings = get_settings()
     k = settings.retrieval_k if k is None else k
@@ -164,9 +209,7 @@ async def retrieve(
     dense_vector = (await embed_dense([query]))[0]
     sparse_vector = (await embed_sparse_query([query]))[0]
 
-    client = get_qdrant_read_client()
-    result = await client.query_points(
-        collection_name=collection_name,
+    hybrid_request = QueryRequest(
         prefetch=[
             Prefetch(
                 query=dense_vector,
@@ -182,9 +225,40 @@ async def retrieve(
             ),
         ],
         query=FusionQuery(fusion=Fusion.RRF),
-        query_filter=query_filter,
+        filter=query_filter,
         limit=k,
+        # `query_points()`'s own Python wrapper defaults `with_payload=
+        # True`, but a bare `QueryRequest` built directly (required for
+        # `query_batch_points()`) does NOT inherit that default -- its
+        # own field default is `None` ("Default is false", per the
+        # installed library's own docstring), confirmed live the hard
+        # way: every point came back with `payload=None` before this was
+        # added, breaking `chunk_from_scored_point()` downstream. Must be
+        # explicit here.
+        with_payload=True,
     )
+    # Task 3.4.d's own gate signal -- see this function's own docstring
+    # and RetrievalResult's docstring for why this is a SEPARATE query
+    # rather than reading a sub-score off the fused response (qdrant-
+    # client 1.19.1's own QueryResponse/ScoredPoint expose exactly one
+    # `score` field each, confirmed by reading those models directly --
+    # no pre-fusion score survives into a fused response to read instead).
+    dense_only_request = QueryRequest(
+        query=dense_vector,
+        using=DENSE_VECTOR_NAME,
+        filter=query_filter,
+        limit=1,
+    )
+
+    client = get_qdrant_read_client()
+    hybrid_response, dense_only_response = await client.query_batch_points(
+        collection_name=collection_name,
+        requests=[hybrid_request, dense_only_request],
+    )
+    best_dense_score = (
+        dense_only_response.points[0].score if dense_only_response.points else None
+    )
+    result = hybrid_response
     # Reranker hook (Task 3.1.e): the exact slot a real reranker will
     # eventually occupy -- right after the fused Query API call returns,
     # before this function hands its own result back. No model/library
@@ -202,7 +276,7 @@ async def retrieve(
             "(Task 3.1.e deferred this; see docs/SPEC.md §6.3 and PROJECT_SPEC.md's own "
             "Step 3.1 closure summary)."
         )
-    return result.points
+    return RetrievalResult(points=result.points, best_dense_score=best_dense_score)
 
 
 # Task 3.3.a's own retroactive fix [SECURITY-adjacent]: `RetrievedChunk` and

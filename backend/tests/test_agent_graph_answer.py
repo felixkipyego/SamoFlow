@@ -142,8 +142,21 @@ def _patch_retrieve_with_fixed_chunks(monkeypatch, chunks: list[dict]) -> None:
     # API key, intermittently raised "RuntimeError: Event loop is closed"
     # during connection cleanup) -- not something this file needs to
     # re-prove or work around, just avoid.
+    # Task 3.4.d: the real retrieve node also returns best_dense_score,
+    # which the real gate node (no longer a pass-through stub) now reads
+    # unconditionally -- this fake must set it too, or _gate_node raises
+    # KeyError. A fixed, comfortably-above-threshold value when chunks
+    # are present (every caller of this helper wants the gate to pass
+    # the turn through to the real answer node -- that is what this
+    # file's own tests are about, not gate behavior, which has its own
+    # dedicated test file, test_agent_graph_gate.py); None when chunks
+    # are empty, matching retrieve()'s own real semantics (nothing to
+    # score).
     async def _fake_retrieve_node(state, config):
-        return {"retrieved_chunks": chunks}
+        return {
+            "retrieved_chunks": chunks,
+            "best_dense_score": 0.9 if chunks else None,
+        }
 
     monkeypatch.setattr(graph_module, "_retrieve_node", _fake_retrieve_node)
 
@@ -180,9 +193,16 @@ async def test_can_answer_false_emits_zero_deltas(monkeypatch):
 
 
 async def test_can_answer_false_routes_to_the_no_answer_fallback_stub(monkeypatch):
+    # Task 3.4.d: a NON-empty chunk here, deliberately -- this test's own
+    # job is proving the ANSWER node's own can_answer=false routing
+    # (_route_after_answer), not the gate's zero-chunk short-circuit
+    # (_route_after_gate, its own dedicated test in test_agent_graph_
+    # gate.py). Empty chunks would make the GATE intercept the turn
+    # before the fake model's own can_answer=False is ever read, still
+    # reaching the same fallback stub but for the wrong reason.
     chunks = build_fake_answer_arg_chunks(can_answer=False, used_chunk_ids=[], answer="")
     _patched(monkeypatch, FakeAnswerToolChatModel(arg_chunks=chunks))
-    _patch_retrieve_with_fixed_chunks(monkeypatch, [])
+    _patch_retrieve_with_fixed_chunks(monkeypatch, [_chunk("doc-a", "Some retrieved text.")])
     graph = await _fresh_real_graph(monkeypatch)
     identity = _identity()
 

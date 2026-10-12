@@ -443,6 +443,32 @@ class Settings(BaseSettings):
     # Default False: unchanged behavior from Task 3.1.c/3.1.d until a
     # real decision is made to turn it on.
     reranker_enabled: bool = False
+    # Task 3.4.d [SECURITY]: the gate's own relevance floor, read against
+    # retrieve()'s own best_dense_score (app/retrieval/service.py) -- the
+    # BEST dense cosine similarity anywhere in the tenant's corpus for a
+    # query, not the fused hybrid top hit's own dense score (confirmed
+    # live these can differ). Below this floor, or zero retrieved chunks,
+    # the gate routes straight to the fixed fallback, no model call.
+    #
+    # ASSUMPTION: 0.20 is a provisional default, NOT a validated
+    # production threshold. Its only basis is a one-off research
+    # experiment (PROJECT_SPEC.md's own Step 3.4.d research entry,
+    # 2026-11-13): one hand-authored 32-chunk corpus in one domain, 30
+    # hand-written queries, not real visitor phrasing, not multiple
+    # languages, not a statistically meaningful sample. Tuned for real at
+    # Step 3.7 against the golden set, per docs/SPEC.md §6.3's own
+    # wording ("tuned in Phase 3 using the golden set").
+    #
+    # Specific to the CURRENT embedding model/version: this is a raw
+    # cosine-similarity floor against `EMBEDDING_MODEL` (app/ingest/
+    # embedding.py, currently "text-embedding-3-small") and the content
+    # currently indexed under `EMBEDDING_VERSION` (app/ingest/
+    # web_adapter.py, currently "v1") -- a different embedding model has
+    # a different cosine-similarity distribution entirely, and this
+    # number would not transfer. See this field's own §9 marker
+    # (PROJECT_SPEC.md) for the re-tuning obligation whenever either
+    # changes.
+    gate_relevance_threshold: float = Field(default=0.20, ge=0.0, le=1.0)
 
     @field_validator("database_url")
     @classmethod
