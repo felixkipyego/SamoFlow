@@ -35,18 +35,33 @@
 # long-lived local test-qdrant doesn't accumulate data from repeated runs
 # of this file specifically. Reuses `app.qdrant.tenant_filter()` directly
 # (the same filter retrieve() itself is scoped by), not a hand-built one.
+#
+# Task 3.4.b: gate_answer is no longer a stub -- the real answer node now
+# completes the turn instead of raising, so these two tests' own
+# "NotImplementedError naming Step 3.4" assertion (the retrieve ->
+# gate_answer wiring proof) is updated to assert the turn completes with
+# a real final AIMessage instead. `get_chat_model()` is stubbed with
+# `FakeAnswerToolChatModel` (tests/conftest.py, shared with
+# test_agent_graph_answer.py) -- this file's own job is still only
+# proving retrieve()'s own tenant isolation through the real graph, not
+# re-proving the answer node's own mechanism (that is test_agent_graph_
+# answer.py's job) -- the fake's own answer content is a trivial,
+# fixed string.
 import uuid
 
 import pytest
 
 from app import qdrant
 from app.agent import checkpointer
+from app.agent import graph as graph_module
 from app.agent.entrypoint import read_state, run_turn
 from app.agent.graph import build_graph
 from app.auth.dependencies import VerifiedIdentity
 from app.ingest.extract_html import extract_html
 from app.ingest.qdrant_writer import embed_and_upsert
 from tests.conftest import (
+    FakeAnswerToolChatModel,
+    build_fake_answer_arg_chunks,
     patch_embed_dense,
     require_test_qdrant,
     require_test_qdrant_read_only_key,
@@ -71,6 +86,15 @@ def _page(title: str, body: str) -> str:
 
 async def _collect(aiter):
     return [x async for x in aiter]
+
+
+def _patch_fake_answer_model(monkeypatch) -> None:
+    chunks = build_fake_answer_arg_chunks(
+        can_answer=True, used_chunk_ids=["c1"], answer="A fixed test answer."
+    )
+    fake = FakeAnswerToolChatModel(arg_chunks=chunks)
+    monkeypatch.setattr(graph_module, "get_chat_model", lambda: fake)
+    monkeypatch.setattr(graph_module, "get_stream_writer", lambda: (lambda event: None))
 
 
 async def _delete_tenants_points(client, *tenant_ids: uuid.UUID) -> None:
@@ -158,6 +182,7 @@ async def test_run_turn_as_tenant_a_with_a_query_matching_tenant_bs_topic_stays_
     monkeypatch,
 ):
     patch_embed_dense(monkeypatch)
+    _patch_fake_answer_model(monkeypatch)
     url, key = require_test_qdrant()
     client = qdrant.build_qdrant_client(url, key)
     await qdrant.ensure_collection(client, qdrant.COLLECTION_NAME)
@@ -171,18 +196,19 @@ async def test_run_turn_as_tenant_a_with_a_query_matching_tenant_bs_topic_stays_
         identity_a = _identity(tenant_a)
         conversation_id = uuid.uuid4()
 
-        # Proves the retrieve -> gate_answer edge fired for real (3.3.b's
-        # own trade-off item 2): the query text matches tenant B's own
-        # topic, so if tenant scoping were broken this would still
-        # "succeed" at retrieval -- the gate_answer stub's own
-        # NotImplementedError is only reached if the real retrieve node
-        # itself completed without raising.
-        with pytest.raises(NotImplementedError, match="Step 3.4"):
-            await _collect(
-                run_turn(
-                    graph, identity_a, conversation_id, {"messages": ["mortgage interest rate"]}
-                )
+        # Proves the retrieve -> gate -> answer edge fired for real
+        # (3.3.b's own trade-off item 2, updated at 3.4.b now that gate_
+        # answer is no longer a stub): the query text matches tenant B's
+        # own topic, so if tenant scoping were broken this would still
+        # "succeed" at retrieval -- the turn only completes with a real
+        # final AIMessage if the real retrieve node itself completed
+        # without raising, scoped correctly.
+        results = await _collect(
+            run_turn(
+                graph, identity_a, conversation_id, {"messages": ["mortgage interest rate"]}
             )
+        )
+        assert results
 
         snapshot = await read_state(graph, identity_a, conversation_id)
         chunks = snapshot.values["retrieved_chunks"]
@@ -191,6 +217,7 @@ async def test_run_turn_as_tenant_a_with_a_query_matching_tenant_bs_topic_stays_
         assert all(chunk["document_id"] != str(doc_b) for chunk in chunks)
         assert any("zebra" in chunk["text"] for chunk in chunks)
         assert all("mortgage" not in chunk["text"] for chunk in chunks)
+        assert snapshot.values["can_answer"] is True
     finally:
         await _delete_tenants_points(client, tenant_a, tenant_b)
         await client.close()
@@ -200,6 +227,7 @@ async def test_run_turn_as_tenant_b_with_a_query_matching_tenant_as_topic_stays_
     monkeypatch,
 ):
     patch_embed_dense(monkeypatch)
+    _patch_fake_answer_model(monkeypatch)
     url, key = require_test_qdrant()
     client = qdrant.build_qdrant_client(url, key)
     await qdrant.ensure_collection(client, qdrant.COLLECTION_NAME)
@@ -213,12 +241,12 @@ async def test_run_turn_as_tenant_b_with_a_query_matching_tenant_as_topic_stays_
         identity_b = _identity(tenant_b)
         conversation_id = uuid.uuid4()
 
-        with pytest.raises(NotImplementedError, match="Step 3.4"):
-            await _collect(
-                run_turn(
-                    graph, identity_b, conversation_id, {"messages": ["zebra giraffe safari"]}
-                )
+        results = await _collect(
+            run_turn(
+                graph, identity_b, conversation_id, {"messages": ["zebra giraffe safari"]}
             )
+        )
+        assert results
 
         snapshot = await read_state(graph, identity_b, conversation_id)
         chunks = snapshot.values["retrieved_chunks"]
@@ -227,6 +255,7 @@ async def test_run_turn_as_tenant_b_with_a_query_matching_tenant_as_topic_stays_
         assert all(chunk["document_id"] != str(doc_a) for chunk in chunks)
         assert any("mortgage" in chunk["text"] for chunk in chunks)
         assert all("zebra" not in chunk["text"] for chunk in chunks)
+        assert snapshot.values["can_answer"] is True
     finally:
         await _delete_tenants_points(client, tenant_a, tenant_b)
         await client.close()

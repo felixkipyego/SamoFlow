@@ -47,6 +47,7 @@ import asyncio
 import http.server
 import importlib
 import ipaddress
+import json
 import os
 import socket
 import sys
@@ -62,6 +63,9 @@ import psycopg
 import pytest
 import sqlalchemy as sa
 from httpx import ASGITransport, AsyncClient
+from langchain_core.language_models import BaseChatModel
+from langchain_core.messages import AIMessageChunk
+from langchain_core.outputs import ChatGenerationChunk
 from qdrant_client import AsyncQdrantClient
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -74,7 +78,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 # (the exact fragility app/all_models.py exists to remove -- see its own
 # and app/worker.py's header comments).
 from app import all_models, db, qdrant  # noqa: F401
-from app.agent import checkpointer
+from app.agent import chat_model, checkpointer
 from app.config import POSTGRES_SCHEME, Settings, get_settings
 from app.ingest import embedding
 from app.ingest.ip_safety import is_unsafe_destination_ip
@@ -553,6 +557,27 @@ async def close_any_checkpointer_pool_left_open():
     yield
     if checkpointer._checkpointer_pool is not None:
         await checkpointer.close_checkpointer_pool()
+
+
+@pytest.fixture
+def close_chat_model_cache_between_tests():
+    # Task 3.4.b: get_chat_model()'s own cached instance (app/agent/
+    # chat_model.py) is NOT safe to reuse across repeated, separately-
+    # closed event loops once a real HTTP keep-alive connection has been
+    # established through it -- confirmed live, not assumed (see that
+    # module's own header comment for the full finding). Function-scoped
+    # (unlike close_the_shared_qdrant_read_client_once's own module
+    # scope immediately above): construction is cheap (~0.65ms, confirmed
+    # at Task 3.4.a), so there's no real resource worth preserving across
+    # tests the way a Qdrant client's real connection pool is -- clearing
+    # before AND after means a test using this fixture never inherits a
+    # stale instance from an earlier test, and never leaks its own into a
+    # later one. Deliberately NOT `autouse=True`, matching every other
+    # such fixture's own reasoning: opt in explicitly via `pytestmark =
+    # pytest.mark.usefixtures("close_chat_model_cache_between_tests")`.
+    chat_model.get_chat_model.cache_clear()
+    yield
+    chat_model.get_chat_model.cache_clear()
 
 
 def _exception_chain(exc):
@@ -1088,3 +1113,70 @@ def patch_embed_dense(monkeypatch) -> None:
     # "verify live once, never a real OpenAI call in the committed suite"
     # rule), so a fixed stub exercises everything that matters.
     monkeypatch.setattr(embedding, "_get_client", lambda: _FakeClient())
+
+
+class FakeAnswerToolChatModel(BaseChatModel):
+    """Task 3.4.b: a configurable fake streaming the real `Answer` tool's
+    own `tool_call_chunks` shape (`app/agent/graph.py`), for testing
+    `_answer_node`'s own incremental-parsing logic with zero real API
+    calls. `arg_chunks` is a list of raw JSON-fragment strings (in order)
+    making up the eventual accumulated `args` string -- build one with
+    `build_fake_answer_arg_chunks()` below rather than hand-splitting
+    JSON. `fail_after` (if not `None`) raises a plain `RuntimeError` after
+    that many chunks have already been yielded (`0` means "fail before
+    any chunk at all" -- the case `.with_fallbacks()` is designed to
+    catch; anything higher simulates a genuine mid-stream failure, the
+    case it is confirmed live NOT to catch).
+
+    Shared by `test_agent_graph_answer.py` and `test_agent_graph_
+    retrieve.py` (both Task 3.4.b) -- both need a model that streams real
+    `tool_call_chunks` matching the real `Answer` schema's own shape,
+    not a generic text-only fake.
+    """
+
+    arg_chunks: list[str]
+    fail_after: int | None = None
+
+    @property
+    def _llm_type(self) -> str:
+        return "fake-answer-tool"
+
+    def _generate(self, messages, stop=None, run_manager=None, **kwargs):
+        raise NotImplementedError("only streaming is exercised by this fake")
+
+    async def _astream(self, messages, stop=None, run_manager=None, **kwargs):
+        for index, fragment in enumerate(self.arg_chunks):
+            if self.fail_after is not None and index >= self.fail_after:
+                raise RuntimeError("FakeAnswerToolChatModel: scripted failure")
+            yield ChatGenerationChunk(
+                message=AIMessageChunk(
+                    content="",
+                    tool_call_chunks=[
+                        {
+                            "name": "Answer" if index == 0 else None,
+                            "args": fragment,
+                            "id": "call_1" if index == 0 else None,
+                            "index": 0,
+                        }
+                    ],
+                )
+            )
+
+    def bind_tools(self, tools, *, tool_choice=None, **kwargs):
+        # The real _answer_node always calls .bind_tools([Answer],
+        # tool_choice="Answer") on whatever get_chat_model() returns --
+        # this fake just returns itself, already configured to stream the
+        # Answer tool's own shape regardless of what's passed in.
+        return self
+
+
+def build_fake_answer_arg_chunks(
+    *, can_answer: bool, used_chunk_ids: list[str], answer: str, split_every: int = 3
+) -> list[str]:
+    # Field order matches the real Answer schema exactly (app/agent/
+    # graph.py) -- can_answer, used_chunk_ids, answer -- since that order
+    # is itself load-bearing (confirmed live against real OpenAI) and
+    # every test relying on this helper depends on it being right.
+    payload = {"can_answer": can_answer, "used_chunk_ids": used_chunk_ids, "answer": answer}
+    full = json.dumps(payload)
+    return [full[i : i + split_every] for i in range(0, len(full), split_every)]

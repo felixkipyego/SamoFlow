@@ -43,6 +43,66 @@
 # explicit-kwarg rule exists to catch statically, since no runtime
 # behavior difference exists between "passed explicitly" and "silently
 # fell back to the env var" when that env var happens to be populated.
+#
+# Task 3.4.b: `max_retries=0` on BOTH models, explicit (never the
+# installed SDK default of 2) -- `.with_fallbacks()` only engages once the
+# PRIMARY has exhausted its own retries, confirmed live before this
+# change: a primary pointed at an unreachable address, default
+# `max_retries=2`, took **2.597s** before the fallback chain was even
+# reached; with `max_retries=0` on both, the identical failure surfaced in
+# **0.008s** -- a ~325x difference. This matches this module's own design
+# intent directly (PROJECT_SPEC.md's own Q8 decision): the SECONDARY
+# provider IS the retry; a primary-side SDK retry would just add a second,
+# redundant delay layer in front of it.
+#
+# `timeout=settings.chat_model_timeout_seconds` on both, explicit --
+# confirmed live (`app/config.py`'s own field comment has the full
+# experiment) that httpx's own `read` timeout this maps to bounds the GAP
+# BETWEEN reads, not the total response duration, so a long, genuinely-
+# streaming answer is not truncated just for taking a while in total.
+#
+# Task 3.4.b [SECURITY-adjacent]: event-loop binding, checked live, not
+# assumed, because `get_checkpointer()` (`app/agent/checkpointer.py`)
+# deliberately avoids caching for exactly this class of hazard.
+# CONFIRMED DIFFERENT HERE: neither `httpx.AsyncClient.__init__` nor
+# `openai`'s/`anthropic`'s own base client calls `asyncio.get_running_
+# loop()`/`get_event_loop()` at CONSTRUCTION time (grepped both SDKs'
+# `_base_client.py` directly -- the one hit in each is inside a `__del__`-
+# time cleanup path, not construction), unlike `AsyncPostgresSaver.
+# __init__()`'s own confirmed `self.loop = asyncio.get_running_loop()`
+# store. A real, DIFFERENT cross-loop hazard exists anyway, found live:
+# reusing the SAME cached model across REPEATED, SEPARATELY-CLOSED event
+# loops (`asyncio.run()` called more than once) -- after a loop closes
+# with a live HTTP keep-alive connection still in the pool -- raises
+# `RuntimeError: Event loop is closed` on the FIRST reuse in the next
+# loop, then self-heals (the dead connection is evicted, a fresh one
+# opens bound to the new loop, which then itself goes stale once THAT
+# loop closes) -- confirmed 100% reproducible, alternating success/
+# failure on every repeated `asyncio.run()` call reusing one instance.
+# Root cause: HTTP keep-alive, not loop storage -- a different mechanism
+# from `AsyncPostgresSaver`'s, but the same hazard CLASS.
+#
+# NOT a production risk: a real FastAPI/uvicorn process has exactly one
+# event loop for its entire lifetime (already established at the Step 3.3
+# breakdown's own `app/main.py` marker) -- this boundary is never crossed
+# there. It IS a real risk for THIS PROJECT'S OWN TEST SUITE specifically,
+# which is pytest-asyncio's own per-test-function event-loop churn --
+# matching the identical test-harness hazard `get_checkpointer()`'s own
+# non-caching design exists to avoid, just triggered differently here
+# (keep-alive reuse, not loop storage). `tests/conftest.py`'s
+# `close_chat_model_cache_between_tests` fixture (module-scoped, opt-in)
+# exists for exactly this: any test module making a REAL (or realistically
+# connection-establishing) call through `get_chat_model()` must use it, so
+# no test accidentally inherits a live-connection-bearing cached instance
+# from a DIFFERENT, already-closed test's own event loop.
+# `test_get_chat_model_cached_instance_is_unsafe_to_reuse_across_closed_
+# event_loops_once_a_real_connection_is_established` (`tests/test_chat_
+# model.py`) is the live regression proof itself -- makes a REAL network
+# attempt (to a real, routable TEST-NET-3 address that simply never
+# responds, so no actual provider is ever contacted and no cost is
+# incurred) specifically to exercise the keep-alive-connection code path,
+# not merely the "never connects at all" path my own first, too-shallow
+# check used.
 import logging
 from functools import lru_cache
 
@@ -71,10 +131,13 @@ def get_chat_model() -> Runnable:
     assume the narrower `BaseChatModel` interface.
     """
     settings = get_settings()
+    timeout = settings.chat_model_timeout_seconds
     primary: BaseChatModel = init_chat_model(
         settings.chat_model_primary,
         model_provider="openai",
         api_key=settings.openai_api_key_str(),
+        max_retries=0,
+        timeout=timeout,
     )
 
     secondary_key = settings.anthropic_api_key_str()
@@ -91,5 +154,7 @@ def get_chat_model() -> Runnable:
         settings.chat_model_secondary,
         model_provider="anthropic",
         api_key=secondary_key,
+        max_retries=0,
+        timeout=timeout,
     )
     return primary.with_fallbacks([secondary])

@@ -188,13 +188,31 @@ class Settings(BaseSettings):
     # -- plain strings, not secrets, matching `crawl_user_agent`'s own
     # "Settings-configurable, not hardcoded" treatment immediately below
     # (rule 11's own "nothing hard-coded that should be configuration").
-    # ASSUMPTION: these exact model identifiers are placeholders, not
-    # independently confirmed against the real OpenAI/Anthropic APIs in
-    # this task (3.4.a makes no real API call anywhere -- see
-    # `app/agent/chat_model.py`'s own header comment) -- re-confirm before
-    # 3.4.b's own first real API call.
+    # `chat_model_primary` CONFIRMED live at Task 3.4.b's own research
+    # task: a real `gpt-4o-mini` call (opt-in, manual, never committed as
+    # a CI test) worked exactly as expected. `chat_model_secondary`
+    # (Anthropic) is STILL an unconfirmed ASSUMPTION -- no real API key
+    # was available during that research; see PROJECT_SPEC.md's own new
+    # §9 marker (Task 3.4.b) gating `ANTHROPIC_API_KEY` in production on a
+    # manual streaming check passing first.
     chat_model_primary: str = Field(default="gpt-4o-mini")
     chat_model_secondary: str = Field(default="claude-haiku-4-5")
+    # Task 3.4.b: a per-request READ timeout (httpx's own `read=` category
+    # -- confirmed live, not assumed, that this bounds the GAP BETWEEN
+    # consecutive reads, including time-to-first-byte, never the total
+    # response duration: a local slow-streaming test server sending four
+    # chunks 1.5s apart, each individually under a 3.0s read timeout,
+    # completed successfully in ~6.2s total -- a total-duration timeout
+    # would have failed around the 3s mark instead). This is exactly the
+    # semantics the chat model needs: a long, genuinely-streaming answer
+    # must keep flowing as long as new tokens keep arriving within this
+    # window, even if the whole answer takes far longer in total.
+    # Deliberately a `Settings` field (unlike `embed_dense()`'s own
+    # hard-coded reliance on the SDK default) -- confirmed at the Step
+    # 3.4.a review that the chat model is QUERY-PATH ONLY, never shared
+    # with ingestion's own looser tolerance, so a construction-time
+    # default here is the right place, not a per-call override.
+    chat_model_timeout_seconds: float = Field(default=5.0, gt=0)
     # Task 2.6.e: identifies the crawler on every robots.txt/sitemap/page
     # request it makes, matching the Step 2.6 decision entry's own
     # "Settings-configurable, not hardcoded" call -- a placeholder domain

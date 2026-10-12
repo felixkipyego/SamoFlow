@@ -75,8 +75,10 @@ def test_route_precedence_rule_2_beats_rule_3_when_both_match(monkeypatch):
     assert route({}) == "guardrail"
 
 
-# --- destination node stubs, called directly (gate_answer is otherwise
-# unreachable until Task 3.3.c makes the retrieve node real) ----------------
+# --- destination node stubs, called directly (no_answer_fallback is
+# otherwise unreachable until Task 3.4.b makes the answer node real, and
+# gate/answer themselves are no longer stubs as of Task 3.4.b -- see
+# test_agent_graph_answer.py for their own real tests) ----------------
 
 
 def test_fallback_node_names_its_destination_and_owning_step():
@@ -94,9 +96,15 @@ def test_coordinator_node_names_its_destination_and_owning_step():
         graph_module._coordinator_node({})
 
 
-def test_gate_answer_node_names_its_destination_and_owning_step():
-    with pytest.raises(NotImplementedError, match="Step 3.4"):
-        graph_module._gate_answer_node({})
+def test_no_answer_fallback_node_names_its_destination_and_owning_step():
+    with pytest.raises(NotImplementedError, match="Step 3.4.e"):
+        graph_module._no_answer_fallback_node({})
+
+
+def test_gate_node_is_a_pass_through_stub():
+    # Task 3.4.b: TODO(3.4.d) -- no relevance-threshold check yet, every
+    # turn continues to the real answer node regardless of input.
+    assert graph_module._gate_node({}) == {}
 
 
 # --- end to end, through the real guarded entry point -----------------------
