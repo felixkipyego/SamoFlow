@@ -61,6 +61,20 @@ class Settings(BaseSettings):
     database_url: SecretStr
     qdrant_url: str
     qdrant_api_key: SecretStr
+    # Task 3.1.b: a SEPARATE, server-enforced read-only credential for
+    # retrieve()'s own read path (app/retrieval/service.py) -- confirmed
+    # live, against the real pinned qdrant/qdrant:v1.19.1 server, that
+    # `service.read_only_api_key` (env `QDRANT__SERVICE__READ_ONLY_API_KEY`
+    # on the Qdrant server itself) is genuine server-side RBAC, not an
+    # application-level convention: a write attempt (upsert, delete
+    # collection) through this key is rejected by Qdrant itself with HTTP
+    # 403 "Forbidden: Global manage access is required," while every real
+    # read method `retrieve()` needs (scroll, query_points) succeeds
+    # normally. Required, same discipline as `qdrant_api_key` -- a missing
+    # read-only key would silently fall back to no least-privilege
+    # separation at all, exactly the "fail loud at startup" case this
+    # project's own existing secrets already avoid.
+    qdrant_read_only_api_key: SecretStr
     # min_length uses pydantic's own built-in constraint (rule 11 -- a
     # well-known mechanism, not a hand-rolled length check); it applies to
     # jwt_signing_key_previous's SecretStr arm only, never to its None arm
@@ -337,6 +351,34 @@ class Settings(BaseSettings):
     # estimate in this project, most plausibly once real operational data
     # shows how many orphaned points actually accumulate per day.
     reconcile_interval_seconds: float = Field(default=86400.0, gt=0)
+    # Task 3.1.c: retrieve()'s own final result count -- the `k` in
+    # `retrieve(client_id, query, k)` (docs/SPEC.md §6.3), made
+    # Settings-configurable rather than hardcoded so it can be retuned
+    # later against the golden set (Step 3.7) without a code change. 8:
+    # an explicit starting point agreed before building, not treated as
+    # final -- retuned later with real numbers, like every other estimate
+    # in this project.
+    retrieval_k: int = Field(default=8, gt=0)
+    # Task 3.1.c: the per-sub-query `Prefetch(..., limit=...)` candidate
+    # pool size -- deliberately SEPARATE from `retrieval_k` above, not the
+    # same number reused: docs/SPEC.md §6.3's own reranker bullet names
+    # "roughly 20 to 50 candidates" as the pool a reranker would work
+    # over, a different, larger quantity than the final result count a
+    # caller actually receives. 40: the agreed starting point inside that
+    # named range, Settings-configurable for the identical retune-later
+    # reason as `retrieval_k`.
+    retrieval_prefetch_limit: int = Field(default=40, gt=0)
+    # Task 3.1.e: the reranker hook -- a literal flag, nothing behind it
+    # yet, per direct instruction. docs/SPEC.md §6.3's own reranker
+    # bullet is explicit that it is "enabled only if" the golden set
+    # (Step 3.7, not yet built) measures the top-result quality as poor
+    # -- there is no real signal yet to justify building (or picking) a
+    # real reranker model/library, so this field exists purely to let
+    # retrieve() branch on it correctly (see that function's own
+    # docstring/body) without a code change once that signal exists.
+    # Default False: unchanged behavior from Task 3.1.c/3.1.d until a
+    # real decision is made to turn it on.
+    reranker_enabled: bool = False
 
     @field_validator("database_url")
     @classmethod
@@ -377,6 +419,19 @@ class Settings(BaseSettings):
         _require_no_whitespace_or_control_chars(
             raw,
             "QDRANT_API_KEY",
+            "it is sent as an HTTP header value; a newline would allow header injection",
+        )
+        return value
+
+    @field_validator("qdrant_read_only_api_key")
+    @classmethod
+    def _require_a_clean_read_only_header_value(cls, value: SecretStr) -> SecretStr:
+        raw = value.get_secret_value()
+        if not raw:
+            raise ValueError("QDRANT_READ_ONLY_API_KEY must not be empty.")
+        _require_no_whitespace_or_control_chars(
+            raw,
+            "QDRANT_READ_ONLY_API_KEY",
             "it is sent as an HTTP header value; a newline would allow header injection",
         )
         return value
@@ -471,6 +526,10 @@ class Settings(BaseSettings):
     def qdrant_api_key_str(self) -> str:
         # The one explicit call that unwraps the secret. Never log this.
         return self.qdrant_api_key.get_secret_value()
+
+    def qdrant_read_only_api_key_str(self) -> str:
+        # The one explicit call that unwraps the secret. Never log this.
+        return self.qdrant_read_only_api_key.get_secret_value()
 
     def jwt_signing_key_str(self) -> str:
         # The one explicit call that unwraps the secret. Never log this.

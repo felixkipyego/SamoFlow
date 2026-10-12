@@ -99,6 +99,35 @@ def get_qdrant_client() -> AsyncQdrantClient:
     return build_qdrant_client(settings.qdrant_url, settings.qdrant_api_key_str())
 
 
+@lru_cache
+def get_qdrant_read_client() -> AsyncQdrantClient:
+    """Task 3.1.b: the LEAST-PRIVILEGE client for `retrieve()`'s own read
+    path (`app/retrieval/service.py`) -- a second, genuinely different
+    credential from `get_qdrant_client()`'s own read-write key, not the
+    same key reused with an application-level "only read methods, I
+    promise" convention. Confirmed live, against the real pinned
+    `qdrant/qdrant:v1.19.1` server, that `service.read_only_api_key`
+    (env `QDRANT__SERVICE__READ_ONLY_API_KEY` on the Qdrant SERVER
+    itself) is genuine server-enforced RBAC: a write attempt (upsert,
+    delete collection) through this client is rejected by Qdrant with
+    HTTP 403 "Forbidden: Global manage access is required," while every
+    real read method `retrieve()` needs (`scroll`, `query_points`)
+    succeeds normally. This is a real least-privilege boundary, not
+    merely this codebase's own existing read-path guard
+    (`test_qdrant_read_path_guard.py`) relying on discipline alone -- if
+    a future bug in `retrieve()` itself ever attempted a write, Qdrant's
+    own server would refuse it, independent of anything this repo does
+    or fails to do.
+
+    Reuses `build_qdrant_client()` directly, the same pure factory
+    `get_qdrant_client()` already uses -- only the URL/key pair differs,
+    not the connection shape (REST, `prefer_grpc=False`,
+    `check_compatibility=True`).
+    """
+    settings = get_settings()
+    return build_qdrant_client(settings.qdrant_url, settings.qdrant_read_only_api_key_str())
+
+
 # --- Task 1.3.c: collection schema ------------------------------------------
 # One shared collection (docs/SPEC.md §5.2): a named dense vector and a named
 # sparse vector on the same point, a tenant-optimised keyword index on

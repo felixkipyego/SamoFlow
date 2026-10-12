@@ -28,7 +28,6 @@
 # than using live_test_services()'s own random per-test collection name.
 import asyncio
 import decimal
-import http.server
 import time
 import uuid
 from contextlib import asynccontextmanager
@@ -65,6 +64,7 @@ from tests.conftest import (
     require_test_qdrant,
     scripted_handler,
     set_valid_env,
+    tracking_handler,
 )
 
 # Task 2.8.e: reuses test_database_adapter.py's own _admin_connection() --
@@ -321,31 +321,6 @@ def _rich_page(title: str, word_prefix: str, extra_html: str = "") -> str:
     )
 
 
-def _tracking_handler(routes: dict, hits: list, delay_seconds: float = 0):
-    # A local variant of scripted_handler() (tests/conftest.py) that also
-    # records every requested path -- needed by tests (c)/(e) below to
-    # prove a specific path was NEVER requested, not merely absent from
-    # the final result. `delay_seconds` (duplication check after
-    # 2.6.d/2.6.e/2.6.f: collapsed from a separate _slow_tracking_handler(),
-    # which was this function plus one time.sleep() call) gives test (f)'s
-    # own multi-page crawl real, non-trivial elapsed time to prove the
-    # heartbeat is written WHILE busy, not just once at job start/end.
-    class _Handler(http.server.BaseHTTPRequestHandler):
-        def do_GET(self):
-            hits.append(self.path)
-            if delay_seconds:
-                time.sleep(delay_seconds)
-            status, body = routes.get(self.path, (404, b"not found"))
-            self.send_response(status)
-            self.end_headers()
-            self.wfile.write(body)
-
-        def log_message(self, *args):
-            pass
-
-    return _Handler
-
-
 async def _seed_tenant_crawl_source_and_verified_domain(seed_url: str) -> dict:
     tenant_id = await _create_tenant("Crawl Adapter Proof Tenant")
 
@@ -379,7 +354,7 @@ async def test_full_crawl_via_sitemap_ingests_every_page(monkeypatch, live_test_
     # real Qdrant points queryable.
     client = await _prepare_env(monkeypatch, live_test_services)
     routes: dict = {}
-    with local_http_server(_tracking_handler(routes, [])) as port:
+    with local_http_server(tracking_handler(routes, [])) as port:
         seed = f"http://{_LOOPBACK_HOST}:{port}"
         page1 = f"{seed}/page1"
         page2 = f"{seed}/page2"
@@ -424,7 +399,7 @@ async def test_crawl_with_no_sitemap_falls_back_to_real_link_following(
     # the visited set, not just BFS order).
     client = await _prepare_env(monkeypatch, live_test_services)
     routes: dict = {}
-    with local_http_server(_tracking_handler(routes, [])) as port:
+    with local_http_server(tracking_handler(routes, [])) as port:
         seed = f"http://{_LOOPBACK_HOST}:{port}"
         child1 = f"{seed}/child1"
         child2 = f"{seed}/child2"
@@ -467,7 +442,7 @@ async def test_robots_disallowed_path_is_never_fetched_during_a_crawl(
     client = await _prepare_env(monkeypatch, live_test_services)
     routes: dict = {}
     hits: list[str] = []
-    with local_http_server(_tracking_handler(routes, hits)) as port:
+    with local_http_server(tracking_handler(routes, hits)) as port:
         seed = f"http://{_LOOPBACK_HOST}:{port}"
         allowed = f"{seed}/allowed"
         disallowed = f"{seed}/disallowed"
@@ -505,7 +480,7 @@ async def test_the_per_crawl_page_cap_stops_discovery_at_the_right_point(
     client = await _prepare_env(monkeypatch, live_test_services)
     monkeypatch.setenv("CRAWL_PAGE_CAP", "3")
     routes: dict = {}
-    with local_http_server(_tracking_handler(routes, [])) as port:
+    with local_http_server(tracking_handler(routes, [])) as port:
         seed = f"http://{_LOOPBACK_HOST}:{port}"
         children = [f"{seed}/p{i}" for i in range(8)]
         links_html = "".join(f'<a href="/p{i}">p{i}</a>' for i in range(8))
@@ -547,10 +522,10 @@ async def test_an_out_of_scope_domain_link_is_never_fetched_mid_crawl(
     client = await _prepare_env(monkeypatch, live_test_services)
     evil_hits: list[str] = []
     with local_ipv6_http_server(
-        _tracking_handler({"/evil": (200, b"should never be served")}, evil_hits)
+        tracking_handler({"/evil": (200, b"should never be served")}, evil_hits)
     ) as evil_port:
         routes: dict = {}
-        with local_http_server(_tracking_handler(routes, [])) as port:
+        with local_http_server(tracking_handler(routes, [])) as port:
             seed = f"http://{_LOOPBACK_HOST}:{port}"
             child = f"{seed}/child"
             evil_url = f"http://[::1]:{evil_port}/evil"
@@ -597,7 +572,7 @@ async def test_a_domain_revoked_after_source_creation_is_rejected_at_the_handler
     # result.
     client = await _prepare_env(monkeypatch, live_test_services)
     hits: list[str] = []
-    with local_http_server(_tracking_handler({}, hits)) as port:
+    with local_http_server(tracking_handler({}, hits)) as port:
         seed = f"http://{_LOOPBACK_HOST}:{port}"
 
         tenant_id = await _create_tenant("Crawl Revoked-After-Creation Proof Tenant")
@@ -677,7 +652,7 @@ async def test_heartbeat_is_written_mid_crawl_not_only_at_job_boundaries(
 
     routes: dict = {}
     page_delay_seconds = 0.08
-    with local_http_server(_tracking_handler(routes, [], page_delay_seconds)) as port:
+    with local_http_server(tracking_handler(routes, [], page_delay_seconds)) as port:
         seed = f"http://{_LOOPBACK_HOST}:{port}"
         links_html = "".join(f'<a href="/p{i}">p{i}</a>' for i in range(4))
         routes["/"] = (200, _rich_page("Home", "home", links_html).encode())
@@ -733,7 +708,7 @@ async def test_a_page_missing_from_two_consecutive_crawls_is_deleted_but_not_aft
 ):
     client = await _prepare_env(monkeypatch, live_test_services)
     routes: dict = {}
-    with local_http_server(_tracking_handler(routes, [])) as port:
+    with local_http_server(tracking_handler(routes, [])) as port:
         seed = f"http://{_LOOPBACK_HOST}:{port}"
         page1 = f"{seed}/page1"
         routes["/"] = (200, _rich_page("Home", "home").encode())
@@ -799,7 +774,7 @@ async def test_a_page_that_reappears_resets_its_last_seen_at_and_is_never_delete
 ):
     client = await _prepare_env(monkeypatch, live_test_services)
     routes: dict = {}
-    with local_http_server(_tracking_handler(routes, [])) as port:
+    with local_http_server(tracking_handler(routes, [])) as port:
         seed = f"http://{_LOOPBACK_HOST}:{port}"
         page1 = f"{seed}/page1"
         routes["/"] = (200, _rich_page("Home", "home").encode())
@@ -849,7 +824,7 @@ async def test_a_page_that_reappears_resets_its_last_seen_at_and_is_never_delete
 async def test_a_failed_crawl_run_does_not_count_as_a_miss(monkeypatch, live_test_services):
     await _prepare_env(monkeypatch, live_test_services)
     routes: dict = {}
-    with local_http_server(_tracking_handler(routes, [])) as port:
+    with local_http_server(tracking_handler(routes, [])) as port:
         seed = f"http://{_LOOPBACK_HOST}:{port}"
         page1 = f"{seed}/page1"
         routes["/"] = (200, _rich_page("Home", "home").encode())

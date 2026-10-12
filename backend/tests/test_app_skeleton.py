@@ -39,11 +39,13 @@ SUBPACKAGES = [
 # the now-empty stub file was deleted outright rather than left as
 # purposeless scaffolding; a real service.py can be recreated fresh
 # whenever a later ingestion step (2.2+) actually needs one.
+# app.retrieval.service.retrieve is no longer a raising stub as of Task
+# 3.1.c (the real hybrid retrieve(client_id, query, k) is built, tested
+# separately in test_retrieval_service.py) -- removed the same way.
 STUB_ENTRY_POINTS = [
     ("app.plans.service", "get_plan_limits"),
     ("app.chat.routes", "stream_chat_response"),
     ("app.agent.graph", "build_graph"),
-    ("app.retrieval.service", "retrieve"),
     ("app.handoff.routes", "submit_escalation"),
     ("app.notifications.service", "send_email"),
     ("app.mcp.service", "search_knowledge_base"),

@@ -127,9 +127,10 @@ test-qdrant-down:
 # they fail: the pytest run is captured explicitly (subshell, so the "cd
 # backend" does not leak into the test-db-down/test-qdrant-down calls that
 # follow) instead of relying on make's own error handling for cleanup.
-# TEST_QDRANT_API_KEY matches the literal key test-qdrant sets above.
+# TEST_QDRANT_API_KEY/TEST_QDRANT_READ_ONLY_API_KEY match the literal keys
+# test-qdrant sets above.
 test-all: test-db test-qdrant
-	@(cd backend && TEST_DATABASE_URL=postgresql+psycopg://widgetplatform:change-me@127.0.0.1:55432/widgetplatform_test TEST_QDRANT_URL=http://127.0.0.1:56333 TEST_QDRANT_API_KEY=test-qdrant-key python -m pytest tests -q); \
+	@(cd backend && TEST_DATABASE_URL=postgresql+psycopg://widgetplatform:change-me@127.0.0.1:55432/widgetplatform_test TEST_QDRANT_URL=http://127.0.0.1:56333 TEST_QDRANT_API_KEY=test-qdrant-key TEST_QDRANT_READ_ONLY_API_KEY=test-qdrant-readonly-key python -m pytest tests -q); \
 	rc=$$?; \
 	$(MAKE) test-db-down; \
 	$(MAKE) test-qdrant-down; \

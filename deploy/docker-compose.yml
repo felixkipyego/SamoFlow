@@ -21,6 +21,9 @@ x-app-env: &app-env
   DATABASE_URL: ${DATABASE_URL:?DATABASE_URL must be set in .env}
   QDRANT_URL: ${QDRANT_URL:?QDRANT_URL must be set in .env}
   QDRANT_API_KEY: ${QDRANT_API_KEY:?QDRANT_API_KEY must be set in .env}
+  # Required (Task 3.1.b): retrieve()'s own least-privilege, server-
+  # enforced read-only credential, separate from QDRANT_API_KEY above.
+  QDRANT_READ_ONLY_API_KEY: ${QDRANT_READ_ONLY_API_KEY:?QDRANT_READ_ONLY_API_KEY must be set in .env}
   # Required (Task 1.4.a): signs and verifies widget session tokens.
   JWT_SIGNING_KEY: ${JWT_SIGNING_KEY:?JWT_SIGNING_KEY must be set in .env}
   # Optional: ":-" (not ":?") -- empty is a valid "not rotating" value,
@@ -110,6 +113,12 @@ services:
     image: qdrant/qdrant:v1.19.1
     environment:
       QDRANT__SERVICE__API_KEY: ${QDRANT_API_KEY:?QDRANT_API_KEY must be set in .env}
+      # Task 3.1.b: a SECOND, genuinely server-enforced key for retrieve()'s
+      # own read path -- confirmed live against this exact pinned image
+      # that Qdrant rejects a write through this key with its own 403,
+      # not merely an application-level convention. See app/qdrant.py's
+      # get_qdrant_read_client()'s own docstring for the full proof.
+      QDRANT__SERVICE__READ_ONLY_API_KEY: ${QDRANT_READ_ONLY_API_KEY:?QDRANT_READ_ONLY_API_KEY must be set in .env}
     volumes:
       - qdrant-data:/qdrant/storage
     healthcheck:
@@ -265,6 +274,11 @@ services:
       # throwaway, localhost-only, and never holds real data -- same spirit
       # as test-db's literal Postgres credentials above.
       QDRANT__SERVICE__API_KEY: test-qdrant-key
+      # Task 3.1.b: a second, genuinely different test-only key, so live
+      # tests can exercise the real read-only/read-write distinction
+      # against this exact server, not just construct two clients with
+      # the same underlying permission.
+      QDRANT__SERVICE__READ_ONLY_API_KEY: test-qdrant-readonly-key
     ports:
       - "127.0.0.1:56333:6333"
     tmpfs:

@@ -51,6 +51,7 @@ import os
 import socket
 import sys
 import threading
+import time
 import uuid
 from collections.abc import AsyncIterator, Iterator
 from contextlib import aclosing, asynccontextmanager, contextmanager
@@ -282,6 +283,7 @@ VALID_ENV = {
     "DATABASE_URL": "postgresql+psycopg://user:pw@localhost:5432/widgetplatform",
     "QDRANT_URL": "http://localhost:6333",
     "QDRANT_API_KEY": "test-qdrant-key",  # noqa: S105 (test fixture value, not a real secret)
+    "QDRANT_READ_ONLY_API_KEY": "test-qdrant-readonly-key",  # noqa: S105 (test fixture value, not a real secret)
     "JWT_SIGNING_KEY": "test-jwt-signing-key-at-least-32-chars",  # noqa: S105
     "DB_CONNECTION_ENCRYPTION_KEY": "test-db-connection-key-at-least-32-chars",  # noqa: S105
     "ADMIN_API_KEY": "test-admin-key-at-least-32-characters-long",  # noqa: S105
@@ -430,6 +432,68 @@ def require_test_qdrant() -> tuple[str, str]:
             "Only 'localhost' and '127.0.0.1' are allowed."
         )
     return url, key
+
+
+def require_test_qdrant_read_only_key() -> str:
+    # Task 3.1.b: deliberately a SEPARATE, small helper, not a widened
+    # require_test_qdrant() return tuple -- that function already has many
+    # existing call sites across this test suite destructuring exactly
+    # `(url, key)`; only the handful of NEW tests exercising the read-only
+    # key need this value, so forcing every existing call site to adopt a
+    # 3-tuple for a value they don't use would be a real, unnecessary blast
+    # radius (rule 11). Same fail-not-skip discipline as the key check
+    # inside require_test_qdrant() above: call require_test_qdrant() first
+    # for the skip/CI/host checks, THEN this for the one additional value.
+    key = os.environ.get("TEST_QDRANT_READ_ONLY_API_KEY")
+    if not key:
+        pytest.fail(
+            "TEST_QDRANT_URL is set but TEST_QDRANT_READ_ONLY_API_KEY is not: "
+            'a half-configured test Qdrant is a real misconfiguration, not '
+            '"no Qdrant configured".'
+        )
+    return key
+
+
+def set_real_qdrant_env(monkeypatch) -> None:
+    # Phase-3.1 duplication check (2026-11-01): existed as two separate,
+    # byte-identical local copies -- test_retrieval_service.py's and
+    # test_retrieval_isolation.py's own `_set_real_qdrant_env()` -- past
+    # this project's own established extraction threshold given both were
+    # true duplicates, not merely similar. Any live test calling
+    # retrieve() needs this: that function calls get_settings() and
+    # get_qdrant_read_client() internally, so a full valid environment,
+    # pointed at the real test-qdrant service, is required.
+    url, key = require_test_qdrant()
+    read_only_key = require_test_qdrant_read_only_key()
+    set_valid_env(
+        monkeypatch,
+        VALID_ENV,
+        QDRANT_URL=url,
+        QDRANT_API_KEY=key,
+        QDRANT_READ_ONLY_API_KEY=read_only_key,
+    )
+
+
+@pytest.fixture(scope="module")
+def close_the_shared_qdrant_read_client_once():
+    # Phase-3.1 duplication check (2026-11-01): existed as two separate,
+    # byte-identical fixtures -- test_retrieval_service.py's and
+    # test_retrieval_isolation.py's own `_close_the_shared_read_client_
+    # once()` -- plus a third, half-identical occurrence inside
+    # test_qdrant.py's own combined fixture (which also closes
+    # get_qdrant_client(), a genuinely different concern that stays
+    # local there, not merged into this one). Deliberately NOT
+    # `autouse=True` here: unlike a per-file autouse fixture, marking it
+    # autouse in conftest.py would apply it to every test module in the
+    # whole suite, including the hundreds that never touch
+    # get_qdrant_read_client() at all. Each module that needs this opts
+    # in explicitly via `pytestmark = pytest.mark.usefixtures(
+    # "close_the_shared_qdrant_read_client_once")` -- module-scoped
+    # either way, so one real instance per module, not per test.
+    yield
+    if qdrant.get_qdrant_read_client.cache_info().currsize:
+        asyncio.run(qdrant.get_qdrant_read_client().close())
+    qdrant.get_qdrant_read_client.cache_clear()
 
 
 def _exception_chain(exc):
@@ -741,6 +805,39 @@ def scripted_handler(routes: dict):
     # change what the SAME running server returns on a later request).
     class _Handler(http.server.BaseHTTPRequestHandler):
         def do_GET(self):
+            status, body = routes.get(self.path, (404, b"not found"))
+            self.send_response(status)
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *args):
+            pass
+
+    return _Handler
+
+
+def tracking_handler(routes: dict, hits: list, delay_seconds: float = 0):
+    # Phase-2 close-out duplication check (2.10's own rule-9 phase-boundary
+    # pass): a local variant of scripted_handler() above that ALSO records
+    # every requested path -- needed by callers proving a specific path
+    # was NEVER requested, not merely absent from the final result.
+    # Existed as two separate copies before this extraction --
+    # test_job_handlers.py's own `_tracking_handler()` (2.6.d/2.6.e/2.6.f,
+    # itself already collapsed once from a third, delay-only variant) and
+    # test_ingest_repository.py's own `_recording_handler()` (2.10.b) --
+    # the second one a strictly-simpler subset of the first (`routes={}`,
+    # no delay), written without cross-referencing it. Extracted here,
+    # matching scripted_handler()'s own precedent of living in conftest.py
+    # rather than staying duplicated per test file. `delay_seconds` gives
+    # a caller proving mid-job progress (e.g. heartbeat writes during a
+    # busy crawl) real, non-trivial elapsed time between requests; a
+    # caller with no use for it (the hits-only, zero-network-activity
+    # proof shape) passes `routes={}` and leaves it at its default 0.
+    class _Handler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            hits.append(self.path)
+            if delay_seconds:
+                time.sleep(delay_seconds)
             status, body = routes.get(self.path, (404, b"not found"))
             self.send_response(status)
             self.end_headers()

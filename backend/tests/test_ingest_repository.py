@@ -15,7 +15,6 @@
 #     hostile-caller discipline (test_tenancy_repository.py): a real
 #     db_connection belonging to a different tenant, and a nonexistent id,
 #     must produce the identical outcome (both raise), never distinguished.
-import http.server
 import uuid
 from datetime import UTC, datetime, timedelta
 
@@ -59,6 +58,7 @@ from tests.conftest import (
     db_session,
     local_http_server,
     patch_embed_dense,
+    tracking_handler,
 )
 
 DISTINCTIVE_PASSWORD = "sUpEr-DiStInCtIvE-fake-password-123-never-leak-me"  # noqa: S105 (test fixture value, not a real secret)
@@ -1167,25 +1167,6 @@ async def test_create_source_rejects_an_interval_more_frequent_than_the_plan_all
         assert count == 0
 
 
-def _recording_handler(hits: list):
-    # Task 2.10.b [SECURITY]: a minimal local HTTP server handler that
-    # records every requested path -- proves zero network activity, not
-    # merely a rejected return value. Mirrors test_job_handlers.py's own
-    # _tracking_handler() shape; kept local rather than imported, matching
-    # that file's own scripted_handler()/_tracking_handler() precedent of
-    # each test file holding its own small handler class.
-    class _Handler(http.server.BaseHTTPRequestHandler):
-        def do_GET(self):
-            hits.append(self.path)
-            self.send_response(200)
-            self.end_headers()
-
-        def log_message(self, *args):
-            pass
-
-    return _Handler
-
-
 async def test_create_source_rejects_a_crawl_type_source_for_an_unverified_domain(
     _seeded_tenants,
 ):
@@ -1200,7 +1181,7 @@ async def test_create_source_rejects_a_crawl_type_source_for_an_unverified_domai
     # not merely absent from `verified_domains`, there IS no such row.
     ids = _seeded_tenants
     hits: list = []
-    with local_http_server(_recording_handler(hits)) as port:
+    with local_http_server(tracking_handler({}, hits)) as port:
         seed_url = f"http://127.0.0.1:{port}/"
         async with db_session() as session:
             repo = IngestRepository(tenant_id=ids["tenant_a"], session=session)
