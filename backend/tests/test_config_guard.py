@@ -76,6 +76,11 @@ ALLOWED_OPENAI_API_KEY_CALLERS: tuple[str, ...] = ("app/ingest/embedding.py",)
 _SECRET_ACCESSOR_ALLOW_LISTS: dict[str, tuple[str, ...]] = {
     "database_url_str": ALLOWED_DATABASE_URL_CALLERS,
     "qdrant_api_key_str": ALLOWED_QDRANT_API_KEY_CALLERS,
+    # Task 3.1.b: shares ALLOWED_QDRANT_API_KEY_CALLERS -- both accessors
+    # are scoped to the identical single file (app/qdrant.py), matching
+    # jwt_signing_key_str()'s/jwt_signing_key_previous_str()'s own
+    # precedent of sharing one allow-list across two accessor names.
+    "qdrant_read_only_api_key_str": ALLOWED_QDRANT_API_KEY_CALLERS,
     "jwt_signing_key_str": ALLOWED_JWT_KEY_CALLERS,
     "jwt_signing_key_previous_str": ALLOWED_JWT_KEY_CALLERS,
     "db_connection_encryption_key_str": ALLOWED_DB_CONNECTION_ENCRYPTION_KEY_CALLERS,

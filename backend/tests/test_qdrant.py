@@ -30,13 +30,16 @@ import pytest
 from qdrant_client import AsyncQdrantClient
 from qdrant_client.common.version_check import get_server_version, is_compatible
 from qdrant_client.http.exceptions import UnexpectedResponse
+from qdrant_client.models import PointStruct
 
 from app import qdrant
 from tests.conftest import (
     BACKEND_DIR,
     VALID_ENV,
+    live_qdrant_collection,
     minimal_subprocess_env,
     require_test_qdrant,
+    require_test_qdrant_read_only_key,
     set_valid_env,
     spawn_module_subprocess,
 )
@@ -116,11 +119,15 @@ def _close_the_shared_live_client_once():
     # event loops (see this file's header comment for the proof that this
     # is safe for this client), so it is closed and the cache cleared once,
     # here, after both have run -- not per-test, which would defeat the
-    # point of what is being proved.
+    # point of what is being proved. Task 3.1.b: get_qdrant_read_client()'s
+    # own cache is cleaned up the identical way, same reasoning.
     yield
     if qdrant.get_qdrant_client.cache_info().currsize:
         asyncio.run(qdrant.get_qdrant_client().close())
     qdrant.get_qdrant_client.cache_clear()
+    if qdrant.get_qdrant_read_client.cache_info().currsize:
+        asyncio.run(qdrant.get_qdrant_read_client().close())
+    qdrant.get_qdrant_read_client.cache_clear()
 
 
 async def test_get_qdrant_client_lists_collections_with_the_right_key(monkeypatch):
@@ -144,6 +151,65 @@ async def test_get_qdrant_client_again_reuses_the_same_client_a_different_loop(m
     client = qdrant.get_qdrant_client()
     result = await client.get_collections()
     assert result.collections is not None
+
+
+async def test_get_qdrant_read_client_lists_collections_with_the_right_key(monkeypatch):
+    # Task 3.1.b: mirrors test_get_qdrant_client_lists_collections_with_
+    # the_right_key() above exactly, proving the whole Settings ->
+    # build_qdrant_client -> read-only-key path works end to end against
+    # the real service, not just that construction succeeds.
+    url = require_test_qdrant()[0]
+    read_only_key = require_test_qdrant_read_only_key()
+    set_valid_env(
+        monkeypatch, VALID_ENV, QDRANT_URL=url, QDRANT_READ_ONLY_API_KEY=read_only_key
+    )
+    client = qdrant.get_qdrant_read_client()
+    result = await client.get_collections()
+    assert result.collections is not None
+
+
+async def test_get_qdrant_read_client_can_query_but_a_write_is_rejected_by_qdrant_itself(
+    monkeypatch,
+):
+    # Task 3.1.b [SECURITY]: the real proof this least-privilege client
+    # exists for -- confirmed live against the real pinned server, not
+    # assumed from documentation or from app/qdrant.py's own docstring
+    # alone. A real collection and a real point are created with the
+    # ordinary read-write client first (live_qdrant_collection() below);
+    # the read-only client then (a) successfully reads that SAME point
+    # back via query_points() -- the real method retrieve() will call at
+    # 3.1.c, not merely scroll() -- and (b) has an upsert attempt through
+    # it REJECTED by Qdrant's own server-side RBAC (HTTP 403, "Forbidden:
+    # Global manage access is required"), not merely skipped by this
+    # codebase's own discipline.
+    async with live_qdrant_collection("read_only_key_probe") as (rw_client, name):
+        await _create_bare_collection(rw_client, name)
+        await rw_client.upsert(
+            collection_name=name,
+            points=[PointStruct(id=1, vector={"dense": [0.1] * 1536})],
+        )
+
+        url = require_test_qdrant()[0]
+        read_only_key = require_test_qdrant_read_only_key()
+        read_client = qdrant.build_qdrant_client(url, read_only_key)
+        try:
+            # (a) read succeeds.
+            result = await read_client.query_points(
+                collection_name=name, query=[0.1] * 1536, using="dense", limit=1
+            )
+            assert len(result.points) == 1
+            assert result.points[0].id == 1
+
+            # (b) write rejected by the server itself, not by this codebase
+            # choosing not to call it.
+            with pytest.raises(UnexpectedResponse) as exc_info:
+                await read_client.upsert(
+                    collection_name=name,
+                    points=[PointStruct(id=2, vector={"dense": [0.2] * 1536})],
+                )
+            assert exc_info.value.status_code == 403
+        finally:
+            await read_client.close()
 
 
 async def test_wrong_key_fails_authentication():

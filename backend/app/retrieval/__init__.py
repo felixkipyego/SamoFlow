@@ -1,3 +1,3 @@
 # backend/app/retrieval/__init__.py
-# NOTE: empty placeholder. Hybrid retrieval (retrieve()) is tracked as
-# Step 3.1 in PROJECT_SPEC.md's component table. No side effects on import.
+# NOTE: empty placeholder, no side effects on import. Hybrid retrieval
+# (retrieve(), app/retrieval/service.py) is real as of Task 3.1.c.

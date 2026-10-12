@@ -543,6 +543,31 @@ def test_read_path_guard_passes_against_the_real_backend_app():
     assert scan_read_path_guard(BACKEND_DIR) == []
 
 
+def test_retrieve_service_never_references_get_qdrant_client():
+    # Phase-3.1 duplication check (2026-11-01), finding C.2: the guard
+    # above enforces FILE LOCATION only (rule a: which files may import
+    # app.qdrant at all; rule b: which of those may call a READ-classified
+    # method) -- it never checks WHICH client-getter function an
+    # allow-listed file actually calls. app/retrieval/service.py is the
+    # one file in this codebase with a structural reason to NEVER hold
+    # the read-write client (its own module header comment states this),
+    # but nothing before this test actually verified that claim against
+    # the real source -- it had only ever been asserted in a comment.
+    # AST-based (not a plain substring search) so a renamed local alias
+    # or a reference inside a string/comment cannot produce a false
+    # positive or a false negative.
+    path = BACKEND_DIR / "app/retrieval/service.py"
+    tree = ast.parse(path.read_text(), filename=str(path))
+    references = [
+        node
+        for node in ast.walk(tree)
+        if (isinstance(node, ast.Name) and node.id == "get_qdrant_client")
+        or (isinstance(node, ast.Attribute) and node.attr == "get_qdrant_client")
+        or (isinstance(node, ast.alias) and node.name == "get_qdrant_client")
+    ]
+    assert references == []
+
+
 # --- Guard unit tests on synthetic trees (no Qdrant needed) -----------------
 
 

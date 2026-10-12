@@ -136,3 +136,58 @@ async def embed_sparse(texts: list[str]) -> list[SparseVectorData]:
         SparseVectorData(indices=result.indices.tolist(), values=result.values.tolist())
         for result in results
     ]
+
+
+async def embed_sparse_query(texts: list[str]) -> list[SparseVectorData]:
+    """Task 3.1.a. The query-side sibling to `embed_sparse()` above --
+    deliberately a SEPARATE function, not a mode parameter on that one,
+    because the two are genuinely different computations, not the same
+    one applied to different input: confirmed live by reading the
+    installed model's own `query_embed()` source directly (`fastembed`'s
+    `Bm25.query_embed()`), not assumed from documentation. Its own
+    docstring states the real reasoning plainly: "to emulate BM25
+    behaviour, we don't need to use weights in the query, and it's
+    enough to just hash the tokens and assign a weight of 1.0 to them."
+    No TF-saturation formula runs at all (unlike `embed_sparse()`'s own
+    `model.embed()` call, which computes the document-side half of BM25
+    scoring, confirmed live and documented on that function above) --
+    every token instead gets a flat weight of 1.0, confirmed live.
+
+    Entry COUNT is not where the two sides differ -- confirmed live, by
+    calling both on the identical repeated-token text, that `embed()`
+    ALSO collapses a repeated token to one entry (its own TF-saturation
+    VALUE reflects the real occurrence count; the entry itself is still
+    one per unique token, same as the query side). The real asymmetry is
+    the WEIGHT formula alone: TF-saturation (document side) vs. a flat
+    1.0 (query side, this function) -- the asymmetric half of BM25
+    scoring `embed_sparse()`'s own docstring already explains for
+    documents. Qdrant's own `idf` modifier (configured once, at Task
+    1.3.c, on this collection's sparse vector slot) still supplies the
+    IDF factor at query time regardless of which side produced the
+    vector; this function only needs to get the QUERY'S OWN half right.
+
+    Calling `embed_sparse()` (the document-side function) on a query
+    string instead of this one would silently apply the wrong half of
+    the formula -- not an error, just a quietly wrong relevance score,
+    exactly the kind of mismatch this separate function exists to avoid
+    ever becoming possible by construction.
+
+    Returns `list[float]` values, coerced explicitly: confirmed live that
+    `query_embed()`'s own raw output is integer-typed (`numpy.int32`,
+    literal `1`, not `1.0` -- `SparseEmbedding.values = np.ones_like(token_ids)`,
+    which inherits `token_ids`'s own integer dtype), unlike `embed_sparse()`'s
+    real float TF-saturation values -- cast here so `SparseVectorData.values`
+    always genuinely holds `float`, matching its own declared type on
+    both call paths, not silently inconsistent between them.
+    """
+    if not texts:
+        return []
+    model = _get_sparse_model()
+    results = model.query_embed(texts)
+    return [
+        SparseVectorData(
+            indices=result.indices.tolist(),
+            values=[float(v) for v in result.values.tolist()],
+        )
+        for result in results
+    ]
