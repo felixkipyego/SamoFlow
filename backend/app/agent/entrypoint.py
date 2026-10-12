@@ -1,0 +1,153 @@
+# backend/app/agent/entrypoint.py
+# Task 3.2.c [SECURITY]: the one guarded entry point (docs/SPEC.md §4.5 --
+# "only one function may call graph.astream, aget_state or Command(resume=
+# ...). It builds the config itself and asserts the thread prefix matches
+# the caller"). This module is the ONLY place in this codebase allowed to
+# call those LangGraph run/state methods on a real graph -- enforced by
+# this module's own AST guard, tests/test_agent_entrypoint_guard.py, built
+# alongside it (not deferred to Step 3.3).
+#
+# No graph, router or specialist is built here (Step 3.3's own job) --
+# `graph` is a dependency-injected parameter (Task 3.2.a/3.2.c's own
+# decision: a real graph object, passed in, never constructed by this
+# module), tested against a trivial throwaway graph built only for this
+# task's own tests.
+#
+# Three thin public functions (run_turn/resume_turn/read_state), not one
+# function with an operation discriminator -- each operation has a
+# naturally different payload shape (an arbitrary graph input dict, a
+# resume value, nothing), and a discriminator function would need an
+# untyped/Union payload parameter plus an internal if/elif dispatch for no
+# real benefit: the invariant that actually matters -- the LangGraph
+# config dict is built in exactly ONE place, and no path bypasses it -- is
+# identically satisfied either way, since all three route through
+# `_build_thread_config()` below and nothing else ever constructs one.
+#
+# Signature discipline (docs/SPEC.md §4.5, §21): every public function
+# below takes exactly `(graph, identity, conversation_id, ...)` -- never a
+# `thread_id`, `config`, `configurable`, `checkpoint_id`, or a `**kwargs`
+# passthrough that could carry any of those in from outside. `identity` is
+# `VerifiedIdentity` (`app/auth/dependencies.py`, Task 1.4.h) specifically
+# -- never re-derived from a request body/query field, matching
+# `retrieve()`'s own identical obligation (Task 3.1.c). `conversation_id`
+# is typed `uuid.UUID`, not `str`.
+#
+# `conversation_id` MUST already be verified, by this function's own
+# caller, to belong to `identity.tenant_id` (and, once Step 4.2 lands, to
+# `identity.vid` too -- `get_conversation_by_id()` is tenant-scoped only
+# today, confirmed by reading it directly; see this task's own Open
+# marker). This module has no way to verify where its own `conversation_id`
+# argument came from, the identical trust boundary `retrieve()`'s own
+# docstring already states for `client_id` -- the caller (Step 4.1's real
+# `/chat` endpoint) carries that obligation, not this module.
+import uuid
+from collections.abc import AsyncIterator, Mapping
+from typing import Any
+
+from langchain_core.runnables import RunnableConfig
+from langgraph.graph.state import CompiledStateGraph
+from langgraph.types import Command, StateSnapshot
+
+from app.auth.dependencies import VerifiedIdentity
+
+
+def _build_thread_config(identity: VerifiedIdentity, conversation_id: uuid.UUID) -> RunnableConfig:
+    """The ONE place a LangGraph config dict is ever constructed in this
+    codebase -- every public function below routes through this, nothing
+    else does.
+
+    Delimiter-injection guard [SECURITY]: `thread_id` is built as
+    `f"{tenant_id}:{vid}:{conversation_id}"` (docs/SPEC.md §4.5) --
+    `tenant_id` and `conversation_id` are both `uuid.UUID` by this
+    function's own parameter types, and a UUID's `str()` form is always
+    exactly 32 hex digits plus 4 literal hyphens (confirmed by the `uuid`
+    module's own fixed canonical formatting), so neither can ever contain
+    a `:`. `VerifiedIdentity.vid` is ALSO typed `uuid.UUID` (confirmed by
+    reading `app/auth/dependencies.py` directly) -- but a Python dataclass
+    never enforces its own field types at construction, so a caller could
+    still hand this function a `VerifiedIdentity` whose `vid` was built
+    from an untrusted string despite the type hint. Checked explicitly
+    here, not merely assumed from the annotation: a `vid` (or `tenant_id`)
+    that is not a real `uuid.UUID` instance is rejected outright, before
+    any string is ever built -- a visitor id containing `:` could
+    otherwise forge a `thread_id` colliding with another conversation's or
+    visitor's own prefix.
+    """
+    if not isinstance(identity.tenant_id, uuid.UUID):
+        raise ValueError("identity.tenant_id must be a uuid.UUID")
+    if not isinstance(identity.vid, uuid.UUID):
+        raise ValueError("identity.vid must be a uuid.UUID")
+    if not isinstance(conversation_id, uuid.UUID):
+        raise ValueError("conversation_id must be a uuid.UUID")
+
+    thread_id = f"{identity.tenant_id}:{identity.vid}:{conversation_id}"
+    return {"configurable": {"thread_id": thread_id}}
+
+
+def _assert_thread_prefix_matches(config: Mapping[str, Any], identity: VerifiedIdentity) -> None:
+    """Non-tautological prefix assertion (docs/SPEC.md §4.5's own "asserts
+    the thread prefix matches the caller"): checks a config the GRAPH
+    handed back (e.g. `aget_state()`'s own returned `StateSnapshot.config`)
+    against `identity`'s own expected prefix -- not merely re-checking the
+    config this module just built itself, which would prove nothing. A
+    correctly-behaving checkpointer/graph will never actually produce a
+    mismatch; this exists as a defense-in-depth backstop, tested directly
+    against a deliberately-constructed mismatched config (a real graph
+    cannot be made to produce one to test against).
+    """
+    expected_prefix = f"{identity.tenant_id}:{identity.vid}:"
+    actual = config.get("configurable", {}).get("thread_id", "")
+    if not actual.startswith(expected_prefix):
+        raise RuntimeError(
+            f"thread prefix mismatch: expected a thread_id starting with "
+            f"{expected_prefix!r}, got {actual!r}"
+        )
+
+
+async def run_turn(
+    graph: CompiledStateGraph,
+    identity: VerifiedIdentity,
+    conversation_id: uuid.UUID,
+    input: Any,  # noqa: A002 (matches astream()'s own `input` parameter name)
+) -> AsyncIterator[Any]:
+    """Runs one turn (`graph.astream`), yielding whatever the graph itself
+    yields unchanged. `input` is forwarded to `astream()` exactly as
+    given, never inspected for `thread_id`/`configurable`-shaped keys --
+    those keys have no special meaning to this function at all; only the
+    config this function builds itself, from `identity`/`conversation_id`,
+    ever determines which thread a run executes against.
+    """
+    config = _build_thread_config(identity, conversation_id)
+    async for chunk in graph.astream(input, config):
+        yield chunk
+
+
+async def resume_turn(
+    graph: CompiledStateGraph,
+    identity: VerifiedIdentity,
+    conversation_id: uuid.UUID,
+    resume_value: Any,
+) -> AsyncIterator[Any]:
+    """Resumes an interrupted turn on the correct thread via
+    `Command(resume=resume_value)` -- the construction this module's own
+    AST guard confines to this file alone.
+    """
+    config = _build_thread_config(identity, conversation_id)
+    async for chunk in graph.astream(Command(resume=resume_value), config):
+        yield chunk
+
+
+async def read_state(
+    graph: CompiledStateGraph,
+    identity: VerifiedIdentity,
+    conversation_id: uuid.UUID,
+) -> StateSnapshot:
+    """Reads the current state (`graph.aget_state`) for one thread --
+    `_assert_thread_prefix_matches()` re-checks the SNAPSHOT'S OWN config
+    (something the graph/checkpointer handed back, not this function's own
+    input) before returning it.
+    """
+    config = _build_thread_config(identity, conversation_id)
+    snapshot = await graph.aget_state(config)
+    _assert_thread_prefix_matches(snapshot.config, identity)
+    return snapshot
