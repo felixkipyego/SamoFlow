@@ -84,8 +84,43 @@ def test_get_chat_model_is_primary_only_when_no_secondary_key(monkeypatch, caplo
     assert "ANTHROPIC_API_KEY is not set" in caplog.text
 
 
-def test_get_chat_model_builds_a_fallback_chain_when_secondary_key_is_set(monkeypatch, caplog):
+# --- Task 3.4.b (PART 0 follow-up): the two-key switch -- every real
+# combination tested explicitly, not just the two originally-obvious
+# ones (no key / key+verified). "Key set, flag false" is the one that
+# actually matters most: it is the DEFAULT state the moment someone adds
+# the key alone, and must stay primary-only until the manual check has
+# actually been run.
+
+
+def test_get_chat_model_is_primary_only_when_key_set_but_not_verified(monkeypatch, caplog):
     set_valid_env(monkeypatch, VALID_ENV, ANTHROPIC_API_KEY="sk-ant-real-looking-key")
+    chat_model.get_chat_model.cache_clear()
+    with caplog.at_level(logging.WARNING):
+        model = chat_model.get_chat_model()
+    assert type(model).__name__ == "ChatOpenAI"
+    assert "CHAT_MODEL_SECONDARY_VERIFIED is not true" in caplog.text
+    assert "manual_check_chat_model_streaming.py" in caplog.text
+
+
+def test_get_chat_model_is_primary_only_when_verified_but_no_key(monkeypatch, caplog):
+    # The flag alone, with no key at all, must not somehow enable
+    # anything -- `anthropic_api_key_str()` is still None, so this hits
+    # the EARLIER (no-key) branch, never the verified check.
+    set_valid_env(monkeypatch, VALID_ENV, CHAT_MODEL_SECONDARY_VERIFIED="true")
+    chat_model.get_chat_model.cache_clear()
+    with caplog.at_level(logging.WARNING):
+        model = chat_model.get_chat_model()
+    assert type(model).__name__ == "ChatOpenAI"
+    assert "ANTHROPIC_API_KEY is not set" in caplog.text
+
+
+def test_get_chat_model_builds_a_fallback_chain_when_key_set_and_verified(monkeypatch, caplog):
+    set_valid_env(
+        monkeypatch,
+        VALID_ENV,
+        ANTHROPIC_API_KEY="sk-ant-real-looking-key",
+        CHAT_MODEL_SECONDARY_VERIFIED="true",
+    )
     chat_model.get_chat_model.cache_clear()
     with caplog.at_level(logging.WARNING):
         model = chat_model.get_chat_model()
@@ -94,6 +129,7 @@ def test_get_chat_model_builds_a_fallback_chain_when_secondary_key_is_set(monkey
     assert len(model.fallbacks) == 1
     assert type(model.fallbacks[0]).__name__ == "ChatAnthropic"
     assert "ANTHROPIC_API_KEY is not set" not in caplog.text
+    assert "CHAT_MODEL_SECONDARY_VERIFIED is not true" not in caplog.text
 
 
 def test_get_chat_model_is_a_cached_singleton(monkeypatch):
@@ -112,6 +148,7 @@ def test_get_chat_model_sets_max_retries_zero_and_the_configured_timeout(monkeyp
         monkeypatch,
         VALID_ENV,
         ANTHROPIC_API_KEY="sk-ant-real-looking-key",
+        CHAT_MODEL_SECONDARY_VERIFIED="true",
         CHAT_MODEL_TIMEOUT_SECONDS="7",
     )
     chat_model.get_chat_model.cache_clear()

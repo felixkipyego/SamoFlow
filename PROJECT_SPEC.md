@@ -3147,11 +3147,11 @@ Researched first (the prior Step 3.4 research task, reported and accepted before
 |---|---|---|
 | 3.4.a [SECURITY] | Dependencies (`langchain`/`langchain-openai`/`langchain-anthropic`); `Settings` fields; the one model-construction module with explicit keys and `.with_fallbacks()`; the construction-confinement + explicit-`api_key` guard; live mechanism proofs with fakes (structured output through the fallback chain; `stream_mode="messages"` token emission through a real graph node) | Done |
 | 3.4.b [SECURITY] | The answer node: resolved the structured-output-vs-token-streaming tension (`.bind_tools()` + incremental `tool_call_chunks` parsing, not `.with_structured_output()`); §8's data/instruction delimiting with delimiter-breakout neutralisation; `can_answer=false` → fallback stub; mid-stream-failure handling; carry-over fixes to 3.4.a's own `chat_model.py` | Done |
-| 3.4.c [SECURITY] | Citations and output safety: citations built only from the overlap of `used_chunk_ids` and the chunks actually retrieved; web pages only; no upload filenames/database table names leaked; server-side markdown image/link neutralisation | Not started |
+| 3.4.c [SECURITY] | Citations and output safety: citations built only from the overlap of `used_chunk_ids` and the chunks actually retrieved; web pages only; no upload filenames/database table names leaked; server-side markdown image/link neutralisation | Done |
 | 3.4.d | Gate: light research first (RRF scores are rank-based, not relevance-calibrated — evaluate a calibrated signal, e.g. top dense cosine similarity or a Qdrant `score_threshold` floor, confirm live what 1.19.1 supports) and report before building; then the mechanism, a platform-default `Settings` field, provisional threshold + ASSUMPTION, tuned in 3.7 | Not started |
 | 3.4.e | Fallback text template (dashboard support details) + the fixed dependency-failure reply | Not started |
 | 3.4.f | Rule 2: greeting/thanks deterministic phrase list (short messages only); unsafe/abusive — research first (OpenAI's moderation endpoint: latency measured live, cost, fit with §6.2's "no LLM hop"), report before building | Not started |
-| 3.4.g | Close-out: acceptance against §6.3/§16's injection lines, closure summary; one opt-in, NOT-in-CI smoke run against the real OpenAI API measuring real time-to-first-token against §17's 3s figure | Not started |
+| 3.4.g | Close-out: acceptance against §6.3/§16's injection lines, closure summary; opt-in, NOT-in-CI, FULL-TURN (embedding + Qdrant + chat model) time-to-first-visible-text measurement against real services — N real runs (N stated when run), real p50 AND p95 against §17's own 1.5s/3s targets, prompt input size recorded per run; if p50 misses, name the candidate levers (fewer/shorter retrieved chunks, a different primary model, trimming the `can_answer`/`used_chunk_ids` preamble) rather than picking one speculatively | Not started |
 
 **Decisions, Q1-Q8, each confirmed/approved before building:**
 
@@ -3225,7 +3225,9 @@ Verified: no code changed in the decision-recording portion of this edit (pure p
 
   **New tests**: `tests/test_agent_graph_answer.py` (15, fakes only — `FakeAnswerToolChatModel`/`build_fake_answer_arg_chunks()`, `tests/conftest.py`, shared with `test_agent_graph_retrieve.py`, streaming real `tool_call_chunks` matching the real `Answer` schema's own shape): prompt construction (real doc ids absent, positional labelling, system instruction, delimiter-breakout neutralisation, the no-data-blocks placeholder) — 6 pure/offline; zero text before `can_answer`, `can_answer=false` emits zero deltas, append-only violation, failure-before-emission is not wrapped, failure-after-emission raises the named mid-stream error, the schema's own field order — 6 pure/offline; `can_answer=false` reaches the `no_answer_fallback` stub through the real graph, mid-stream failure leaves no completed `AIMessage` in a real checkpoint, and the full `retrieve → gate → answer` path end to end with a real compiled graph/checkpointer — 3 live (test-db only; `retrieve()` itself is stubbed in all three, matching the "don't re-prove retrieve, prove the answer node" scope, and deliberately side-stepping Carry-over 2's own hazard rather than needing to work around it). `tests/test_agent_graph_retrieve.py` (a completed 3.3.c/3.3.d file, edited per rule 2, flagged here): its own two tenant-isolation tests updated — `gate_answer` no longer raises, so the "reaches the stub" assertion is replaced with "the turn completes with a real final `AIMessage`," using the same shared fake; the tenant-isolation proof itself (the file's own actual job) is unchanged. `tests/test_agent_graph.py`: the removed `gate_answer` stub test replaced with one for `_no_answer_fallback_node` (naming Step 3.4.e) and one confirming `_gate_node`'s own pass-through behavior. `tests/test_chat_model.py`: +2 (explicit `max_retries`/`timeout` applied; the event-loop/keep-alive regression proof).
 
-  **Manual, opt-in, never-in-CI script** (`backend/scripts/manual_check_chat_model_streaming.py`, Tests section + the new Anthropic-gating marker, both satisfied by the same script): reuses the REAL `Answer`/`_build_messages()`/`parse_partial_json()` production code directly against a real provider (not a separately-maintained copy that could drift). **Run for real this task, against real OpenAI**: 22 raw `tool_call_chunks` observed (confirmed incremental, not one final blob); `can_answer` known at **2066ms**; first visible text at **2262ms**; total **2270ms** — comfortably inside docs/SPEC.md §17's own 3s p95 figure, with no field-order violation. Anthropic correctly skipped with a clear message (no `ANTHROPIC_API_KEY` available this session) — the script itself reports pass/fail against exactly the two properties the new gating marker requires, ready to run the moment a key is available.
+  **Manual, opt-in, never-in-CI script** (`backend/scripts/manual_check_chat_model_streaming.py`, Tests section + the new Anthropic-gating marker, both satisfied by the same script): reuses the REAL `Answer`/`_build_messages()`/`parse_partial_json()` production code directly against a real provider (not a separately-maintained copy that could drift). **Run for real this task, against real OpenAI**: 22 raw `tool_call_chunks` observed (confirmed incremental, not one final blob); `can_answer` known at **2066ms**; first visible text at **2262ms**; total **2270ms**. Anthropic correctly skipped with a clear message (no `ANTHROPIC_API_KEY` available this session) — the script itself reports pass/fail against exactly the two properties the new gating marker requires, ready to run the moment a key is available.
+
+  **Correction (2026-11-11, PART 0 follow-up to this task, caught on review, not self-caught)**: the paragraph above, as first written, called the 2270ms figure "comfortably inside docs/SPEC.md §17's own 3s p95 figure" — **wrong, and corrected here rather than left standing**. That single run measured ONLY the chat-model call in isolation (one real API round trip, nothing else) — it is NOT a measurement of §17's own actual quantity, "time to first token" for a REAL TURN, which also includes a real embedding call and a real Qdrant query BEFORE the chat model is ever reached (`_retrieve_node`, Task 3.3.c). §17's own targets are **p50 under 1.5s AND p95 under 3s** — two separate thresholds, not one — and a single sample is neither a p50 nor a p95 in any case. **Correct status: full-turn time-to-first-visible-text is NOT YET MEASURED; this one early, partial sample (model-call-only, 2.26s to first visible text) suggests a real p50 risk** (2.26s already exceeds the 1.5s p50 target on its own, before adding embedding/Qdrant time on top) — not a conclusion to build on, a risk to track. **3.4.g's own scope (below, already updated in the same edit) now explicitly owns the real measurement**: N real full-turn runs (N stated when run), real p50/p95, and prompt input size recorded alongside -- with named candidate levers if p50 misses (fewer/shorter retrieved chunks in the prompt, a different primary model, trimming the `can_answer`/`used_chunk_ids` preamble that precedes the visible answer in the current field order).
 
   ASSUMPTION: none new (the chat-model-identifier placeholder ASSUMPTION from 3.4.a is now HALF resolved — OpenAI confirmed live, twice, Anthropic still open, tracked by its own new marker). UNCERTAIN: none. TODO: none new beyond `TODO(3.4.d)` on the new `_gate_node` stub, matching the already-recorded 3.4.d marker exactly.
 
@@ -3236,6 +3238,266 @@ Verified: no code changed in the decision-recording portion of this edit (pure p
   2. **Main trade-off accepted**: Option A costs real implementation complexity (`.bind_tools()` + manual incremental-JSON diffing, not a one-line `.with_structured_output()` call) and a measured ~150-250ms latency premium over a plain-text alternative (the research task's own comparison), in exchange for a literal, no-deviation match to §6.3's own structured format and a cleaner, structurally-guaranteed "zero text before can_answer" property. Also accepted: the event-loop regression test is NOT perfectly deterministic (40 repetitions, empirically reliable across 10 trials, not mathematically guaranteed) — a real property of the underlying library's own connection-pool timing, disclosed plainly in the test's own docstring rather than hidden behind a falsely-confident single assertion.
   3. **Pushed back on / would have done differently**: nothing in this task's own instructions — all three carry-over reviews confirmed the prompt's own framing was accurate (not something to correct), and the format decision (Option A) was already decided at the prior research task, not re-litigated here. One correction to my OWN earlier research, caught by this task's own carry-over 2 review: the research task's "no event-loop issue found" conclusion for a quick two-loop check was too shallow (it only tested the never-connects path) — this task's own carry-over instruction to "prove the answer either way" is what caught the real, narrower hazard.
   4. **Highest production risk in this change**: the Anthropic field-order/streaming behavior remains genuinely unconfirmed — the new gating marker is a real, enforced precondition (not just a note), but nothing in this codebase TECHNICALLY stops someone from setting `ANTHROPIC_API_KEY` in a real `.env` before running the manual script. The marker's own text is explicit about this, but it is a process control, not a code-enforced one.
+
+### Part 0 follow-up to Task 3.4.b (2026-11-11)
+
+Two corrections raised on review of 3.4.b, not self-caught, both applied:
+
+**(a) Record correction.** 3.4.b's own task entry originally called its one
+manual-script sample ("first visible text at 2262ms") "comfortably inside
+docs/SPEC.md §17's own 3s p95 figure" — wrong on two counts: that run
+measured the chat-model call ALONE (no embedding, no Qdrant), not §17's own
+quantity (full-turn time-to-first-token), and §17 sets TWO thresholds
+(p50 < 1.5s AND p95 < 3s), neither of which a single sample can establish.
+Corrected in place, inline in 3.4.b's own task entry above (not duplicated
+here): the real status is "full-turn TTFV not yet measured; one early,
+partial sample suggests a real p50 risk." 3.4.g's own task-list row (above)
+now explicitly scopes the real measurement: N real full-turn runs (N stated
+when run), real p50 AND p95, prompt input size recorded per run, and named
+candidate levers if p50 misses (fewer/shorter retrieved chunks, a different
+primary model, trimming the `can_answer`/`used_chunk_ids` preamble) —
+decided in advance rather than picked after the fact.
+
+**(b) Code-enforced two-key switch.** The Anthropic-fallback gating marker
+(§9, originally recorded at 3.4.b as a documented-only precondition) is now
+code-enforced, not just written down: `get_chat_model()`
+(`app/agent/chat_model.py`) wires the secondary into the fallback chain only
+if BOTH `Settings.anthropic_api_key` is set AND the new
+`Settings.chat_model_secondary_verified` (`bool`, default `False`,
+**not** a secret — no `SecretStr`, it attests to a check having been run,
+it reveals nothing) are true. Key set but flag false → primary-only, plus a
+startup warning naming `backend/scripts/manual_check_chat_model_streaming.py`
+by path. The manual script's own Anthropic-branch result message updated to
+tell the operator to set `CHAT_MODEL_SECONDARY_VERIFIED=true` (not just
+"set the key") once its own two checks pass. The §9 marker itself (section 9
+below) rewritten in the same edit to describe this exact mechanism, naming
+both `Settings` fields.
+
+ASSUMPTION: none new. UNCERTAIN: none. TODO: none new.
+
+Verified: `make lint` clean. `tests/test_chat_model.py` alone, re-run 3
+times: **15 passed** every run (net +2 from 13 at 3.4.b's own close — one
+test, asserting a single "key set → fallback chain" outcome, replaced by
+three, one per real combination of the two keys: key set/flag false →
+primary-only, naming both the warning text and the script path; flag
+true/no key → primary-only, via the pre-existing no-key branch; both true →
+a real `RunnableWithFallbacks` with the expected primary/secondary pair).
+Full `backend/tests` without a test database and `make test-all` re-run
+together with 3.4.c's own changes below (the two tasks were verified in one
+pass, per the user's own combined instruction) — see 3.4.c's own Verified
+paragraph for the combined real counts; this sub-entry's own marginal
+contribution is exactly the +2 net test count named above, with zero
+change to any other file this sub-entry does not itself name.
+
+**Senior engineer check:**
+1. **Chose not to build**: a runtime check inside `get_chat_model()` that
+   re-verifies the Anthropic connection on every process start (e.g.
+   pinging the API) — the flag is a process attestation ("a human ran the
+   script and it passed"), not a live health check, matching this
+   project's own existing precedent (`ensure_collection()`'s own
+   idempotent-setup model is a live check; this is deliberately not that,
+   since re-running a real paid API call on every boot is not what the
+   user asked for and would add latency/cost to every deploy).
+2. **Main trade-off accepted**: the flag is settable by anyone with
+   environment-variable access, with no code path that itself verifies the
+   script was actually run — it is a **process** control (the warning text
+   and this record are the only real deterrents), not a technical one. The
+   user's own instruction already named this precisely as the
+   acceptable shape (a two-key SWITCH, not a cryptographic proof of
+   verification) — flagged again here so the record is explicit about what
+   "code-enforced" does and does not mean.
+3. **Pushed back on / would have done differently**: nothing — the
+   instruction's own two-key design (secret AND boolean, both required)
+   is exactly what was built, matching `jwt_signing_key_previous`'s
+   already-established "optional, additional gate" template in spirit.
+4. **Highest production risk in this change**: none newly introduced —
+   today, with no `ANTHROPIC_API_KEY` set anywhere in this project's real
+   environment, both branches that matter (no key; key-but-unverified) are
+   the only reachable ones. The risk this change CLOSES (a key alone
+   silently enabling an unverified provider) is strictly a risk reduction,
+   not a new one.
+
+### Step 3.4.c task entry
+
+- 2026-11-11: Task 3.4.c [SECURITY] — citations and output safety, built
+  directly into `_answer_node` (`app/agent/graph.py`), not a separate
+  graph node: the `_StreamSanitizer` needs the allowed-citation-URL set
+  BEFORE any answer text streams, and the `Answer` schema's own confirmed
+  field order (`can_answer` → `used_chunk_ids` → `answer`, 3.4.b) makes
+  that set available only inside this same node's own streaming loop —
+  a downstream node would need to re-derive or duplicate that timing,
+  not simplify anything (rule 11).
+
+  **Citations** (`Citation` TypedDict — `{url, heading_path}`, no `title`
+  field: `build_payload()`, `app/ingest/qdrant_writer.py`, does store one
+  in the real Qdrant payload, but `chunk_from_scored_point()`/
+  `RetrievedChunk` never thread it through, confirmed by reading both
+  directly — not re-touching an already-twice-touched completed file for
+  a non-essential field, matching the user's own "don't add fields
+  speculatively" instruction exactly). `_build_citations()`: for each
+  label in `used_chunk_ids`, resolves it via the existing positional
+  `c<i+1>` ↔ `retrieved_chunks[i]` convention (3.4.b); a label with no
+  matching index (hallucinated, injected, or a real `document_id` string
+  mistaken for one) is dropped and logged, never silently ignored; a
+  resolved chunk with `source_url is None` (upload/database) yields no
+  citation at all (web pages only, per docs/SPEC.md §6.3); the URL's
+  scheme must be exactly `http`/`https` (defense in depth — ingestion
+  already guarantees this, this function does not trust that blindly);
+  deduplicated by URL.
+
+  **Non-leak**: `RetrievedChunk`'s own field set (`document_id`, `text`,
+  `source_url`, `heading_path`, `score` — confirmed by reading
+  `app/retrieval/service.py` directly) structurally has no `file_name`/
+  table-identity field, so neither can enter `_build_messages()`'s own
+  prompt, the stream, the persisted `AIMessage`, or a `Citation` — proven
+  by a realistic upload/database-shaped chunk test asserting a sentinel
+  string never appears anywhere in the rendered prompt.
+
+  **Output sanitisation** (`_StreamSanitizer`, docs/SPEC.md §16 "markdown
+  image and link leak attempts are neutralised"): markdown images
+  (`![alt](url)`) removed entirely (no safe rendering of an auto-loaded
+  image exists); markdown links/autolinks become plain text unless their
+  URL is in the citation-URL allow-list exactly; raw HTML tags removed
+  (best-effort regex). **Streaming-safe design**: a stateful `feed()`/
+  `finish()` class buffering ("holding back") text from a potential
+  construct start (`!`, `[`, `<`) until it resolves, is ruled out, or
+  hits a bounded cap (`_SANITIZER_HOLD_CAP = 200` characters) — matching
+  3.4.b's own append-only streaming constraint (text, once emitted, can
+  never be taken back). **One shared function for both streamed and
+  persisted text**: `_answer_node` accumulates every string `feed()`/
+  `finish()` yields into the SAME variable it both forwards to the
+  stream writer and persists as the final `AIMessage` — "what was
+  streamed equals what's saved" by construction, proven (not just
+  asserted) by two integration tests comparing the two directly.
+  **Worst-case added latency, stated explicitly per direct instruction**:
+  zero wall-clock delay from the hold itself (pure synchronous string
+  matching, no sleep/await); the real cost is VISIBILITY lag — up to 200
+  characters of already-generated model output can sit unemitted while a
+  pending construct is unresolved, flushed at the cap, at a definitive
+  non-match, or at `finish()`. Full reasoning recorded in `graph.py`'s
+  own header comment, not repeated a third time here.
+
+  **Honesty about limits, stated plainly, per direct instruction** (full
+  text in `graph.py`'s own header comment): STRUCTURAL guarantees — the
+  forced single `Answer` tool (no other tool exists to call); citations
+  built only from the intersection of claimed-and-actual; http/https-only
+  citation URLs; `RetrievedChunk`'s closed field set. BEST-EFFORT
+  guarantees — the `[[DATA:cN]]` delimiter neutralisation (3.4.b) stops
+  exact-delimiter breakout only, not every way a model could be confused
+  by adversarial DATA-block text; the raw-HTML-tag regex is not a real
+  parser (a quoted-attribute `>` could in principle terminate a match
+  early); the link regex's non-greedy URL capture stops at the first `)`,
+  leaving a stray trailing character for a URL containing its own literal
+  parenthesis (e.g. `javascript:alert(1)`) — cosmetic, not a security
+  gap, since the disallowed scheme never survives into a real link
+  regardless.
+
+  **One real bug found and fixed by this task's own tests, not assumed
+  correct**: citation-building was first triggered the moment the KEY
+  NAME `"used_chunk_ids"` appeared in the partial JSON parse, even though
+  its LIST VALUE could still be mid-stream at that exact instant — a real
+  test (`used_chunk_ids=["c1", "c99", "c2"]`) caught citations resolving
+  against a truncated label (`"c"` instead of `"c99"`), producing an
+  empty citation list instead of the one real match. Fixed by triggering
+  on `"answer"` appearing in the partial parse instead — the schema's own
+  field order guarantees `used_chunk_ids` is fully closed out in valid
+  JSON before `"answer"` can even begin, making this the structurally
+  correct trigger point, not a timing guess.
+
+  **New tests**: `tests/test_agent_graph_citations.py` (new file, 21
+  tests, fakes only, zero real API calls): citation building — hallucinated/
+  injected/real-doc-id labels yield nothing, mixed web/upload/database
+  (only web survives), dedup by URL, http/https-only, heading path present
+  with no invented title field (5); non-leak — `RetrievedChunk`'s own
+  closed field set, a sentinel never reaching the rendered prompt (2);
+  sanitizer unit tests — image split across many deltas fully removed,
+  non-cited link/autolink downgraded, cited link survives, raw HTML
+  img/anchor neutralised, `javascript:`/`data:` URLs never become a
+  citation or a link, the hold-back cap triggers on a long run of bare
+  `[`, an unclosed construct at end-of-stream emits as plain text, plain
+  text with no constructs passes through unchanged (11); full node
+  integration — streamed text equals persisted text both when
+  sanitisation fires and on the happy path, citation state matches what
+  was actually cited and retrieved (3).
+
+  **Regression found and fixed, not newly introduced**: re-running
+  `test_agent_graph_answer.py` (3.4.b's own file) surfaced one stale
+  exact-dict assertion (`test_can_answer_false_emits_zero_deltas`) written
+  before `citations` existed as an `AgentState` field — the early-return
+  dict for `can_answer=false` now correctly includes `"citations": []`
+  alongside the two fields that test already checked; the test's own
+  assertion updated to match the now-correct three-field shape (no
+  production-code change — this was a test asserting an exact dict shape
+  that 3.4.c's own new field correctly extended).
+
+  ASSUMPTION: none new. UNCERTAIN: none. TODO: none new — this task
+  builds every piece it owns fully, no stub introduced.
+
+  Verified: `make lint` clean. `test_agent_graph_citations.py` alone,
+  re-run 3 times: **21 passed** every run (zero skips, fully offline).
+  `test_agent_graph_answer.py`/`test_agent_graph.py`/
+  `test_agent_graph_retrieve.py`/`test_chat_model.py`/
+  `test_chat_model_guard.py`/`test_config_guard.py` together (the full
+  set touching `graph.py`/`config.py`/`chat_model.py`, confirming zero
+  regressions from both this task and Part 0 above): **44 passed, 8
+  skipped** (one real regression found and fixed, see above — before the
+  fix, 1 failed). Full `backend/tests` without a test database: **722
+  passed, 327 skipped** (up from 699 passed, 327 skipped at 3.4.b's own
+  close — exactly +23: +21 new citation tests, +2 net from Part 0's
+  `test_chat_model.py` restructuring; 0 skips added, 0 regressions).
+  `make test-all` (both real services, fresh containers): **1049 passed,
+  9 warnings** (up from 1026 — exactly +23), 0 failed, both test
+  services confirmed fully removed afterward. `make hooks`: **75
+  markers** (unchanged from 3.4.b's own close — no new TODO/ASSUMPTION/
+  UNCERTAIN/NOTE added anywhere; the new header-comment prose documenting
+  structural-vs-best-effort limits and the sanitizer's own latency
+  statement uses none of those four prefixes). `make lock-check`: exit 0,
+  clean (no new dependency this task). `make audit`: "No known
+  vulnerabilities found". `git status --short` named and cross-checked
+  file by file: `PROJECT_SPEC.md`, `backend/app/agent/chat_model.py`,
+  `backend/app/config.py`, `backend/app/agent/graph.py`,
+  `backend/scripts/manual_check_chat_model_streaming.py`,
+  `backend/tests/test_agent_graph_answer.py`, `backend/tests/
+  test_chat_model.py` (all modified), `backend/tests/
+  test_agent_graph_citations.py` (new) — exactly the expected eight, no
+  `.env`, no migration, no new dependency.
+
+  **Senior engineer check:**
+  1. **Chose not to build**: a separate `_citations_node` (folded into
+     `_answer_node` instead, see this entry's own opening paragraph for
+     why); balanced-parenthesis URL matching for the link regex (would
+     risk breaking multi-link-per-line parsing for a cosmetic-only gap,
+     not a security one — documented instead); a live HTML parser in
+     place of `_RAW_TAG_RE` (the citation/tool-forcing guarantees already
+     remove the main injection payoff this layer defends against, so the
+     marginal security value of a full parser here is low against its
+     real cost — a new dependency and a materially larger attack surface
+     of its own).
+  2. **Main trade-off accepted**: the `_StreamSanitizer`'s bounded hold
+     trades up to 200 characters of visibility lag for a guarantee that
+     no partial markdown image/link construct ever reaches a visitor
+     mid-formation — the right side of that trade for a security
+     boundary, but a real, measurable cost that Step 4.1 (the real `/chat`
+     endpoint) should be aware of when reasoning about end-to-end
+     time-to-first-token budgets alongside 3.4.g's own upcoming
+     measurement.
+  3. **Pushed back on / would have done differently**: nothing in the
+     prompt's own design — it was unusually precise about the hard part
+     (streaming-safe sanitisation under an append-only rule) and the
+     exact tests needed; the one thing I corrected was my OWN first
+     implementation attempt (the premature citation-trigger bug above),
+     caught by the test suite the prompt itself specified, not something
+     the prompt got wrong.
+  4. **Highest production risk in this change**: the best-effort layers
+     (delimiter neutralisation, the raw-HTML-tag regex) are explicitly
+     NOT a complete defense against a sufficiently creative adversarial
+     DATA-block payload — the structural guarantees (forced tool,
+     citation intersection, http/https-only) are what this system
+     actually depends on for safety, and that dependency is now written
+     down plainly rather than implied. If a future task ever treats the
+     best-effort layers as if they were structural, that would be a real
+     regression in how this system is reasoned about, not in the code
+     itself.
 
 ### Estimates to measure
 
@@ -3260,9 +3522,9 @@ Verified: no code changed in the decision-recording portion of this edit (pure p
 
 ## 7. Current task and next task
 
-Current: Step 3.4.c (citations and output safety: validate `cited_chunk_labels` against what was actually retrieved, build real citations, web-pages-only labelling, markdown image/link neutralisation in answer text) — 3.4.a/3.4.b are both Done.
-Next: Step 3.4.d (the gate), once 3.4.c is confirmed good.
-Do not modify (completed tasks): 1.1.a, 1.1.b, 1.1.c, 1.1.d, 1.1.e, 1.1.f, 1.1.g, 1.1.h, 1.1.i, 1.1.j, 1.1.k, 1.1.l, 1.1.m, 1.1.n, 1.1.o.a, 1.1.o.b, 1.1.o.c, 1.1.o.d, 1.1.o.e, 1.1.o.f, 1.1.o.g, 1.1.o.h, 1.1b, 1.1c, 1.2.a, 1.2.b, 1.2.c, 1.2.d, 1.2.e, 1.2.f, 1.3.a1, 1.3.a2, 1.3.b, 1.3.c, 1.3.d, 1.3.e, 1.3.f, 1.4.a, 1.4.b, 1.4.c, 1.4.d, 1.4.e, 1.4.f, 1.4.g, 1.4.h, 1.4.i, 1.4.j, 1.4.k, 1.4.l, 1.5.a, 1.5.b, 1.5.c, 1.5.d, 1.5.e, 1.5.f, 1.6.a, 1.6.b, 1.6.c, 1.6.d, 1.6.e, 2.1.a, 2.1.b, 2.1.c, 2.1.d, 2.1.e, 2.1.f, 2.1.g, 2.1.h, 2.2.a, 2.2.b, 2.2.c, 2.2.d, 2.2.e, 2.2.f, 2.2.g, 2.2.h, 2.2.i, 2.3.a, 2.3.b, 2.3.c, 2.3.d, 2.3.e, 2.4.a, 2.4.b, 2.4.c, 2.4.d, 2.4.e, 2.4.f, 2.4.g, 2.5.a, 2.5.b, 2.5.c, 2.5.d, 2.5.e, 2.5.f, 2.6.a, 2.6.b, 2.6.c, 2.6.d, 2.6.e, 2.6.f, 2.7.a, 2.7.b, 2.7.c, 2.7.d, 2.7.e, 2.7.f, 2.8.a, 2.8.b, 2.8.c, 2.8.d, 2.8.e, 2.8.f, 2.9.a, 2.9.b, 2.9.c, 2.9.d, 2.9.e, 2.9.f, 2.9.g, 2.10.a, 2.10.b, 2.10.c, 3.1.a, 3.1.b, 3.1.c, 3.1.d, 3.1.e, 3.1.f, 3.2.a, 3.2.b, 3.2.c, 3.2.d, 3.3.a, 3.3.b, 3.3.c, 3.3.d, 3.4.a, 3.4.b.
+Current: Step 3.4.d (the gate: light research first on a calibrated relevance signal, report before building, then the mechanism) — 3.4.a/3.4.b/3.4.c are all Done.
+Next: Step 3.4.e (fallback text template + fixed dependency-failure reply), once 3.4.d is confirmed good.
+Do not modify (completed tasks): 1.1.a, 1.1.b, 1.1.c, 1.1.d, 1.1.e, 1.1.f, 1.1.g, 1.1.h, 1.1.i, 1.1.j, 1.1.k, 1.1.l, 1.1.m, 1.1.n, 1.1.o.a, 1.1.o.b, 1.1.o.c, 1.1.o.d, 1.1.o.e, 1.1.o.f, 1.1.o.g, 1.1.o.h, 1.1b, 1.1c, 1.2.a, 1.2.b, 1.2.c, 1.2.d, 1.2.e, 1.2.f, 1.3.a1, 1.3.a2, 1.3.b, 1.3.c, 1.3.d, 1.3.e, 1.3.f, 1.4.a, 1.4.b, 1.4.c, 1.4.d, 1.4.e, 1.4.f, 1.4.g, 1.4.h, 1.4.i, 1.4.j, 1.4.k, 1.4.l, 1.5.a, 1.5.b, 1.5.c, 1.5.d, 1.5.e, 1.5.f, 1.6.a, 1.6.b, 1.6.c, 1.6.d, 1.6.e, 2.1.a, 2.1.b, 2.1.c, 2.1.d, 2.1.e, 2.1.f, 2.1.g, 2.1.h, 2.2.a, 2.2.b, 2.2.c, 2.2.d, 2.2.e, 2.2.f, 2.2.g, 2.2.h, 2.2.i, 2.3.a, 2.3.b, 2.3.c, 2.3.d, 2.3.e, 2.4.a, 2.4.b, 2.4.c, 2.4.d, 2.4.e, 2.4.f, 2.4.g, 2.5.a, 2.5.b, 2.5.c, 2.5.d, 2.5.e, 2.5.f, 2.6.a, 2.6.b, 2.6.c, 2.6.d, 2.6.e, 2.6.f, 2.7.a, 2.7.b, 2.7.c, 2.7.d, 2.7.e, 2.7.f, 2.8.a, 2.8.b, 2.8.c, 2.8.d, 2.8.e, 2.8.f, 2.9.a, 2.9.b, 2.9.c, 2.9.d, 2.9.e, 2.9.f, 2.9.g, 2.10.a, 2.10.b, 2.10.c, 3.1.a, 3.1.b, 3.1.c, 3.1.d, 3.1.e, 3.1.f, 3.2.a, 3.2.b, 3.2.c, 3.2.d, 3.3.a, 3.3.b, 3.3.c, 3.3.d, 3.4.a, 3.4.b, 3.4.c.
 
 ### Step 1.1 task list (approved)
 
@@ -3684,7 +3946,7 @@ here.
 
 ## 8. Task counter since the last duplication check
 
-**n = 2** (3.4.a, 3.4.b — both real code/tests. Reset to n=0 on 2026-11-07, instruction-driven, following the duplication check after 3.3.b/c/d; see that section above for the full findings/fix/verification record. The Step 3.4 research task and the Step 3.4 breakdown (decisions Q1-Q8) do not count, matching the established "planning-only work doesn't count" precedent — no code was written in either, only research and a decision record. A duplication check falls due after 3.4.c per rule 9 ("never past 4 without one," and the project's own established every-3rd-task cadence) — not run now, per no instruction to run it this task.)
+**n = 3** (3.4.a, 3.4.b, 3.4.c — all real code/tests. Reset to n=0 on 2026-11-07, instruction-driven, following the duplication check after 3.3.b/c/d; see that section above for the full findings/fix/verification record. The Step 3.4 research task and the Step 3.4 breakdown (decisions Q1-Q8) do not count, matching the established "planning-only work doesn't count" precedent — no code was written in either, only research and a decision record. The Part 0 follow-up to Task 3.4.b (fixes to an already-counted task, no new task number) does not count separately, per direct instruction. **A duplication check is now due, per rule 9 — recorded here, not run this task, per direct instruction ("record only").**)
 
 ## 9. Open markers
 
@@ -3789,6 +4051,6 @@ here.
 - Owner Phase 6's admin screen (recorded at the Step 3.4 breakdown, 2026-11-08, decision Q4): the gate's own relevance threshold (docs/SPEC.md §6.3: "a platform default that only the platform admin can override per tenant... stored as a nullable per-tenant field in `tenants.config`... edited only in the platform admin screen... every change is logged") has its platform-DEFAULT half built at 3.4.d (a `Settings` field, tuned via 3.7's golden set). The PER-TENANT override half — the nullable `tenants.config` field, the admin-screen edit UI, and the audit-log entry every change requires — cannot be built before Phase 6's own platform admin screen exists (the same "no real admin-identity system yet" constraint already governing every other platform-admin-owned marker in this file, e.g. the temporary `admin_api_key` mechanism). Whoever builds Phase 6's admin screen must wire this override directly into whatever reads the gate's own effective threshold at answer time, not just expose a UI with nothing reading it.
 - Owner Step 3.6 (recorded at the Step 3.4 breakdown, 2026-11-08, decision Q7): 3.4's own answer call binds no tools (a single, non-agentic model call, matching §6.2's own "no LLM hop" router design) — but docs/SPEC.md §8's own "the only tool is knowledge search" bullet implies a SEPARATE, MCP-exposed search capability exists somewhere, and how it relates to the router-driven `retrieve()` path 3.1/3.3/3.4 already use was explicitly left unresolved at the Step 3.4 research task: are these two entirely separate, non-interacting mechanisms (the likely reading, given §6.2's own routing design and this task's own Q7 decision), or does something else bind them together (e.g. a different caller altogether, external MCP clients rather than this project's own chat model calling back into itself)? Step 3.6 must research and resolve this explicitly, not assume one reading silently.
 - Owner Phase 6's admin screen (recorded at the Step 3.4.b research task, 2026-11-09, carry-over review of 3.4.a): `get_chat_model()` (`app/agent/chat_model.py`) is a single, process-wide `@lru_cache` singleton built once from platform-level `Settings` fields (`chat_model_primary`/`chat_model_secondary`) -- it has no mechanism for PER-TENANT model/provider choice, even though docs/SPEC.md §6.3's own "Models" bullet says "per-tenant config via `init_chat_model`." Not built here, deliberately: no per-tenant settings storage or admin-editing surface exists yet for this (the identical "no real admin screen yet" constraint already governing the gate-threshold override marker, recorded at the Step 3.4 breakdown's own Q4 decision) -- matching that marker's own reasoning and owner exactly, since both are per-tenant `tenants.config` fields that can only be built and edited once Phase 6's platform admin screen exists. Whoever builds that screen must decide the real mechanism: does a per-tenant override replace `get_chat_model()`'s own singleton with a per-tenant-keyed cache, or does it stay process-wide with the override applied as a per-call parameter? Not decided here.
-- Owner Step 3.4.b itself, resolved in the same task that created it: the secondary chat-model provider's own field-order/incremental-streaming behavior (`app/agent/graph.py`'s own `Answer` schema -- `can_answer` first, `used_chunk_ids` second, `answer` last -- is confirmed LIVE only against real OpenAI; Anthropic's own tool-use streaming was never exercised live this task, no `ANTHROPIC_API_KEY` was available). **Enabling `ANTHROPIC_API_KEY` in a real production deployment is conditional on `backend/scripts/manual_check_chat_model_streaming.py` (opt-in, real API calls, NEVER run in CI) passing against Anthropic first** -- confirming both that `tool_call_chunks` stream incrementally at all through `ChatAnthropic`, and that the declared schema field order is actually preserved in what streams back, the same two properties already proven for OpenAI. Do not flip this key on in any real environment without running that script against it first.
+- **RESOLVED/code-enforced at the PART 0 follow-up to Task 3.4.b (2026-11-11)**: the secondary chat-model provider's own field-order/incremental-streaming behavior (`app/agent/graph.py`'s own `Answer` schema -- `can_answer` first, `used_chunk_ids` second, `answer` last -- is confirmed LIVE only against real OpenAI; Anthropic's own tool-use streaming was never exercised live, no `ANTHROPIC_API_KEY` was available in either task). Originally recorded as a documented-only precondition ("do not flip this key on without running the script first") -- **now a code-enforced TWO-KEY switch**, not merely a process note a deployer could skip: `get_chat_model()` (`app/agent/chat_model.py`) wires the secondary into the fallback chain only if BOTH `Settings.anthropic_api_key` is set AND the new `Settings.chat_model_secondary_verified` (default `False`) is `True`. Setting the API key alone leaves the chain primary-only, with its own distinct startup warning naming `backend/scripts/manual_check_chat_model_streaming.py` -- the key being present is no longer, by itself, capable of silently enabling an unverified provider. That script (opt-in, real API calls, NEVER run in CI) is what `chat_model_secondary_verified` attests to: run it against the real Anthropic API, confirming `tool_call_chunks` stream incrementally AND the declared schema field order is preserved (the same two properties already proven for OpenAI), THEN set `CHAT_MODEL_SECONDARY_VERIFIED=true` -- never before.
 - Owner Step 4.1 (the real `/chat` endpoint) (recorded at Task 3.4.b, 2026-11-10): docs/SPEC.md §10's own `stream_mode=["messages","custom","updates"]` -> `messages` becomes `token` mapping assumed plain-text tokens -- confirmed, this task, that it does NOT hold for the real answer node: the real token-level `"messages"`-mode chunks for this node's own underlying model call are raw tool-call JSON fragments (including `used_chunk_ids`, which must never reach a visitor directly, and the still-unresolved `can_answer`/partial-JSON scaffolding). **Step 4.1 must never forward raw `"messages"`-mode chunks for this node to visitors** -- the `_answer_node`'s own `"custom"`-mode `{"type": "token", "text": <delta>}` events (via `get_stream_writer()`) are the one real source of visible answer text, already guaranteed append-only and never preceded by any text before `can_answer` is known true. Whoever wires up stream_mode (the same marker that already assigns that job to 4.1) must consume "custom" events for this node specifically, not "messages" ones.
 - Owner Step 4.1 (the real `/chat` endpoint) (recorded at Task 3.4.b, 2026-11-10): a mid-stream chat-model failure (`AnswerStreamFailedMidStreamError`, `app/agent/graph.py`) is confirmed, by design, to leave no completed `AIMessage` in the checkpoint and to propagate as a distinctly-named exception out of `run_turn()` -- but what the VISITOR actually sees when this happens (a generic error? a specific "something went wrong, try again" message? does the widget offer a retry reusing the same `client_message_id`, matching docs/SPEC.md §10's own dropped-connection UX?) is not decided here. This node's own job is detecting and naming the failure correctly, not rendering it -- Step 4.1 owns the real visitor-facing behavior.

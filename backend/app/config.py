@@ -197,6 +197,20 @@ class Settings(BaseSettings):
     # manual streaming check passing first.
     chat_model_primary: str = Field(default="gpt-4o-mini")
     chat_model_secondary: str = Field(default="claude-haiku-4-5")
+    # Task 3.4.b (PART 0 follow-up): a TWO-KEY switch, code-enforced, not
+    # just documented -- `app/agent/chat_model.py`'s own `get_chat_model()`
+    # wires the secondary provider into the fallback chain only if BOTH
+    # `anthropic_api_key` is set AND this flag is `True`. Default `False`:
+    # setting the API key alone is not enough to enable it in production.
+    # The manual check this flag attests to (`backend/scripts/manual_
+    # check_chat_model_streaming.py`) confirms, against the REAL Anthropic
+    # API, that `tool_call_chunks` stream incrementally and the real
+    # `Answer` schema's own field order is preserved -- the same two
+    # properties already confirmed live for OpenAI -- before this flag
+    # should ever be set `True` in a real environment. Not a secret (no
+    # SecretStr) -- a plain operational switch, matching `crawl_user_
+    # agent`'s own "Settings-configurable, not hardcoded" treatment.
+    chat_model_secondary_verified: bool = Field(default=False)
     # Task 3.4.b: a per-request READ timeout (httpx's own `read=` category
     # -- confirmed live, not assumed, that this bounds the GAP BETWEEN
     # consecutive reads, including time-to-first-byte, never the total

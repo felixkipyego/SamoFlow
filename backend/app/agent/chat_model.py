@@ -18,14 +18,21 @@
 # `langchain` package (confirmed live: NOT exposed by `langchain-core`
 # alone, already installed transitively via `langgraph`).
 #
-# Primary OpenAI, secondary Anthropic -- ONLY if `ANTHROPIC_API_KEY` is set
-# (Q2). `Settings.anthropic_api_key` is deliberately OPTIONAL (see that
-# field's own header comment, `app/config.py`) -- a deployment that never
-# configures a secondary provider must still start and serve real answers
-# through the primary alone, not fail startup for an opt-in feature. When
-# unset, `get_chat_model()` logs a WARNING naming the fallback chain as
-# primary-only, so this is a visible, deliberate state, not a silently
-# degraded one.
+# Primary OpenAI, secondary Anthropic -- ONLY behind a TWO-KEY switch
+# (Q2, code-enforced per a direct PART 0 follow-up to Task 3.4.b, not
+# just a documented precondition): `ANTHROPIC_API_KEY` must be set AND
+# `Settings.chat_model_secondary_verified` must be `True`. The key alone
+# is NOT enough -- confirmed live (the Anthropic streaming/field-order
+# check, `backend/scripts/manual_check_chat_model_streaming.py`) that
+# field-order preservation is an OpenAI-specific "Structured Outputs"
+# guarantee, never independently verified for Anthropic before this
+# follow-up; a key present with the flag still `False` (the default)
+# means "configured, but not yet verified" -- primary-only, with its own
+# distinct startup warning naming the manual script to run. `Settings.
+# anthropic_api_key` is deliberately OPTIONAL (see that field's own
+# header comment, `app/config.py`) -- a deployment that never configures
+# a secondary provider must still start and serve real answers through
+# the primary alone, not fail startup for an opt-in feature.
 #
 # `api_key=` ALWAYS passed explicitly, from `get_settings()`'s own guarded
 # accessors, never omitted [SECURITY, confirmed live, not assumed]: both
@@ -147,6 +154,16 @@ def get_chat_model() -> Runnable:
             "primary-only (OpenAI). A primary-provider outage has no fallback "
             "today; see PROJECT_SPEC.md's own Phase-7-owned Open marker for the "
             "related embedding-fallback gap."
+        )
+        return primary
+
+    if not settings.chat_model_secondary_verified:
+        logger.warning(
+            "ANTHROPIC_API_KEY is set but CHAT_MODEL_SECONDARY_VERIFIED is not "
+            "true -- the chat-model fallback chain is primary-only (OpenAI). "
+            "Run backend/scripts/manual_check_chat_model_streaming.py against "
+            "the real Anthropic API first, then set CHAT_MODEL_SECONDARY_"
+            "VERIFIED=true, before relying on Anthropic as a real fallback."
         )
         return primary
 

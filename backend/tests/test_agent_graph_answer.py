@@ -175,7 +175,7 @@ async def test_can_answer_false_emits_zero_deltas(monkeypatch):
 
     result = await graph_module._answer_node(state)
 
-    assert result == {"can_answer": False, "cited_chunk_labels": []}
+    assert result == {"can_answer": False, "cited_chunk_labels": [], "citations": []}
     assert events == []
 
 

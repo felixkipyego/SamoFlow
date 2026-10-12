@@ -117,10 +117,16 @@ async def _probe(provider: str, model_name: str, api_key: str) -> None:
         )
     if provider == "anthropic":
         if raw_chunks_seen > 1 and not field_order_violation:
-            print("  RESULT: Anthropic streaming check PASSES -- safe to enable ANTHROPIC_API_KEY.")
+            print(
+                "  RESULT: Anthropic streaming check PASSES -- safe to set "
+                "CHAT_MODEL_SECONDARY_VERIFIED=true (ANTHROPIC_API_KEY alone is "
+                "not enough; app/agent/chat_model.py enforces both)."
+            )
         else:
-            print("  RESULT: Anthropic streaming check FAILS -- do NOT enable ANTHROPIC_API_KEY "
-                  "in production until this is investigated.")
+            print(
+                "  RESULT: Anthropic streaming check FAILS -- do NOT set "
+                "CHAT_MODEL_SECONDARY_VERIFIED=true until this is investigated."
+            )
 
 
 async def main() -> None:

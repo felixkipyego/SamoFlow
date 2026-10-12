@@ -22,6 +22,11 @@
 # RetrievedChunk/chunk_from_scored_point() header comment for the full
 # live-confirmed finding). Fixed: this module no longer imports
 # qdrant_client at all, and is REMOVED from CLIENT_ACCESS_ALLOWLIST again.
+import logging
+import re
+from typing import TypedDict
+from urllib.parse import urlsplit
+
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
 from langchain_core.runnables import RunnableConfig
 from langchain_core.utils.json import parse_partial_json
@@ -34,6 +39,25 @@ from pydantic import BaseModel, Field
 from app.agent.chat_model import get_chat_model
 from app.agent.context import tenant_id_from_config
 from app.retrieval.service import RetrievedChunk, chunk_from_scored_point, retrieve
+
+logger = logging.getLogger(__name__)
+
+
+# Task 3.4.c: a plain, closed shape -- `url` (the one field citations
+# structurally need) and `heading_path` (already threaded through
+# `RetrievedChunk` since Task 3.3.a, giving SOME human-readable context
+# for free). Deliberately NO `title` field: `build_payload()` (`app/
+# ingest/qdrant_writer.py`) does store a real `title` in the underlying
+# Qdrant payload, but `chunk_from_scored_point()`/`RetrievedChunk` (Task
+# 3.3.a) never threads it through -- confirmed by reading both directly,
+# not assumed. Adding `title` here would mean re-touching that already-
+# twice-touched completed file for a field this task does not strictly
+# need (`heading_path` already gives citation context) -- stated here as
+# a real, deliberate decision, not silently worked around; see
+# PROJECT_SPEC.md's own decision log for the full reasoning.
+class Citation(TypedDict):
+    url: str
+    heading_path: list[str]
 
 
 class AgentState(MessagesState):
@@ -51,6 +75,12 @@ class AgentState(MessagesState):
     # to persisted state too.
     can_answer: bool
     cited_chunk_labels: list[str]
+    # Task 3.4.c: built from the SAME `used_chunk_ids` the moment they
+    # resolve (see `_answer_node`'s own updated docstring) -- never a
+    # second, separate computation from the final parse, so "what was
+    # streamed" and "what's persisted" are provably the same citation
+    # set. Plain (OVERWRITE), matching every other per-turn field above.
+    citations: list[Citation]
 
 
 # Task 3.3.b: the rule-based router (docs/SPEC.md §6.2's own 4 rules,
@@ -343,48 +373,299 @@ def _build_messages(retrieved_chunks: list[RetrievedChunk], question: str) -> li
     ]
 
 
+# Task 3.4.c [SECURITY]: citations and output safety.
+#
+# LIMITS, stated plainly, per direct instruction -- not every guarantee
+# here is the same strength:
+#   - STRUCTURAL (cannot be bypassed by any model output): only the
+#     forced `Answer` tool is ever bound (no other tool exists to call);
+#     citations are built ONLY from the intersection of what the model
+#     claims to have used and what was ACTUALLY retrieved (`_build_
+#     citations()` below); only `http`/`https` citation URLs are ever
+#     produced; `RetrievedChunk`'s own closed field set structurally
+#     cannot carry an upload's `file_name` or a database row's table/row
+#     identity into the prompt at all (neither field exists on that
+#     type -- confirmed by reading `app/retrieval/service.py` directly).
+#   - BEST-EFFORT (reduces, does not eliminate, a class of confusion):
+#     the `[[DATA:cN]]` delimiter neutralisation (`_neutralize_delimiter_
+#     breakout()` above) stops EXACT-delimiter breakout specifically --
+#     it is not a defense against every way a model could be confused by
+#     adversarial instructions embedded in otherwise-legitimate-looking
+#     DATA block text (that is the system instruction's own "treat as
+#     data" framing, a prompting technique, not a structural guarantee).
+#     The raw-HTML-tag regex below (`_RAW_TAG_RE`) is a plain regex, not
+#     a real HTML parser -- an adversarial tag using a `>` inside a
+#     quoted attribute value could in principle terminate the match
+#     early; accepted as a known limitation of a defense-in-depth layer,
+#     not the only one (citations/tool-forcing above already remove the
+#     main injection payoff -- an arbitrary link/image the visitor would
+#     actually click or auto-load). The link regex below (`_LINK_RE`)
+#     captures its URL non-greedily up to the FIRST `)` -- a URL
+#     containing its own literal, unescaped parenthesis (most
+#     `javascript:` URIs do, e.g. `javascript:alert(1)`) leaves a stray
+#     trailing `)` in the downgraded plain text (cosmetic only: found and
+#     accepted at this task's own test-writing stage, see
+#     `test_javascript_url_never_becomes_a_citation_or_a_link`). NOT fixed
+#     with greedy/balanced-paren matching, deliberately -- that would risk
+#     mis-parsing two real links on the same line (`[a](url1) and
+#     [b](url2)`); the SECURITY property (the scheme is never in
+#     `allowed_urls`, so the construct always downgrades to plain text,
+#     never a real clickable link) holds regardless of the stray
+#     character.
+#
+# ADDED LATENCY of `_StreamSanitizer`'s bounded hold, stated explicitly
+# per direct instruction: the hold adds no wall-clock delay of its own
+# (pure synchronous string matching over an at-most-`_SANITIZER_HOLD_CAP`-
+# character buffer, no sleep/await inside `_drain()`) -- what it adds is
+# VISIBILITY lag: up to `_SANITIZER_HOLD_CAP` (200) characters of
+# already-generated model output can sit unemitted, waiting for a
+# pending `!`/`[`/`<` construct to resolve, fail, hit the cap, or reach
+# `finish()`. Worst case, a visitor's view of the answer lags up to 200
+# characters behind what the model has actually generated, never more.
+def _label_to_index(label: str, chunk_count: int) -> int | None:
+    match = re.fullmatch(r"c(\d+)", label)
+    if not match:
+        return None
+    index = int(match.group(1)) - 1
+    if 0 <= index < chunk_count:
+        return index
+    return None
+
+
+def _build_citations(
+    cited_labels: list[str], retrieved_chunks: list[RetrievedChunk]
+) -> list[Citation]:
+    """Citations ONLY from the intersection of `cited_labels` (whatever
+    the model claims in its own `used_chunk_ids`) and the labels ACTUALLY
+    given in the prompt (the positional `c<i+1>` <-> `retrieved_chunks[i]`
+    convention `_build_messages()` establishes). A label the model
+    invents (hallucinated, injected, or a real `document_id` string
+    mistaken for a label) matches no real index and is dropped, logged,
+    never silently ignored. Web pages only (`source_url is not None`) --
+    an upload/database chunk's own label, even if genuinely cited,
+    produces no citation at all, matching docs/SPEC.md §6.3's own
+    "Sources shown... for web pages only. No labels for uploads or
+    database content." Deduplicated by URL (the same page cited via two
+    different chunks/labels yields one citation, not two). Defense in
+    depth: only `http`/`https` URLs become citations -- `source_url` is
+    already guaranteed to be a real, verified-domain URL by ingestion
+    (Task 2.2), but this function does not trust that guarantee blindly,
+    matching this project's own "validate at the boundary, don't assume
+    an upstream invariant holds forever" convention.
+    """
+    seen_urls: set[str] = set()
+    citations: list[Citation] = []
+    for label in cited_labels:
+        index = _label_to_index(label, len(retrieved_chunks))
+        if index is None:
+            logger.warning(
+                "answer cited an unknown label %r -- not a real retrieved chunk, dropped",
+                label,
+            )
+            continue
+        chunk = retrieved_chunks[index]
+        url = chunk["source_url"]
+        if url is None:
+            continue  # upload/database source -- no citation label at all
+        if urlsplit(url).scheme not in ("http", "https"):
+            logger.warning("dropped a citation with a disallowed URL scheme: %r", url)
+            continue
+        if url in seen_urls:
+            continue
+        seen_urls.add(url)
+        citations.append({"url": url, "heading_path": chunk["heading_path"]})
+    return citations
+
+
+# Markdown/HTML constructs this node must neutralise in the model's own
+# ANSWER TEXT (docs/SPEC.md §16: "Markdown image and link leak attempts
+# are neutralised") -- distinct from, and in addition to, the DATA-block
+# delimiter neutralisation above, which protects the PROMPT, not the
+# model's own output.
+_IMAGE_RE = re.compile(r"^!\[([^\]\n]*)\]\(([^)\n]*)\)")
+_LINK_RE = re.compile(r"^\[([^\]\n]*)\]\(([^)\n]*)\)")
+_AUTOLINK_RE = re.compile(r"^<((?:https?|ftp):[^>\s]+)>")
+_RAW_TAG_RE = re.compile(r"^<[a-zA-Z/][^>\n]*>")
+# Bounded hold: a candidate construct (anything starting "!["/"["/"<")
+# that hasn't resolved (matched a complete pattern, or definitively
+# failed to) within this many characters is emitted AS PLAIN TEXT --
+# never held indefinitely. Generous enough for a realistic markdown
+# link/image (`[reasonably long link text](https://a-fairly-long-url...)`
+# comfortably fits), bounded enough that an adversarial run of bare "["
+# characters cannot stall visible output for long.
+_SANITIZER_HOLD_CAP = 200
+
+
+class _StreamSanitizer:
+    """Task 3.4.c: the ONE function (well, class -- streaming needs
+    state across calls) used for BOTH the streamed deltas and the
+    persisted `AIMessage` -- `_answer_node` below accumulates every
+    string this yields into the SAME variable it both forwards to the
+    stream writer and persists, so "what was streamed" and "what's
+    saved" are the same value by construction, not merely tested to
+    match.
+
+    Markdown images (`![alt](url)`) are removed ENTIRELY -- an
+    auto-loaded image URL is the exfiltration channel docs/SPEC.md §16
+    names directly, so there is no "safe" rendering of one, unlike a
+    link. Markdown links (`[text](url)`) and autolinks (`<http...>`)
+    become PLAIN TEXT unless `url` is in `allowed_urls` EXACTLY (the
+    citation URL set `_build_citations()` already produced, scheme-
+    checked and deduplicated) -- a `javascript:`/`data:` URL, or any URL
+    the model did not legitimately cite, is never in that set, so it is
+    downgraded automatically, with no special-case code for any specific
+    scheme. Raw HTML tags (`<img ...>`, `<a ...>`, etc.) are removed
+    entirely (best-effort regex, see this module's own header comment
+    for the known limitation).
+
+    `feed(text)` MUST be called with append-only deltas (the same
+    invariant `_answer_node` already enforces on the raw partial-JSON
+    `answer` field before ever reaching this class) -- holds back a
+    potential construct until it resolves, definitively fails, or hits
+    `_SANITIZER_HOLD_CAP` (held as plain text in all three "not a real
+    construct" outcomes). `finish()` MUST be called exactly once, after
+    the last `feed()`, to flush whatever is still held at the natural
+    end of stream -- an unresolved candidate there is, by definition,
+    never going to complete, so it is emitted as plain text, the
+    identical treatment the cap gives it.
+    """
+
+    def __init__(self, allowed_urls: frozenset[str]) -> None:
+        self._allowed_urls = allowed_urls
+        self._pending = ""
+
+    def feed(self, text: str) -> str:
+        self._pending += text
+        return self._drain(at_end=False)
+
+    def finish(self) -> str:
+        return self._drain(at_end=True)
+
+    def _drain(self, *, at_end: bool) -> str:
+        output: list[str] = []
+        while True:
+            trigger_index = self._find_next_trigger()
+            if trigger_index is None:
+                output.append(self._pending)
+                self._pending = ""
+                break
+
+            output.append(self._pending[:trigger_index])
+            candidate = self._pending[trigger_index:]
+
+            resolved = self._try_resolve(candidate)
+            if resolved is not None:
+                transformed, consumed = resolved
+                output.append(transformed)
+                self._pending = candidate[consumed:]
+                continue  # keep scanning the remainder for more triggers
+
+            if at_end or len(candidate) >= _SANITIZER_HOLD_CAP:
+                # Ruled out: never going to resolve (end of stream), or
+                # held long enough that it isn't a real construct --
+                # emit as plain text, exactly as written.
+                output.append(candidate)
+                self._pending = ""
+                break
+
+            # Still an open candidate, possibly still growing into a
+            # match -- hold it, wait for the next feed().
+            self._pending = candidate
+            break
+        return "".join(output)
+
+    def _find_next_trigger(self) -> int | None:
+        positions = [self._pending.find(marker) for marker in ("![", "[", "<")]
+        positions = [p for p in positions if p != -1]
+        return min(positions) if positions else None
+
+    def _try_resolve(self, candidate: str) -> tuple[str, int] | None:
+        if candidate.startswith("!["):
+            match = _IMAGE_RE.match(candidate)
+            if match:
+                return "", match.end()  # images: removed entirely
+            return None
+        if candidate.startswith("["):
+            match = _LINK_RE.match(candidate)
+            if match:
+                text, url = match.group(1), match.group(2)
+                if url in self._allowed_urls:
+                    return f"[{text}]({url})", match.end()
+                return text, match.end()  # not a cited URL -- plain text
+            return None
+        if candidate.startswith("<"):
+            match = _AUTOLINK_RE.match(candidate)
+            if match:
+                url = match.group(1)
+                if url in self._allowed_urls:
+                    return f"<{url}>", match.end()
+                return url, match.end()
+            tag_match = _RAW_TAG_RE.match(candidate)
+            if tag_match:
+                return "", tag_match.end()  # raw HTML tag: removed entirely
+            return None
+        return None
+
+
 async def _answer_node(state: AgentState) -> dict:
-    """The real Retrieval Specialist's own answer step (Task 3.4.b):
-    turns the Answer tool's own streaming JSON into visible text, emitted
-    as `{"type": "token", "text": <delta>}` events via LangGraph's own
-    stream writer (`get_stream_writer()`, "custom" stream mode) -- a
-    DELIBERATE DEVIATION from docs/SPEC.md §10's own `stream_mode=
-    ["messages", ...]` -> `token` mapping, which assumed plain-text
-    tokens. The real tokens this node's own underlying model call
-    produces (under `stream_mode="messages"`) are raw tool-call JSON
-    fragments (including `used_chunk_ids`, which must never reach a
-    visitor directly) -- this node is the one place that JSON gets turned
-    into the actual visible answer text. See PROJECT_SPEC.md's own new
-    §9 marker (owner Step 4.1): never forward raw "messages"-mode chunks
-    to visitors; consume this node's own "custom" token events instead.
+    """The real Retrieval Specialist's own answer step (Task 3.4.b, output
+    safety/citations added at Task 3.4.c): turns the Answer tool's own
+    streaming JSON into SANITISED visible text, emitted as `{"type":
+    "token", "text": <delta>}` events via LangGraph's own stream writer
+    (`get_stream_writer()`, "custom" stream mode) -- a DELIBERATE
+    DEVIATION from docs/SPEC.md §10's own `stream_mode=["messages", ...]`
+    -> `token` mapping, which assumed plain-text tokens. The real tokens
+    this node's own underlying model call produces (under `stream_mode=
+    "messages"`) are raw tool-call JSON fragments (including
+    `used_chunk_ids`, which must never reach a visitor directly) -- this
+    node is the one place that JSON gets turned into the actual visible
+    answer text. See PROJECT_SPEC.md's own §9 marker (owner Step 4.1):
+    never forward raw "messages"-mode chunks to visitors; consume this
+    node's own "custom" token events instead.
 
     Rules, all confirmed live before relying on them (see `Answer`'s own
-    docstring and the two exception classes above for the full reasoning):
+    docstring, the two exception classes, and `_StreamSanitizer`'s own
+    docstring for the full reasoning):
       - ZERO answer-text bytes are emitted before `can_answer` is known
         to be true (the schema's own field order guarantees this).
       - `can_answer=false` emits nothing and returns immediately --
         routed to the fixed fallback path by `build_graph()`'s own
         conditional edge, not decided in this node.
-      - Every emitted delta is a strict extension of what came before;
-        a non-extending partial parse fails loudly
+      - Citations are built from `used_chunk_ids` the MOMENT that field
+        resolves (field order: `can_answer` -> `used_chunk_ids` ->
+        `answer`, confirmed live -- `used_chunk_ids` is always fully
+        known before any `answer` text starts streaming), so the
+        sanitiser's own "which links survive" allow-list is ready before
+        it is ever needed, never recomputed afterward from a second,
+        separate parse.
+      - Every emitted RAW (pre-sanitisation) delta is a strict extension
+        of what came before; a non-extending partial parse fails loudly
         (`AnswerStreamNotAppendOnlyError`), never emits inconsistent text.
-      - A failure before any emission lets `.with_fallbacks()` do its own
-        job normally (this node does not catch it). A failure AFTER
-        emission has begun raises `AnswerStreamFailedMidStreamError` --
-        `.with_fallbacks()` cannot recover a stream it has already
-        started delivering (confirmed live, see that exception's own
-        docstring) -- and no partial answer is ever returned as a
-        completed `AIMessage` in either case.
+      - The SANITISED output is accumulated into the exact same variable
+        that is both streamed (via `writer`) and persisted (the final
+        `AIMessage`) -- "what was streamed" and "what's saved" are the
+        same value by construction.
+      - A failure before any SANITISED emission lets `.with_fallbacks()`
+        do its own job normally (this node does not catch it). A failure
+        AFTER sanitised emission has begun raises `AnswerStreamFailed
+        MidStreamError` -- `.with_fallbacks()` cannot recover a stream it
+        has already started delivering (confirmed live) -- and no
+        partial answer is ever returned as a completed `AIMessage` in
+        either case.
     """
     writer = get_stream_writer()
     question = _latest_human_message_text(state["messages"])
-    messages = _build_messages(state["retrieved_chunks"], question)
+    retrieved_chunks = state["retrieved_chunks"]
+    messages = _build_messages(retrieved_chunks, question)
     model = get_chat_model().bind_tools([Answer], tool_choice="Answer")
 
     accumulated_args = ""
-    emitted_answer = ""
+    emitted_raw_answer = ""
+    emitted_sanitized = ""
     can_answer_known = False
     can_answer_value = False
+    citations: list[Citation] = []
+    sanitizer: _StreamSanitizer | None = None
     started_emitting = False
     try:
         async for chunk in model.astream(messages):
@@ -398,22 +679,52 @@ async def _answer_node(state: AgentState) -> dict:
                 can_answer_known = True
                 can_answer_value = bool(partial["can_answer"])
                 if not can_answer_value:
-                    return {"can_answer": False, "cited_chunk_labels": []}
+                    return {"can_answer": False, "cited_chunk_labels": [], "citations": []}
 
             if not can_answer_known or not can_answer_value:
                 continue
 
+            # Triggered on "answer" (NOT "used_chunk_ids") appearing in
+            # the partial parse -- a real bug, caught by this task's own
+            # test suite, not assumed correct: triggering on the KEY
+            # NAME "used_chunk_ids" first appearing can fire while that
+            # LIST ITSELF is still mid-stream (e.g. `["c1", "c"]` a few
+            # characters before it finishes becoming `["c1", "c99"]`),
+            # silently locking in citations from an incomplete snapshot.
+            # The schema's own field order guarantees "used_chunk_ids"
+            # is fully closed out the moment "answer" starts appearing
+            # at all (that key cannot exist in valid JSON before the
+            # prior one has closed), so THAT is the correct trigger.
+            if sanitizer is None and "answer" in partial:
+                cited_labels = partial.get("used_chunk_ids") or []
+                citations = _build_citations(cited_labels, retrieved_chunks)
+                sanitizer = _StreamSanitizer(frozenset(c["url"] for c in citations))
+
             new_answer = partial.get("answer") or ""
-            if len(new_answer) < len(emitted_answer) or not new_answer.startswith(emitted_answer):
+            if len(new_answer) < len(emitted_raw_answer) or not new_answer.startswith(
+                emitted_raw_answer
+            ):
                 raise AnswerStreamNotAppendOnlyError(
-                    f"partial answer text shrank or diverged: had {emitted_answer!r}, "
+                    f"partial answer text shrank or diverged: had {emitted_raw_answer!r}, "
                     f"now {new_answer!r}"
                 )
-            if len(new_answer) > len(emitted_answer):
-                delta = new_answer[len(emitted_answer) :]
-                writer({"type": "token", "text": delta})
-                started_emitting = True
-                emitted_answer = new_answer
+            if len(new_answer) > len(emitted_raw_answer):
+                delta = new_answer[len(emitted_raw_answer) :]
+                emitted_raw_answer = new_answer
+                if sanitizer is None:
+                    # Cannot happen given the schema's own confirmed
+                    # field order (used_chunk_ids always resolves before
+                    # answer) -- fail loudly rather than sanitise
+                    # against an empty, wrong allow-list if it ever did.
+                    raise RuntimeError(
+                        "answer text began streaming before used_chunk_ids resolved "
+                        "-- the Answer schema's own field order was violated"
+                    )
+                sanitized_delta = sanitizer.feed(delta)
+                if sanitized_delta:
+                    writer({"type": "token", "text": sanitized_delta})
+                    started_emitting = True
+                emitted_sanitized += sanitized_delta
     except AnswerStreamNotAppendOnlyError:
         raise
     except Exception as exc:
@@ -424,12 +735,19 @@ async def _answer_node(state: AgentState) -> dict:
             ) from exc
         raise
 
+    if sanitizer is not None:
+        final_delta = sanitizer.finish()
+        if final_delta:
+            writer({"type": "token", "text": final_delta})
+        emitted_sanitized += final_delta
+
     final = parse_partial_json(accumulated_args) or {}
     cited_labels = final.get("used_chunk_ids") or []
     return {
         "can_answer": True,
-        "messages": [AIMessage(content=emitted_answer)],
+        "messages": [AIMessage(content=emitted_sanitized)],
         "cited_chunk_labels": cited_labels,
+        "citations": citations,
     }
 
 
