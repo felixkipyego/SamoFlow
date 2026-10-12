@@ -14,11 +14,15 @@
 # test_ingest_repository_guard.py -- the Settings()/errors() checks below
 # stay this file's own, since they differ; Task 2.5.a extends it to
 # openai_api_key_str(), starting ALLOWED_OPENAI_API_KEY_CALLERS with its
-# one real caller, app/ingest/embedding.py): parses every .py file under backend/app and
+# one real caller, app/ingest/embedding.py; Task 3.4.a extends it to
+# anthropic_api_key_str(), starting ALLOWED_ANTHROPIC_API_KEY_CALLERS with
+# its one real caller, app/agent/chat_model.py -- which also joins
+# ALLOWED_OPENAI_API_KEY_CALLERS as a second real caller, the chat model's
+# own primary provider): parses every .py file under backend/app and
 # backend/alembic with ast (not text search, so comments/strings never
-# trigger it) and enforces eight rules from PROJECT_SPEC.md's decisions log
+# trigger it) and enforces nine rules from PROJECT_SPEC.md's decisions log
 # (corrected from a stale "five" here -- there were already six distinct
-# rules below before this task added the seventh, not five):
+# rules below before Task 2.5.a added the seventh, not five):
 #   - only app/config.py may construct Settings() directly;
 #   - nothing calls a method named errors() (that leaks raw input, see
 #     config.py's model_config comment);
@@ -34,7 +38,9 @@
 #   - only files listed in ALLOWED_ADMIN_API_KEY_CALLERS may call
 #     admin_api_key_str() outside app/config.py;
 #   - only files listed in ALLOWED_OPENAI_API_KEY_CALLERS may call
-#     openai_api_key_str() outside app/config.py.
+#     openai_api_key_str() outside app/config.py;
+#   - only files listed in ALLOWED_ANTHROPIC_API_KEY_CALLERS may call
+#     anthropic_api_key_str() outside app/config.py.
 import ast
 
 from tests.conftest import BACKEND_DIR, called_name, check_call_allowlist, iter_python_files
@@ -73,8 +79,19 @@ ALLOWED_DB_CONNECTION_ENCRYPTION_KEY_CALLERS: tuple[str, ...] = ("app/ingest/rep
 ALLOWED_ADMIN_API_KEY_CALLERS: tuple[str, ...] = ("app/admin/dependencies.py",)
 
 # NOTE: adding a file here is a deliberate decision: it means that file
-# receives the real OpenAI API key (Task 2.5.a). Review it by hand.
-ALLOWED_OPENAI_API_KEY_CALLERS: tuple[str, ...] = ("app/ingest/embedding.py",)
+# receives the real OpenAI API key (Task 2.5.a). Review it by hand. Task
+# 3.4.a adds app/agent/chat_model.py -- the chat model's own primary
+# provider, a second real caller alongside the embedding primitive.
+ALLOWED_OPENAI_API_KEY_CALLERS: tuple[str, ...] = (
+    "app/ingest/embedding.py",
+    "app/agent/chat_model.py",
+)
+
+# NOTE: adding a file here is a deliberate decision: it means that file
+# receives the real Anthropic API key (Task 3.4.a) -- the secondary
+# chat-model provider, constructed only when Settings.anthropic_api_key is
+# set (Q2).
+ALLOWED_ANTHROPIC_API_KEY_CALLERS: tuple[str, ...] = ("app/agent/chat_model.py",)
 
 # Duplication check after 1.3.a1/a2/b: both secret accessors are checked by
 # the same single branch below instead of one copy-pasted elif per accessor
@@ -94,6 +111,7 @@ _SECRET_ACCESSOR_ALLOW_LISTS: dict[str, tuple[str, ...]] = {
     "db_connection_encryption_key_str": ALLOWED_DB_CONNECTION_ENCRYPTION_KEY_CALLERS,
     "admin_api_key_str": ALLOWED_ADMIN_API_KEY_CALLERS,
     "openai_api_key_str": ALLOWED_OPENAI_API_KEY_CALLERS,
+    "anthropic_api_key_str": ALLOWED_ANTHROPIC_API_KEY_CALLERS,
 }
 
 

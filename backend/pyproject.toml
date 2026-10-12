@@ -169,6 +169,40 @@ dependencies = [
     # langgraph-prebuilt/langgraph-sdk/pydantic/xxhash.
     "langgraph==1.2.14",
     "langgraph-checkpoint-postgres==3.1.2",
+    # Task 3.4.a. docs/SPEC.md §6.3's own "Models" bullet names
+    # `init_chat_model` directly ("per-tenant config via `init_chat_model`,
+    # with `.with_fallbacks()` to a secondary provider") -- confirmed live,
+    # before pinning, that `init_chat_model` is NOT exposed by
+    # `langchain-core` alone (already installed transitively via
+    # `langgraph`): it lives in the separate `langchain` package, not
+    # previously a dependency of this project. Ruled out calling the
+    # `openai` SDK directly instead (this project's own established
+    # embedding-side pattern): LangGraph's `stream_mode="messages"`
+    # (docs/SPEC.md §10) only emits token chunks for calls that go through
+    # a real `langchain_core.language_models.BaseChatModel` subclass's own
+    # callback/event wiring -- a bare SDK call inside a node would never
+    # surface through that stream mode, confirmed by reading how
+    # `stream_mode="messages"` is implemented (it listens for LangChain's
+    # own `on_llm_new_token` callback, not generic Python output).
+    # Versions re-verified live on PyPI at this task's own build time:
+    # `langchain==1.4.4` requires `langchain-core>=1.6.9,<2.0.0` and
+    # `langgraph>=1.2.11,<1.3.0`, both already satisfied; `langchain-
+    # openai==1.7.1`/`langchain-anthropic==1.7.6` both require
+    # `langchain-core>=1.6.10,<2.0.0` -- one patch-level bump from the
+    # currently-resolved 1.6.9 to 1.6.10 (confirmed available on PyPI,
+    # still satisfies langgraph's own `<2,>=1.4.7` range). `langchain-
+    # openai` requires `openai>=2.45.0,<4.0.0`, satisfied cleanly by this
+    # project's own existing `openai==3.24.0` pin. `langchain-anthropic`
+    # requires `anthropic>=0.120.0,<2.0.0` -- a genuinely NEW transitive
+    # dependency (the real Anthropic Python SDK), not previously anywhere
+    # in this project; pulled in even though the secondary provider is
+    # optional at runtime (Q2) because the package itself must always be
+    # IMPORTABLE for the fallback-chain construction code to exist at all
+    # -- only its ACTUAL USE is conditional on `Settings.anthropic_api_key`
+    # being set.
+    "langchain==1.4.4",
+    "langchain-openai==1.7.1",
+    "langchain-anthropic==1.7.6",
 ]
 
 [project.optional-dependencies]

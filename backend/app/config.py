@@ -11,7 +11,11 @@
 # arrive in 1.4.b, this task only adds the secret plumbing). Task 2.1.a
 # adds db_connection_encryption_key (required): the pgcrypto passphrase
 # for db_connections.encrypted_credentials. Task 2.5.a adds openai_api_key
-# (required): the dense-embedding primitive's own API credential.
+# (required): the dense-embedding primitive's own API credential. Task
+# 3.4.a adds anthropic_api_key (optional, same "not configured means None"
+# shape as jwt_signing_key_previous -- the secondary chat-model provider,
+# app/agent/chat_model.py) and chat_model_primary/chat_model_secondary
+# (plain strings, the model identifiers themselves).
 #
 # ASSUMPTION: pydantic and pydantic-settings are not new dependencies here.
 # pydantic-settings==2.15.0 is already an approved runtime dependency
@@ -163,6 +167,34 @@ class Settings(BaseSettings):
     # third-party-issued key, not a self-chosen secret needing an
     # artificial entropy floor.
     openai_api_key: SecretStr
+    # Task 3.4.a: the secondary chat-model provider's own API credential
+    # (docs/SPEC.md §6.3's own "Models" bullet: "per-tenant config via
+    # `init_chat_model`, with `.with_fallbacks()` to a secondary
+    # provider"). OPTIONAL, not required -- a deliberate, justified
+    # deviation from every other secret in this file, matching an
+    # ALREADY-ESTABLISHED pattern in this same class
+    # (`jwt_signing_key_previous` immediately above, not a novel shape
+    # invented here): the secondary provider is genuinely optional at
+    # runtime (Q2's own decision) -- a tenant/deployment that never
+    # configures `ANTHROPIC_API_KEY` must still start up and serve
+    # answers through the primary provider alone, not fail startup for a
+    # feature it never opted into. `app/agent/chat_model.py` (Task 3.4.a)
+    # logs a startup warning when this is unset, so a primary-only
+    # fallback chain is a visible, deliberate state, not a silent one.
+    # No min_length, matching `openai_api_key`'s own treatment: an
+    # opaque, already-high-entropy third-party-issued key.
+    anthropic_api_key: SecretStr | None = Field(default=None)
+    # Task 3.4.a: the primary/secondary chat-model IDENTIFIERS themselves
+    # -- plain strings, not secrets, matching `crawl_user_agent`'s own
+    # "Settings-configurable, not hardcoded" treatment immediately below
+    # (rule 11's own "nothing hard-coded that should be configuration").
+    # ASSUMPTION: these exact model identifiers are placeholders, not
+    # independently confirmed against the real OpenAI/Anthropic APIs in
+    # this task (3.4.a makes no real API call anywhere -- see
+    # `app/agent/chat_model.py`'s own header comment) -- re-confirm before
+    # 3.4.b's own first real API call.
+    chat_model_primary: str = Field(default="gpt-4o-mini")
+    chat_model_secondary: str = Field(default="claude-haiku-4-5")
     # Task 2.6.e: identifies the crawler on every robots.txt/sitemap/page
     # request it makes, matching the Step 2.6 decision entry's own
     # "Settings-configurable, not hardcoded" call -- a placeholder domain
@@ -470,6 +502,28 @@ class Settings(BaseSettings):
         )
         return value
 
+    @field_validator("anthropic_api_key", mode="before")
+    @classmethod
+    def _empty_anthropic_api_key_means_not_configured(cls, value: object) -> object:
+        # Same shape as jwt_signing_key_previous's own before-validator
+        # immediately below: an empty string (the ".env.example default
+        # when the secondary provider isn't configured" shape) means "not
+        # configured", converted to None here -- not a validation error.
+        if value == "":
+            return None
+        return value
+
+    @field_validator("anthropic_api_key")
+    @classmethod
+    def _require_a_clean_anthropic_api_key(cls, value: SecretStr | None) -> SecretStr | None:
+        if value is not None:
+            _require_no_whitespace_or_control_chars(
+                value.get_secret_value(),
+                "ANTHROPIC_API_KEY",
+                "it is sent as an HTTP header value; a newline would allow header injection",
+            )
+        return value
+
     @field_validator("admin_api_key")
     @classmethod
     def _require_a_clean_admin_api_key(cls, value: SecretStr) -> SecretStr:
@@ -552,6 +606,14 @@ class Settings(BaseSettings):
     def openai_api_key_str(self) -> str:
         # The one explicit call that unwraps the secret. Never log this.
         return self.openai_api_key.get_secret_value()
+
+    def anthropic_api_key_str(self) -> str | None:
+        # The one explicit call that unwraps the secret. Never log this.
+        # None means "not configured" -- matching jwt_signing_key_previous_
+        # str()'s own identical optional shape.
+        if self.anthropic_api_key is None:
+            return None
+        return self.anthropic_api_key.get_secret_value()
 
 
 class SettingsError(Exception):

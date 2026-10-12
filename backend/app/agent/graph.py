@@ -178,10 +178,11 @@ async def _retrieve_node(state: AgentState, config: RunnableConfig) -> dict:
     header comment: 2 retries) potentially compounding that further on a
     slow-but-not-fully-down provider -- a visitor-facing turn could hang
     for minutes in the worst case, today, with no visitor-facing fallback
-    behavior decided. See PROJECT_SPEC.md's own new §9 marker -- not
-    decided or built here, deliberately: this node's own job is the
-    search call itself, not a retry/circuit-breaker policy spanning
-    arbitrary future nodes.
+    behavior decided. See PROJECT_SPEC.md's own two §9 markers (Task
+    3.3.d split the original single "owner undecided" one in two, with
+    concrete owners) -- not decided or built here, deliberately: this
+    node's own job is the search call itself, not a retry/circuit-breaker
+    policy spanning arbitrary future nodes.
     """
     tenant_id = tenant_id_from_config(config)
     query = _latest_human_message_text(state["messages"])

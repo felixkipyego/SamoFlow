@@ -13,12 +13,14 @@ from tests.conftest import REQUIRED_VARS
 # directly (not via Settings), so .env.example must declare them too.
 # Task 1.4.a: JWT_SIGNING_KEY_PREVIOUS is an optional Settings field (has a
 # default, so REQUIRED_VARS excludes it), but .env.example still declares it
-# (empty) so an operator seeing the file knows the variable exists.
+# (empty) so an operator seeing the file knows the variable exists. Task
+# 3.4.a: ANTHROPIC_API_KEY is the identical shape (optional, empty default).
 EXTRA_EXAMPLE_KEYS: tuple[str, ...] = (
     "POSTGRES_USER",
     "POSTGRES_PASSWORD",
     "POSTGRES_DB",
     "JWT_SIGNING_KEY_PREVIOUS",
+    "ANTHROPIC_API_KEY",
 )
 
 HEADER_WARNING = "# Copy to .env and edit. Never commit .env."
@@ -156,6 +158,11 @@ def test_jwt_signing_key_placeholder_is_at_least_32_characters_and_starts_with_c
 def test_jwt_signing_key_previous_placeholder_is_empty():
     values = _parse_env_example()
     assert values["JWT_SIGNING_KEY_PREVIOUS"] == ""
+
+
+def test_anthropic_api_key_placeholder_is_empty():
+    values = _parse_env_example()
+    assert values["ANTHROPIC_API_KEY"] == ""
 
 
 def test_db_connection_encryption_key_placeholder_is_32_chars_and_starts_with_change_me():
