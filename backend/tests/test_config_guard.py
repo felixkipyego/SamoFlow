@@ -45,7 +45,15 @@ CONFIG_FILE = APP_DIR / "config.py"
 
 # NOTE: adding a file here is a deliberate decision: it means that file
 # receives the real database password. Review it by hand.
-ALLOWED_DATABASE_URL_CALLERS: tuple[str, ...] = ("alembic/env.py", "app/db.py")
+# Task 3.2.b: app/agent/checkpointer.py added -- it connects directly via
+# psycopg/psycopg_pool (not through app/db.py's SQLAlchemy engine), so it
+# needs the real DATABASE_URL itself, converted to a plain psycopg conninfo
+# string (checkpointer_conninfo()) rather than reused as-is.
+ALLOWED_DATABASE_URL_CALLERS: tuple[str, ...] = (
+    "alembic/env.py",
+    "app/db.py",
+    "app/agent/checkpointer.py",
+)
 
 # NOTE: adding a file here is a deliberate decision: it means that file
 # receives the real Qdrant API key. Review it by hand.

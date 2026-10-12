@@ -35,7 +35,16 @@ case "$mode" in
         # the last command in this script should be, so it becomes PID 1):
         # `set -eu` above already aborts this script with alembic's own
         # exit code if it fails, before "python -m app.qdrant" ever runs.
+        #
+        # Task 3.2.b: run_checkpointer_setup() (app/agent/checkpointer.py)
+        # runs as a third idempotent setup action, same reasoning as the
+        # Qdrant one immediately below -- the checkpoint tables are a
+        # one-shot Postgres setup concern too, just not something alembic's
+        # own migrations manage (AsyncPostgresSaver.setup() owns its own
+        # schema/versioning, confirmed live at Task 3.2.a). Also not exec'd,
+        # same reason as alembic above.
         alembic upgrade head
+        python -m app.agent.checkpointer
         exec python -m app.qdrant
         ;;
     *)

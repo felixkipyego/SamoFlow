@@ -154,6 +154,21 @@ dependencies = [
     # required dependencies on this project's 3.12 pin (confirmed by
     # reading the installed wheel's own METADATA, not assumed).
     "asyncpg==0.32.0",
+    # Task 3.2.b. Version re-verified live on PyPI at this task's own
+    # build time (not copied from the 3.2.a research summary without
+    # re-checking). langgraph-checkpoint-postgres provides AsyncPostgresSaver
+    # (docs/SPEC.md §6.3); langgraph itself provides MessagesState/the
+    # graph machinery Step 3.3 builds against. Both pull in
+    # langgraph-checkpoint (resolves to 4.2.0) and, for the Postgres
+    # package specifically, psycopg-pool (resolves to 3.3.3, new to this
+    # project) -- confirmed live, in a throwaway venv, to require
+    # psycopg>=3.2.0, satisfied cleanly by this project's own existing
+    # psycopg==3.3.6 pin with zero conflict. langgraph's own tree pulls in
+    # langchain-core (a non-trivial transitive dependency -- see
+    # PROJECT_SPEC.md's dependency-footprint note for this task) plus
+    # langgraph-prebuilt/langgraph-sdk/pydantic/xxhash.
+    "langgraph==1.2.14",
+    "langgraph-checkpoint-postgres==3.1.2",
 ]
 
 [project.optional-dependencies]

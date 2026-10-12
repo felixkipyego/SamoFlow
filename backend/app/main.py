@@ -12,11 +12,30 @@
 #
 # Task 1.4.k: the lifespan hook. Resolves the API half of the
 # shutdown-disposal open marker (the worker's own lifecycle hook stays a
-# separate, still-open concern owned by Step 2.1). Startup does nothing
-# new -- get_engine()/get_qdrant_client() both stay lazy, exactly as they
-# already are (Tasks 1.2.a/1.3.b): this hook only disposes what THIS
-# process actually created, never forces creation just to immediately
-# tear it down.
+# separate, still-open concern owned by Step 2.1). get_engine()/
+# get_qdrant_client() both stay lazy, exactly as they already are (Tasks
+# 1.2.a/1.3.b): this hook only disposes what THIS process actually
+# created, never forces creation just to immediately tear it down.
+#
+# Task 3.2.b: the checkpointer pool is the one exception to "startup does
+# nothing new" -- it cannot be lazy the way get_engine()/get_qdrant_client()
+# are (psycopg_pool's own async pool must be opened via an explicit
+# `await pool.open()`, confirmed at Task 3.2.a; a plain sync @lru_cache
+# factory cannot provide that), so open_checkpointer_pool() runs here,
+# unconditionally, before the yield.
+#
+# Deliberately NOT wrapped in try/except like the shutdown disposals below
+# -- but this does NOT mean an unreachable database fails startup: `pool.
+# open()`'s own default is `wait=False` (confirmed live by reading its
+# signature/docstring directly), so it starts background connection
+# workers and returns immediately, regardless of whether the database is
+# actually reachable. What staying unwrapped here really protects against
+# is a genuine CONSTRUCTION-time error -- e.g. a malformed conninfo
+# string, or get_settings() raising SettingsError -- propagating loudly
+# at startup rather than being silently swallowed. A merely-unreachable
+# database surfaces later instead, the first time get_checkpointer()'s
+# returned saver actually tries to use a connection (see that module's
+# own open_checkpointer_pool() docstring for the full detail).
 #
 # "Created yet?" without creating: get_engine.cache_info().currsize (an
 # lru_cache-wrapped, zero-arg function's own cache introspection -- pure,
@@ -32,6 +51,7 @@ from importlib.metadata import version
 
 from fastapi import FastAPI
 
+from app.agent.checkpointer import close_checkpointer_pool, open_checkpointer_pool
 from app.auth.routes import router as auth_router
 from app.config import Settings, get_settings
 from app.db import _session_factory, get_engine
@@ -45,6 +65,7 @@ logger = logging.getLogger(__name__)
 
 @asynccontextmanager
 async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
+    await open_checkpointer_pool()
     yield
     # Each disposal in its own try/except: one failing must never prevent
     # the other from being attempted, and must never crash the shutdown
@@ -87,6 +108,19 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         else:
             get_qdrant_client.cache_clear()
             logger.info("Qdrant client closed")
+
+    # Task 3.2.b: unlike the two disposals above, the checkpointer pool was
+    # unconditionally opened at the top of this hook (not lazily), so no
+    # "created yet?" guard is needed here -- close_checkpointer_pool()'s
+    # own no-op-if-never-opened check (app/agent/checkpointer.py) covers
+    # the one case that still matters: a test building the app without
+    # running this hook's startup half at all.
+    try:
+        await close_checkpointer_pool()
+    except Exception:
+        logger.exception("failed to close the checkpointer pool during shutdown")
+    else:
+        logger.info("checkpointer pool closed")
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
