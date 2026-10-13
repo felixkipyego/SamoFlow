@@ -1,0 +1,41 @@
+# backend/config/rewrite_trigger_phrases.yaml
+# Task 3.5.b: the "needs join" skip-check (docs/SPEC.md §6.3's own
+# "prepare" bullet, scoped at Task 3.5's own decision log, 2026-10-13, to
+# JOINING a follow-up with the previous visitor question -- not a model
+# rewrite, deferred to a §9 marker owned by Step 3.7). Mirrors
+# greeting_phrases.yaml's own shape exactly (one entry per phrase, loaded
+# at startup, validated against a schema in the tests,
+# backend/app/agent/rewrite_trigger.py's own pydantic models).
+#
+# Each entry is matched as a WHOLE-WORD/WHOLE-PHRASE substring anywhere
+# in the visitor's own message (after the same lowercase/trailing-
+# punctuation/whitespace normalisation greeting_phrases.py already
+# established) -- NOT an exact-whole-message match like greeting_
+# phrases.yaml's own rule: a back-reference like "it" or "what about"
+# can legitimately appear anywhere in a longer follow-up ("What about
+# Enterprise?"), not only as the entire message. See rewrite_trigger.py's
+# own module docstring for the full matching rule, including the length
+# rule it is combined with (OR, not AND -- either condition alone is
+# enough to flag a message).
+#
+# This list is 3.5.a's own research list (manual_research_followup_
+# rewrite.py), carried forward unchanged, PLUS "what if" -- the one fix
+# that research found: "What if the item arrives damaged?" and "What if
+# I don't have a receipt?" were both false negatives (missed) under the
+# original list, both resolved by adding this one phrase (confirmed by
+# hand against both strings before relying on it here).
+entries:
+  - phrase: it
+  - phrase: they
+  - phrase: them
+  - phrase: that
+  - phrase: those
+  - phrase: this
+  - phrase: that one
+  - phrase: the first one
+  - phrase: the other one
+  - phrase: what about
+  - phrase: how about
+  - phrase: and the
+  - phrase: and what about
+  - phrase: what if

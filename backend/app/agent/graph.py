@@ -39,6 +39,7 @@ from pydantic import BaseModel, Field
 from app.agent.chat_model import get_chat_model
 from app.agent.context import tenant_id_from_config
 from app.agent.greeting_phrases import is_greeting_or_thanks
+from app.agent.rewrite_trigger import needs_join
 from app.config import get_settings
 from app.retrieval.service import RetrievedChunk, chunk_from_scored_point, retrieve
 
@@ -102,6 +103,19 @@ class AgentState(MessagesState):
     # node` below -- a stale `True` from an earlier turn's own failure
     # must never linger into a turn that succeeds normally.
     dependency_failed: bool
+    # Task 3.5.c: `_prepare_node`'s own output -- the ONLY text
+    # `_retrieve_node` ever sends to `retrieve()` (never the raw
+    # HumanMessage content directly, now that `prepare` exists). Plain
+    # (OVERWRITE), reset to `""` every turn by `_reset_turn_state_node`,
+    # same reasoning as every other per-turn field above: a stale
+    # prepared query from an earlier turn must never linger. [SECURITY]
+    # per the Step 3.5 decision log: used ONLY as a search query -- never
+    # shown to the visitor, never persisted as the visitor's own message
+    # (the raw HumanMessage this turn's own caller appended is untouched),
+    # and never logged as text anywhere (it may carry personal data, the
+    # same reasoning `_gate_node` already applies to the query/chunk text
+    # it logs around but never includes).
+    prepared_query: str
 
 
 # Task 3.4.e [SECURITY-adjacent]: every per-turn field in AgentState,
@@ -152,6 +166,7 @@ def _reset_turn_state_node(state: AgentState) -> dict:
         "cited_chunk_labels": [],
         "citations": [],
         "dependency_failed": False,
+        "prepared_query": "",
     }
 
 
@@ -222,9 +237,10 @@ def _is_escalation_intent(state: AgentState) -> bool:
 
 def route(state: AgentState) -> str:
     """docs/SPEC.md §6.2's own routing rules, in order. "Otherwise" (no
-    rule matches) routes to the retrieve node -- the start of §6.3's own
-    `prepare -> retrieve -> gate -> answer` path (`prepare` itself is Step
-    3.5's own node, not yet inserted into this graph).
+    rule matches) routes to the prepare node -- the start of §6.3's own
+    `prepare -> retrieve -> gate -> answer` path. **Task 3.5.c**: `prepare`
+    is now a real node (`_prepare_node` below), not a stub -- this was
+    `"retrieve"` directly before this task.
     """
     if _quota_exhausted(state):
         return "fallback"
@@ -232,14 +248,14 @@ def route(state: AgentState) -> str:
         return "guardrail"
     if _is_escalation_intent(state):
         return "coordinator"
-    return "retrieve"
+    return "prepare"
 
 
 _ROUTE_PATH_MAP = {
     "fallback": "fallback",
     "guardrail": "guardrail",
     "coordinator": "coordinator",
-    "retrieve": "retrieve",
+    "prepare": "prepare",
 }
 
 
@@ -319,6 +335,97 @@ def _latest_human_message_text(messages: list[BaseMessage]) -> str:
     raise ValueError("no HumanMessage found in state['messages']")
 
 
+# Task 3.5.c: docs/SPEC.md §6.3's own "prepare" bullet -- built per the
+# Step 3.5 decision log's own dated deviation (2026-10-13, Felix): follow-
+# ups are prepared by JOINING with the previous visitor question, NEVER a
+# model rewrite, for the pilot (real evidence: 3.5.a's own measured
+# best_dense_score gain -- raw mean 0.451, joined mean 0.609, a real
+# rewrite's own mean 0.636 -- joining recovers ~88% of a rewrite's own
+# confidence gain at zero added latency; a real rewrite call would add
+# ~860ms median, pushing the combined turn to ~2.03s against docs/
+# SPEC.md §17's own 2s follow-up p50 budget). A real model rewrite is
+# deferred to a §9 marker, owner Step 3.7 -- see PROJECT_SPEC.md's own
+# decision log for the full reasoning and limits of this task's evidence.
+#
+# Keep the END of a long previous question, not the beginning: a visitor
+# rambling before finally asking their real question tends to put the
+# actual ask toward the END of their own message (confirmed by this
+# project's own corpus of realistic follow-up pairs, 3.5.a) -- truncating
+# from the front would risk cutting off the one part that actually
+# matters, where truncating the tail risks losing only earlier framing.
+_PREVIOUS_QUESTION_CHAR_CAP = 200
+
+
+def _previous_visitor_question(messages: list[BaseMessage]) -> str | None:
+    """Walks `messages` backward, skipping the CURRENT turn's own latest
+    HumanMessage (the first one found -- `_latest_human_message_text()`'s
+    own target), then returns the next HumanMessage's own text that is
+    NOT a greeting/thanks match (`is_greeting_or_thanks()`, Task 3.4.f --
+    REUSED directly, never duplicated). `None` if no earlier HumanMessage
+    qualifies: either this is the first turn (no earlier HumanMessage at
+    all), or every earlier one was a greeting/thanks -- both cases are
+    `_prepare_node`'s own "use the message as-is" fallback, by design.
+    Malformed earlier messages (non-str content, empty/whitespace) are
+    silently skipped, not raised -- unlike `_latest_human_message_text()`,
+    this function is searching for an optional FALLBACK candidate, not
+    validating the current turn's own required input.
+    """
+    found_current = False
+    for message in reversed(messages):
+        if not isinstance(message, HumanMessage):
+            continue
+        content = message.content
+        if not isinstance(content, str):
+            continue
+        text = content.strip()
+        if not text:
+            continue
+        if not found_current:
+            found_current = True
+            continue
+        if is_greeting_or_thanks(text):
+            continue
+        return text
+    return None
+
+
+def _cap_previous_question(text: str) -> str:
+    """Keeps the last `_PREVIOUS_QUESTION_CHAR_CAP` characters of `text`
+    -- see this module's own header comment above for why the END, not
+    the start.
+    """
+    if len(text) <= _PREVIOUS_QUESTION_CHAR_CAP:
+        return text
+    return text[-_PREVIOUS_QUESTION_CHAR_CAP:]
+
+
+def _prepare_node(state: AgentState) -> dict:
+    """docs/SPEC.md §6.3's own "prepare" step, built as JOINING (Task
+    3.5.c, see this module's own header comment above for the full
+    reasoning): first turns, and follow-ups where no earlier qualifying
+    visitor question exists, use the current message as-is (docs/SPEC.md
+    §6.3's own "First messages skip this step" rule, generalized to
+    "nothing to join with" rather than purely "is this message #1").
+    Otherwise, `needs_join()` (Task 3.5.b) decides whether this specific
+    follow-up LOOKS context-dependent enough to attempt a join at all --
+    a message that already reads as self-contained is used as-is too,
+    never needlessly joined.
+
+    [SECURITY]: `prepared_query` is NEVER the visitor's own stored
+    message (that remains whatever `state["messages"]`'s own latest
+    HumanMessage already holds, untouched by this node) and is never
+    logged here -- see `AgentState.prepared_query`'s own field comment.
+    """
+    current_text = _latest_human_message_text(state["messages"])
+    previous_question = _previous_visitor_question(state["messages"])
+    if previous_question is None:
+        return {"prepared_query": current_text}
+    if not needs_join(current_text):
+        return {"prepared_query": current_text}
+    capped_previous = _cap_previous_question(previous_question)
+    return {"prepared_query": f"{capped_previous} {current_text}"}
+
+
 async def _retrieve_node(state: AgentState, config: RunnableConfig) -> dict:
     """The real Retrieval Specialist's own search step (Task 3.3.c),
     calling `retrieve()` (Task 3.1.c) for real. `tenant_id` comes ONLY
@@ -347,7 +454,11 @@ async def _retrieve_node(state: AgentState, config: RunnableConfig) -> dict:
     failure_fallback_node`), never the generic no-relevant-answer one.
     """
     tenant_id = tenant_id_from_config(config)
-    query = _latest_human_message_text(state["messages"])
+    # Task 3.5.c: the query is now `_prepare_node`'s own output, never
+    # `_latest_human_message_text(state["messages"])` directly -- the
+    # prepare node ALREADY calls that helper itself and decides whether
+    # to join it with the previous visitor question first.
+    query = state["prepared_query"]
     try:
         result = await retrieve(tenant_id, query)
     except Exception as exc:
@@ -1045,6 +1156,7 @@ def build_graph(checkpointer: AsyncPostgresSaver) -> CompiledStateGraph:
     builder.add_node("fallback", _fallback_node)
     builder.add_node("guardrail", _guardrail_node)
     builder.add_node("coordinator", _coordinator_node)
+    builder.add_node("prepare", _prepare_node)
     builder.add_node("retrieve", _retrieve_node)
     builder.add_node("gate", _gate_node)
     builder.add_node("answer", _answer_node)
@@ -1052,6 +1164,7 @@ def build_graph(checkpointer: AsyncPostgresSaver) -> CompiledStateGraph:
     builder.add_node("dependency_failure", _dependency_failure_fallback_node)
     builder.add_edge(START, "reset_turn_state")
     builder.add_conditional_edges("reset_turn_state", route, _ROUTE_PATH_MAP)
+    builder.add_edge("prepare", "retrieve")
     builder.add_edge("retrieve", "gate")
     builder.add_conditional_edges("gate", _route_after_gate, _AFTER_GATE_PATH_MAP)
     builder.add_conditional_edges("answer", _route_after_answer, _AFTER_ANSWER_PATH_MAP)

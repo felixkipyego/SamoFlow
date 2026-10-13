@@ -61,6 +61,7 @@ def test_reset_turn_state_node_returns_every_fields_fresh_default():
         "cited_chunk_labels": [],
         "citations": [],
         "dependency_failed": False,
+        "prepared_query": "",
     }
 
 

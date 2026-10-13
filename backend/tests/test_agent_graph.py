@@ -69,8 +69,11 @@ async def _collect(aiter):
 # --- route() as a pure function ---------------------------------------------
 
 
-def test_route_returns_retrieve_when_no_rule_matches():
-    assert route(_ORDINARY_MESSAGE_STATE) == "retrieve"
+def test_route_returns_prepare_when_no_rule_matches():
+    # Task 3.5.c: "otherwise" now routes to the real `prepare` node
+    # first, not directly to `retrieve` -- `prepare -> retrieve` is a
+    # real, unconditional edge (build_graph()), not route()'s own job.
+    assert route(_ORDINARY_MESSAGE_STATE) == "prepare"
 
 
 def test_route_rule_1_quota_exhausted_wins(monkeypatch):
@@ -162,7 +165,12 @@ async def test_retrieve_node_catches_a_retrieve_failure_and_sets_dependency_fail
 
     monkeypatch.setattr(graph_module, "retrieve", _raise)
     config = {"configurable": {"tenant_id": uuid.uuid4()}}
-    state = {"messages": [HumanMessage(content="what are your hours")]}
+    # Task 3.5.c: _retrieve_node now reads state["prepared_query"]
+    # (_prepare_node's own output), never the raw messages directly.
+    state = {
+        "messages": [HumanMessage(content="what are your hours")],
+        "prepared_query": "what are your hours",
+    }
 
     result = await graph_module._retrieve_node(state, config)
 
