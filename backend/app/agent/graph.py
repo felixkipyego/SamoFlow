@@ -291,10 +291,13 @@ def _coordinator_node(state: AgentState) -> dict:
 
 
 def _latest_human_message_text(messages: list[BaseMessage]) -> str:
-    """Task 3.3.c: the query text for the retrieve node below -- the
-    latest `HumanMessage`'s own content, walked backward since `prepare`
-    (Step 3.5, not yet inserted) will eventually rewrite follow-ups but
-    nothing here assumes that has happened.
+    """Task 3.3.c: the CURRENT turn's own raw message text -- the latest
+    `HumanMessage`'s own content, unmodified. Also used by `_prepare_node`
+    (Task 3.5.c, built as JOINING, not a rewrite -- see that node's own
+    docstring) to recover the current message BEFORE deciding whether to
+    join it with the previous visitor question; `_retrieve_node` itself
+    no longer calls this directly, reading `state["prepared_query"]`
+    instead (`_prepare_node`'s own output).
 
     Fails loudly (a plain `ValueError`, never silently empty chunks) on
     three distinct malformed-input shapes, each named explicitly rather

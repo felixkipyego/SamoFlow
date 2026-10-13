@@ -21,6 +21,14 @@ Applies to every task, whether or not the prompt mentions it. Extends PROJECT_SP
 - [SECURITY] work includes an adversarial pass before reporting: actively try to break what you built as an attacker would (bypasses, splits, nesting, encodings), and convert every finding into a committed regression test.
 - Every report ends with a "Senior engineer check": (1) what you chose NOT to build and why; (2) the main trade-off accepted and its later cost; (3) anything in the prompt you pushed back on or would've done differently; (4) the highest production risk in this change. "None" only with a one-line reason. A report without this section is incomplete.
 
+## Ending a task
+Applies to every task.
+- When the work is finished and verified, write the final report and end — the report is the last thing you produce.
+- Never ask whether to stop, continue, or proceed; never close with a question, an offer ("Want me to...?", "Shall I...?", "Let me know if..."), or a list of options; never use an interactive question tool at the end of a task.
+- Anything needing a decision goes in a "Decisions needed" section inside the report, as statements with your recommendation — not as questions.
+- Never start the next task, step, or subtask unless the prompt explicitly says to.
+- Exception: if genuinely blocked mid-task (cannot continue safely or correctly without input), stop there and report the blocker in the same report format — never ask permission for things the prompt already authorised.
+
 ## Keeping the files in sync
-- Do not copy rules or decisions into this file, with one exception: "Senior engineer judgment" above is a standing, project-independent rule, not a SamoFlow spec decision, so it lives here directly rather than in PROJECT_SPEC.md. Everything else still only points to the two files above, so nothing can drift.
+- Do not copy rules or decisions into this file, with one exception: "Senior engineer judgment" and "Ending a task" above are standing, project-independent rules, not SamoFlow spec decisions, so they live here directly rather than in PROJECT_SPEC.md. Everything else still only points to the two files above, so nothing can drift.
 - After every task, update PROJECT_SPEC.md as its rules describe.

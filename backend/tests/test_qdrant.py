@@ -320,6 +320,19 @@ async def test_cli_exits_nonzero_with_the_mismatch_description_on_a_real_schema_
     url, key = require_test_qdrant()
     client = qdrant.build_qdrant_client(url, key)
     try:
+        # Defensive, not merely tidy (Task 3.5.e's own duplication check
+        # found this live): _create_bare_collection() calls create_
+        # collection() directly, which is NOT idempotent (unlike ensure_
+        # collection()) -- a real COLLECTION_NAME left behind by anything
+        # else that ran against this same test-qdrant first (a manual
+        # research script, or test_cli_ensures_the_real_default_collection_
+        # against_the_test_qdrant above, if its own teardown were ever
+        # skipped) makes this call fail with a 409 Conflict before the
+        # test's own real assertion ever runs. Delete-if-exists first,
+        # matching this test's own teardown's identical check, so this
+        # test's own setup never depends on what ran before it.
+        if await client.collection_exists(qdrant.COLLECTION_NAME):
+            await client.delete_collection(qdrant.COLLECTION_NAME)
         await _create_bare_collection(client, qdrant.COLLECTION_NAME, dense_size=768)
         env = minimal_subprocess_env()
         env.update(VALID_ENV)

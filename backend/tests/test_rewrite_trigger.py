@@ -160,11 +160,21 @@ def test_3_5_a_followups_rate_recorded():
     assert len(flagged) == 10, f"expected all 10 flagged, got {len(flagged)}: {flagged}"
 
 
-def test_3_5_a_self_contained_false_positive_rate_recorded():
+def test_3_5_a_self_contained_false_positive_rate_is_bounded():
+    # Task 3.5.e's own duplication check: CONFIRMED LIVE, not assumed,
+    # that this was already a real bound before this edit -- adding an
+    # over-broad phrase ("your") to the committed YAML made this
+    # assertion fail (6/15, not 3/15), proven by actually adding it,
+    # running this test, watching it fail, then reverting. Changed from
+    # `== 3` to `<= 3` anyway: an UPPER BOUND is the semantically correct
+    # check -- a future narrowing of the phrase list that legitimately
+    # REDUCES false positives below 3 is an improvement, not a
+    # regression, and must never fail this test the way exact equality
+    # would have. 3.5.a's own measured rate (3/15, 20%) is the accepted
+    # ceiling (Step 3.5 decision Q1) -- this test's only job is making
+    # sure the YAML never silently grows past it.
     flagged = [m for m in _3_5_A_SELF_CONTAINED if rewrite_trigger.needs_join(m)]
-    # 3.5.a's own measured rate: 3/15 (20%) -- recorded here as the real,
-    # accepted cost (Step 3.5 decision Q1), not silently regressed past
-    # without a test noticing if the phrase list grows carelessly later.
-    assert len(flagged) == 3, (
-        f"expected 3/15 flagged (the measured rate), got {len(flagged)}: {flagged}"
+    assert len(flagged) <= 3, (
+        f"false-positive rate regressed past the accepted 3/15 ceiling: "
+        f"got {len(flagged)}: {flagged}"
     )
