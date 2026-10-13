@@ -21,6 +21,14 @@ htmlcov/
 # Node (widget/dashboard tooling, not chosen yet)
 node_modules/
 
+# Task 3.7.d: per-run answer-eval output (manual_run_answer_eval.py) --
+# real LLM output, timestamped, non-reproducible (a different run can
+# legitimately produce different real answers/judge verdicts), and
+# includes the calibration labelling export + its own hidden key file.
+# Never committed; the real numbers from a given run are recorded in
+# PROJECT_SPEC.md's own decision log instead, as a committed SUMMARY.
+evals/golden_set/results/
+
 # OS and editors
 .DS_Store
 .idea/

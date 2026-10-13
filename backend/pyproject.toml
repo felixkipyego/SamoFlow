@@ -237,6 +237,19 @@ dev = [
     # build time (4.2.0), not assumed. Dev-only, never ships in the
     # production image.
     "markdown-it-py==4.2.0",
+    # Task 3.7.d: the groundedness judge (docs/SPEC.md §13's own
+    # "phoenix.evals for hallucination and relevance"), confirmed current
+    # on PyPI at this task's own build time (3.9.2, re-verified -- same
+    # version researched at Task 3.7.a). Dev/eval-only, NEVER the
+    # production lockfile or image -- enforced by `tests/test_pyproject.
+    # py`'s own `test_eval_only_packages_never_appear_in_the_production_
+    # lockfile`, written ahead of this addition at Task 3.7.a's own
+    # follow-up specifically so this moment could not get it wrong
+    # silently. Pulls in `pandas` (confirmed via PyPI's own
+    # `requires_dist`, Task 3.7.a) -- the guard checks that name
+    # specifically, not `numpy` (already a legitimate production
+    # dependency via fastembed/onnxruntime; see that test's own comment).
+    "arize-phoenix-evals==3.9.2",
 ]
 
 [tool.hatch.build.targets.wheel]

@@ -45,6 +45,24 @@ from tests.conftest import (
 )
 from tests.test_qdrant_collection import _create_bare_collection
 
+# Task 3.7.d: raised from a bare 10 (4 identical occurrences below, all
+# `python -m app.qdrant` cold starts) after a real, reproduced flake
+# during `make test-all` -- confirmed root cause, not assumed: a cold
+# `import app.qdrant` alone measured ~2s even on an otherwise-idle
+# machine (this module pulls in this project's own full dependency tree
+# -- FastAPI, LangChain/LangGraph, SQLAlchemy, qdrant-client, openai,
+# anthropic), and the flaking test spawns that cold start TWICE under
+# the heaviest possible CPU contention (every other test in the full
+# suite running at once) -- confirmed by re-running the same test in
+# isolation immediately afterward, where it passed in 7.11s. Matches
+# this project's own existing precedent for the identical class of real,
+# dependency-heavy subprocess cold start: `test_alembic.py` already uses
+# 30s for its own Alembic subprocess tests; `test_worker.py` already uses
+# a named `_WORKER_SUBPROCESS_STARTUP_TIMEOUT = 20`. 10s was never enough
+# margin for this specific module's own real import weight under load,
+# independent of anything this task touched.
+_SUBPROCESS_TIMEOUT_SECONDS = 30
+
 
 def test_importing_qdrant_module_has_no_side_effects():
     # Subprocess with no environment at all: proves the module can be
@@ -274,7 +292,9 @@ def test_client_library_version_is_compatible_with_the_pinned_server():
 # items A1/A2).
 async def test_cli_with_empty_environment_exits_nonzero_without_traceback():
     async with spawn_module_subprocess("qdrant", minimal_subprocess_env()) as process:
-        _, stderr = await asyncio.wait_for(process.communicate(), timeout=10)
+        _, stderr = await asyncio.wait_for(
+            process.communicate(), timeout=_SUBPROCESS_TIMEOUT_SECONDS
+        )
     assert process.returncode != 0
     assert b"Traceback" not in stderr
 
@@ -286,7 +306,9 @@ async def test_cli_ensures_the_real_default_collection_against_the_test_qdrant()
     env["QDRANT_URL"] = url
     env["QDRANT_API_KEY"] = key
     async with spawn_module_subprocess("qdrant", env) as process:
-        _, stderr = await asyncio.wait_for(process.communicate(), timeout=10)
+        _, stderr = await asyncio.wait_for(
+            process.communicate(), timeout=_SUBPROCESS_TIMEOUT_SECONDS
+        )
         assert process.returncode == 0, stderr
 
     client = qdrant.build_qdrant_client(url, key)
@@ -297,7 +319,9 @@ async def test_cli_ensures_the_real_default_collection_against_the_test_qdrant()
         # test_qdrant_collection.py's test_ensure_collection_called_twice_is_
         # a_no_op).
         async with spawn_module_subprocess("qdrant", env) as second:
-            _, second_stderr = await asyncio.wait_for(second.communicate(), timeout=10)
+            _, second_stderr = await asyncio.wait_for(
+                second.communicate(), timeout=_SUBPROCESS_TIMEOUT_SECONDS
+            )
             assert second.returncode == 0, second_stderr
     finally:
         if await client.collection_exists(qdrant.COLLECTION_NAME):
@@ -339,7 +363,9 @@ async def test_cli_exits_nonzero_with_the_mismatch_description_on_a_real_schema_
         env["QDRANT_URL"] = url
         env["QDRANT_API_KEY"] = key
         async with spawn_module_subprocess("qdrant", env) as process:
-            _, stderr = await asyncio.wait_for(process.communicate(), timeout=10)
+            _, stderr = await asyncio.wait_for(
+                process.communicate(), timeout=_SUBPROCESS_TIMEOUT_SECONDS
+            )
         assert process.returncode != 0
         assert b"Traceback" not in stderr
         assert b"768" in stderr
