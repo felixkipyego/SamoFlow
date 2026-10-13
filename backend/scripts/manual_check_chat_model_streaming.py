@@ -13,13 +13,23 @@
 # What this answers, that no fake model ever can (fakes stream whatever
 # script they're given -- they cannot show how a REAL provider actually
 # chunks a REAL tool call):
-#   (1) PROJECT_SPEC.md's own new §9 marker: enabling ANTHROPIC_API_KEY in
+#   (1) PROJECT_SPEC.md's own §9 marker: enabling ANTHROPIC_API_KEY in
 #       production is conditional on THIS check passing against Anthropic
 #       first -- does `tool_call_chunks` actually stream incrementally
 #       through `ChatAnthropic` at all, and is the declared `Answer`
-#       schema's own field order (`can_answer` -> `used_chunk_ids` ->
-#       `answer`) actually preserved the same way it's confirmed live for
-#       OpenAI (app/agent/graph.py's own header comment)?
+#       schema's own field order -- **`can_answer` -> `answer` ->
+#       `used_chunk_ids`, REORDERED at the Task 3.4.g latency follow-up
+#       (was `can_answer`/`used_chunk_ids`/`answer`)** -- actually
+#       preserved the same way it's confirmed live for OpenAI
+#       (app/agent/graph.py's own header comment)? Checked here as: zero
+#       answer text before `can_answer` resolves (unchanged, still
+#       non-negotiable), and `used_chunk_ids` not observed arriving (as a
+#       JSON key) before the first visible answer-text delta -- NOT a
+#       correctness requirement (the real `_answer_node`'s post-loop
+#       citation trigger has no dependency on provider field order at
+#       all, confirmed by that task's own adversarial pass), only the
+#       signal that this provider would ALSO get the latency benefit the
+#       reorder was built for.
 #   (2) Real, measured time-to-first-visible-text against docs/SPEC.md
 #       §17's own 1.5s/3s time-to-first-token budget, through the SAME
 #       incremental-parsing logic the real answer node uses (not a
@@ -68,8 +78,9 @@ async def _probe(provider: str, model_name: str, api_key: str) -> None:
     emitted = ""
     can_answer_at: float | None = None
     first_text_at: float | None = None
+    used_chunk_ids_at: float | None = None
     raw_chunks_seen = 0
-    field_order_violation = False
+    text_before_can_answer_violation = False
 
     async for chunk in bound.astream(messages):
         tool_call_chunks = chunk.tool_call_chunks
@@ -83,8 +94,17 @@ async def _probe(provider: str, model_name: str, api_key: str) -> None:
 
         if can_answer_at is None and "can_answer" in partial:
             can_answer_at = time.perf_counter() - start
+            # The one invariant that cannot change regardless of field
+            # order (app/agent/graph.py's own Answer docstring): zero
+            # answer-text bytes before can_answer resolves. Still checked
+            # here even though the NEW order makes "answer" the very next
+            # field -- a provider that front-loads multiple fields into
+            # one chunk could in principle violate this.
             if partial.get("answer"):
-                field_order_violation = True
+                text_before_can_answer_violation = True
+
+        if used_chunk_ids_at is None and "used_chunk_ids" in partial:
+            used_chunk_ids_at = time.perf_counter() - start
 
         new_answer = partial.get("answer") or ""
         if len(new_answer) > len(emitted):
@@ -95,6 +115,18 @@ async def _probe(provider: str, model_name: str, api_key: str) -> None:
     total = time.perf_counter() - start
     final = parse_partial_json(accumulated) or {}
 
+    # Task 3.4.g's own latency follow-up: did this provider ALSO stream
+    # used_chunk_ids AFTER answer text started, the way the new declared
+    # order asks for? NOT a correctness requirement (_build_citations()'s
+    # own post-loop trigger works correctly regardless, confirmed by that
+    # task's own adversarial pass) -- only whether this provider gets the
+    # SAME latency benefit the reorder was built to produce.
+    order_not_honored = (
+        used_chunk_ids_at is not None
+        and first_text_at is not None
+        and used_chunk_ids_at < first_text_at
+    )
+
     print(f"  raw tool_call_chunks observed: {raw_chunks_seen}")
     if can_answer_at:
         print(f"  can_answer known at:    {can_answer_at * 1000:.0f}ms")
@@ -104,24 +136,39 @@ async def _probe(provider: str, model_name: str, api_key: str) -> None:
         print(f"  first visible text at:  {first_text_at * 1000:.0f}ms")
     else:
         print("  no answer text streamed")
+    if used_chunk_ids_at:
+        print(f"  used_chunk_ids key seen at: {used_chunk_ids_at * 1000:.0f}ms")
     print(f"  total time:             {total * 1000:.0f}ms")
     print(f"  final can_answer:       {final.get('can_answer')}")
     print(f"  final used_chunk_ids:   {final.get('used_chunk_ids')}")
     print(f"  final answer:           {final.get('answer')!r}")
     if raw_chunks_seen <= 1:
         print("  *** WARNING: tool_call_chunks did NOT stream incrementally. ***")
-    if field_order_violation:
+    if text_before_can_answer_violation:
         print(
             "  *** WARNING: answer text was already present when can_answer resolved -- "
-            "field order NOT preserved as expected. ***"
+            "the one non-negotiable invariant is VIOLATED. ***"
+        )
+    if order_not_honored:
+        print(
+            "  NOTE: used_chunk_ids appeared before the first visible answer text -- "
+            "this provider does not honor the new declared field order. Not a "
+            "correctness problem (citations are still built correctly, post-loop), "
+            "but this provider will not get the latency benefit the reorder was "
+            "built for."
         )
     if provider == "anthropic":
-        if raw_chunks_seen > 1 and not field_order_violation:
+        if raw_chunks_seen > 1 and not text_before_can_answer_violation:
             print(
                 "  RESULT: Anthropic streaming check PASSES -- safe to set "
                 "CHAT_MODEL_SECONDARY_VERIFIED=true (ANTHROPIC_API_KEY alone is "
                 "not enough; app/agent/chat_model.py enforces both)."
             )
+            if order_not_honored:
+                print(
+                    "  (passes correctness; see the field-order NOTE above for the "
+                    "latency caveat specific to this provider.)"
+                )
         else:
             print(
                 "  RESULT: Anthropic streaming check FAILS -- do NOT set "
