@@ -1,7 +1,9 @@
 # backend/app/agent/greeting_phrases.py
 # Task 3.4.f: docs/SPEC.md §6.2 Rule 2, the GREETING/THANKS half only
-# (unsafe/abusive input is research-only this task, not built -- see
-# PROJECT_SPEC.md's own §9 marker, owner "3.4.f's own follow-up").
+# (unsafe/abusive input is deliberately DEFERRED for the pilot, an
+# explicit dated deviation decided at Task 3.4.g -- see PROJECT_SPEC.md's
+# own §9 marker, owner Step 6.4, and app/agent/graph.py's own
+# _is_unsafe_or_abusive() for the full reasoning).
 #
 # Loads backend/config/greeting_phrases.yaml -- a data file, not Python,
 # mirroring the shape docs/SPEC.md §7 describes for the sibling

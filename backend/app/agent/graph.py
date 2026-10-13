@@ -193,11 +193,24 @@ def _is_greeting_or_thanks(state: AgentState) -> bool:
 
 
 def _is_unsafe_or_abusive(state: AgentState) -> bool:
-    # TODO(3.4.f follow-up): research-only this task -- OpenAI's
-    # moderation endpoint evaluated live (latency, cost, failure
-    # behaviour, fit with this rule's own "no LLM hop" design, the
-    # privacy point), NOT built. See PROJECT_SPEC.md's own §9 marker for
-    # the full recommendation and what remains undecided.
+    # DEFERRED FOR THE PILOT (Task 3.4.g, 2026-10-13, decided by Felix): an
+    # explicit, dated deviation from docs/SPEC.md §6.2 rule 2, which lists
+    # "unsafe/abusive input" alongside greeting/thanks as a Guardrail-reply
+    # route -- today this predicate only ever returns False, so unsafe/
+    # abusive input still falls through to the normal retrieve/gate/answer
+    # path. Reasoning: OpenAI's moderation endpoint, evaluated live at Task
+    # 3.4.f, measured ~0.9s median / 1.4s max -- a blocking call that size
+    # does not fit this rule's own "rules, no LLM hop" design and would risk
+    # docs/SPEC.md §17's own latency budget; the answer path's own existing
+    # constraints (one forced tool, tenant-content-only grounding,
+    # `can_answer`, escaped output) mean abusive input mostly still ends in
+    # a harmless fallback even unflagged. Rejected alternative: parallel
+    # moderation started at turn start, failing open -- not adopted here,
+    # named as the documented option below if real-time blocking is later
+    # required. See PROJECT_SPEC.md's own §9 marker (owner Step 6.4,
+    # Escalation inbox and usage) for the real follow-up: an async
+    # flag-for-review, mirroring §6.2's own existing injection-logging
+    # precedent, never a blocking check here.
     return False
 
 
