@@ -328,6 +328,7 @@ async def test_streamed_text_equals_persisted_text_when_escaping_fires(monkeypat
 
     state = {
         "messages": [],
+        "prepared_query": "q",
         "retrieved_chunks": [_chunk("doc-a", "Alpha.", "https://example.com/a")],
     }
     from langchain_core.messages import HumanMessage
@@ -360,6 +361,7 @@ async def test_streamed_text_equals_persisted_text_on_the_happy_path(monkeypatch
 
     state = {
         "messages": [HumanMessage(content="q")],
+        "prepared_query": "q",
         "retrieved_chunks": [_chunk("doc-a", "Alpha.", "https://example.com/a")],
     }
     result = await graph_module._answer_node(state)
@@ -383,6 +385,7 @@ async def test_citations_state_matches_what_was_cited_and_actually_retrieved(mon
 
     state = {
         "messages": [HumanMessage(content="q")],
+        "prepared_query": "q",
         "retrieved_chunks": [
             _chunk("doc-a", "Alpha.", "https://example.com/a"),
             _chunk("doc-b", "Beta (upload).", None),

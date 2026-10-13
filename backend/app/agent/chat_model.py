@@ -139,12 +139,14 @@ def get_chat_model() -> Runnable:
     """
     settings = get_settings()
     timeout = settings.chat_model_timeout_seconds
+    temperature = settings.chat_model_temperature
     primary: BaseChatModel = init_chat_model(
         settings.chat_model_primary,
         model_provider="openai",
         api_key=settings.openai_api_key_str(),
         max_retries=0,
         timeout=timeout,
+        temperature=temperature,
     )
 
     secondary_key = settings.anthropic_api_key_str()
@@ -172,6 +174,7 @@ def get_chat_model() -> Runnable:
         model_provider="anthropic",
         api_key=secondary_key,
         max_retries=0,
+        temperature=temperature,
         timeout=timeout,
     )
     return primary.with_fallbacks([secondary])

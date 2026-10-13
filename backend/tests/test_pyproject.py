@@ -139,6 +139,36 @@ def test_dev_lock_is_a_superset_of_runtime_lock():
     )
 
 
+def test_eval_only_packages_never_appear_in_the_production_lockfile():
+    # Task 3.7.a follow-up PART 4: `arize-phoenix-evals` (Step 3.7's own
+    # golden-set/eval runner, not yet added at the time this test was
+    # written) -- confirmed live against PyPI's own `requires_dist`
+    # metadata, not assumed: it declares a direct, unconditional (non-
+    # extra) dependency on `pandas` -- must go into `pyproject.toml`'s
+    # `dev` extra and `requirements-dev.lock` ONLY when Step 3.7 adds it.
+    # `numpy` is DELIBERATELY NOT in this set, despite being part of
+    # pandas's own dependency tree: confirmed live, numpy is ALREADY a
+    # legitimate, pre-existing production package here (`requirements.
+    # lock`'s own "# via" comment names fastembed/onnxruntime/qdrant-
+    # client, all real runtime dependencies, Task 2.5.b) -- its mere
+    # presence is not evidence of eval-dependency leakage, and flagging
+    # it would make this guard permanently, falsely red.
+    #
+    # This guard exists BEFORE arize-phoenix-evals/pandas are added
+    # specifically so the first `make lock` that gets it wrong (e.g. a
+    # bare `dependencies = [...]` entry instead of the `dev` extra) fails
+    # here immediately, rather than silently shipping an eval-only
+    # dependency tree in the production Docker image.
+    _EVAL_ONLY_PACKAGES = {"arize-phoenix-evals", "pandas"}
+    runtime_packages = set(_lockfile_packages(RUNTIME_LOCK_PATH))
+    present = _EVAL_ONLY_PACKAGES & runtime_packages
+    assert not present, (
+        f"eval-only package(s) {sorted(present)} found in requirements.lock "
+        "(the production lockfile) -- arize-phoenix-evals and pandas must "
+        "only ever be in pyproject.toml's 'dev' extra and requirements-dev.lock"
+    )
+
+
 def test_lockfiles_agree_on_shared_package_versions():
     # The superset check above only compares package *names*; a package
     # present in both lockfiles could still be pinned to different versions

@@ -227,6 +227,24 @@ class Settings(BaseSettings):
     # with ingestion's own looser tolerance, so a construction-time
     # default here is the right place, not a per-call override.
     chat_model_timeout_seconds: float = Field(default=5.0, gt=0)
+    # Task 3.7.a follow-up [correctness]: an EXPLICIT choice replacing an
+    # inherited provider default -- `ChatOpenAI`'s own default `temperature`
+    # is `None` (confirmed live, not assumed: nothing is sent, so OpenAI's
+    # own non-zero server-side default applies), which real measurement
+    # found actively harmful on its own: the expedited-shipping follow-up
+    # pair's own `can_answer` rate was 9/20 (45%) at the provider default,
+    # and 0/20 at `temperature=0` with the SAME (unfixed) prompt -- pinning
+    # temperature alone does not fix ambiguity, it just makes whichever
+    # answer the model's own distribution favours deterministic, which was
+    # the WRONG answer here. Paired with the real fix (the answer prompt
+    # now receives `prepared_query`, not the bare follow-up -- see
+    # `_answer_node`), `temperature=0` measured 20/20 (100%), identical to
+    # the unpinned-temperature result with the SAME prompt fix (20/20) --
+    # i.e. once the prompt itself is no longer ambiguous, pinning
+    # temperature costs nothing and buys full determinism. Range `[0, 2]`
+    # matches OpenAI's own documented bound. **This is a baseline the
+    # golden set (Step 3.7) measures and may retune, not a final number.**
+    chat_model_temperature: float = Field(default=0.0, ge=0, le=2)
     # Task 2.6.e: identifies the crawler on every robots.txt/sitemap/page
     # request it makes, matching the Step 2.6 decision entry's own
     # "Settings-configurable, not hardcoded" call -- a placeholder domain

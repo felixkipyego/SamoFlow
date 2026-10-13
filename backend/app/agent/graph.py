@@ -966,7 +966,23 @@ async def _answer_node(state: AgentState) -> dict:
         ever returned as completed state in either case.
     """
     writer = get_stream_writer()
-    question = _latest_human_message_text(state["messages"])
+    # Task 3.7.a follow-up [correctness]: `state["prepared_query"]`
+    # (`_prepare_node`, Task 3.5.c), not the raw latest message -- this
+    # node previously asked the raw message, so a joined follow-up's own
+    # referent ("that", "it") was resolved for RETRIEVAL but never shown
+    # to the answer model itself, which saw only the bare follow-up next
+    # to possibly-ambiguous DATA blocks. Real measurement (opt-in script,
+    # `manual_research_answer_prompt_referent.py`) found this a genuine
+    # cause of `can_answer` failures, not merely sampling noise: on first
+    # turns and not-flagged follow-ups `prepared_query` already equals
+    # the raw message (`_prepare_node`'s own "use as-is" branches), so
+    # this is a strict improvement, never a behavior change, for every
+    # turn that wasn't already ambiguous. Treated exactly like the
+    # visitor's own message for injection purposes below (it IS visitor
+    # text, joined) -- never shown to the visitor, never persisted as
+    # the visitor's own stored message (that remains whatever `state
+    # ["messages"]`'s own latest `HumanMessage` already holds).
+    question = state["prepared_query"]
     retrieved_chunks = state["retrieved_chunks"]
     messages = _build_messages(retrieved_chunks, question)
     model = get_chat_model().bind_tools([Answer], tool_choice="Answer")

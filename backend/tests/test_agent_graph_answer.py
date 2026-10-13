@@ -121,6 +121,95 @@ def test_no_data_blocks_renders_a_plain_placeholder_not_an_empty_prompt():
     assert "no DATA blocks" in human_text
 
 
+# --- Answer prompt referent (Task 3.7.a follow-up [correctness]) -------------
+#
+# `_answer_node` asks `state["prepared_query"]`, never the raw latest
+# message -- see that function's own header comment for the real
+# measurement (N=20, expedited-shipping pair) behind this. These three
+# tests pin that contract directly: the joined query actually reaches
+# `_build_messages` (not just retrieval); a first turn (where
+# `_prepare_node` sets `prepared_query` equal to the raw message) is
+# unaffected; and the joined text -- despite now flowing into the real
+# prompt -- still never reaches any visitor-facing surface.
+
+
+def _capture_build_messages_question(monkeypatch) -> list[str]:
+    captured: list[str] = []
+    real = graph_module._build_messages
+
+    def spy(retrieved_chunks, question):
+        captured.append(question)
+        return real(retrieved_chunks, question)
+
+    monkeypatch.setattr(graph_module, "_build_messages", spy)
+    return captured
+
+
+async def test_answer_prompt_for_a_joined_followup_contains_the_prepared_query(monkeypatch):
+    captured = _capture_build_messages_question(monkeypatch)
+    chunks = build_fake_answer_arg_chunks(can_answer=True, used_chunk_ids=["c1"], answer="Yes.")
+    _patched(monkeypatch, FakeAnswerToolChatModel(arg_chunks=chunks))
+    joined = "Do you offer expedited shipping? How much does that cost?"
+    state = {
+        "messages": [HumanMessage(content="How much does that cost?")],
+        "prepared_query": joined,
+        "retrieved_chunks": [_chunk("doc-a", "Expedited shipping is $9.99.")],
+    }
+
+    await graph_module._answer_node(state)
+
+    assert captured == [joined]
+    assert captured[0] != "How much does that cost?"
+
+
+async def test_answer_prompt_for_a_first_turn_contains_the_raw_message(monkeypatch):
+    # `_prepare_node`'s own first-turn branch sets `prepared_query` equal
+    # to the raw message (nothing to join yet) -- this asserts that
+    # equality is what actually reaches the prompt, not a coincidence.
+    captured = _capture_build_messages_question(monkeypatch)
+    chunks = build_fake_answer_arg_chunks(can_answer=True, used_chunk_ids=["c1"], answer="Yes.")
+    _patched(monkeypatch, FakeAnswerToolChatModel(arg_chunks=chunks))
+    raw = "Do you offer expedited shipping?"
+    state = {
+        "messages": [HumanMessage(content=raw)],
+        "prepared_query": raw,
+        "retrieved_chunks": [_chunk("doc-a", "Expedited shipping is $9.99.")],
+    }
+
+    await graph_module._answer_node(state)
+
+    assert captured == [raw]
+
+
+async def test_prepared_query_still_never_reaches_token_events_or_persisted_answer(monkeypatch):
+    # Re-verification, now that `prepared_query` flows into the real
+    # answer PROMPT and not just retrieval: a joined query distinct from
+    # the stored raw message must still never leak to the visitor --
+    # not via streamed token events, not via the persisted AIMessage, and
+    # the stored HumanMessage itself must stay untouched.
+    marker = "PREVIOUSMARKERTEXT_NEVER_SHOULD_LEAK"
+    writer_events = _patched(
+        monkeypatch,
+        FakeAnswerToolChatModel(
+            arg_chunks=build_fake_answer_arg_chunks(
+                can_answer=True, used_chunk_ids=["c1"], answer="A fixed test answer."
+            )
+        ),
+    )
+    stored_human_message = HumanMessage(content="what about that?")
+    state = {
+        "messages": [stored_human_message],
+        "prepared_query": f"{marker} what about that?",
+        "retrieved_chunks": [_chunk("doc-a", "Alpha.")],
+    }
+
+    result = await graph_module._answer_node(state)
+
+    assert marker not in result["messages"][0].content
+    assert all(marker not in (event.get("text") or "") for event in writer_events)
+    assert stored_human_message.content == "what about that?"
+
+
 # --- Incremental streaming mechanism (fakes only) ----------------------------
 
 
@@ -168,6 +257,7 @@ async def test_zero_text_emitted_before_can_answer_is_known_true(monkeypatch):
     events = _patched(monkeypatch, FakeAnswerToolChatModel(arg_chunks=chunks))
     state = {
         "messages": [HumanMessage(content="What color is the sky?")],
+        "prepared_query": 'What color is the sky?',
         "retrieved_chunks": [_chunk("doc-a", "The sky is blue.")],
     }
     result = await graph_module._answer_node(state)
@@ -184,7 +274,11 @@ async def test_zero_text_emitted_before_can_answer_is_known_true(monkeypatch):
 async def test_can_answer_false_emits_zero_deltas(monkeypatch):
     chunks = build_fake_answer_arg_chunks(can_answer=False, used_chunk_ids=[], answer="")
     events = _patched(monkeypatch, FakeAnswerToolChatModel(arg_chunks=chunks))
-    state = {"messages": [HumanMessage(content="q")], "retrieved_chunks": []}
+    state = {
+        "messages": [HumanMessage(content="q")],
+        "prepared_query": "q",
+        "retrieved_chunks": [],
+    }
 
     result = await graph_module._answer_node(state)
 
@@ -235,7 +329,11 @@ async def test_append_only_violation_fails_loudly(monkeypatch):
     )
     chunks = [full[i : i + 3] for i in range(0, len(full), 3)]
     _patched(monkeypatch, FakeAnswerToolChatModel(arg_chunks=chunks))
-    state = {"messages": [HumanMessage(content="q")], "retrieved_chunks": []}
+    state = {
+        "messages": [HumanMessage(content="q")],
+        "prepared_query": "q",
+        "retrieved_chunks": [],
+    }
 
     with pytest.raises(graph_module.AnswerStreamNotAppendOnlyError):
         await graph_module._answer_node(state)
@@ -255,7 +353,11 @@ async def test_failure_before_any_emission_returns_the_dependency_failure_state(
         monkeypatch,
         FakeAnswerToolChatModel(arg_chunks=["irrelevant"], fail_after=0),
     )
-    state = {"messages": [HumanMessage(content="q")], "retrieved_chunks": []}
+    state = {
+        "messages": [HumanMessage(content="q")],
+        "prepared_query": "q",
+        "retrieved_chunks": [],
+    }
 
     result = await graph_module._answer_node(state)
 
@@ -277,6 +379,7 @@ async def test_failure_after_emission_began_raises_the_named_mid_stream_error(mo
     )
     state = {
         "messages": [HumanMessage(content="q")],
+        "prepared_query": 'q',
         "retrieved_chunks": [_chunk("doc-a", "The sky is blue today.")],
     }
 
@@ -355,6 +458,7 @@ async def test_model_emitting_used_chunk_ids_before_answer_is_still_handled_corr
     events = _patched(monkeypatch, FakeAnswerToolChatModel(arg_chunks=chunks))
     state = {
         "messages": [HumanMessage(content="What are your hours?")],
+        "prepared_query": 'What are your hours?',
         "retrieved_chunks": [_chunk("doc-a", "Our hours are 9-5.")],
     }
 
@@ -384,6 +488,7 @@ async def test_duplicate_used_chunk_ids_key_resolves_to_the_last_occurrence(monk
     _patched(monkeypatch, FakeAnswerToolChatModel(arg_chunks=chunks))
     state = {
         "messages": [HumanMessage(content="q")],
+        "prepared_query": 'q',
         "retrieved_chunks": [
             _chunk("doc-a", "Alpha."),
             _chunk("doc-b", "Beta."),
@@ -414,6 +519,7 @@ async def test_used_chunk_ids_truncated_at_stream_end_drops_safely_not_crashes(m
     events = _patched(monkeypatch, FakeAnswerToolChatModel(arg_chunks=chunks))
     state = {
         "messages": [HumanMessage(content="q")],
+        "prepared_query": 'q',
         "retrieved_chunks": [_chunk("doc-a", "Hi there")],
     }
 
@@ -443,6 +549,7 @@ async def test_chunk_id_looking_text_inside_the_answer_prose_is_never_treated_as
     events = _patched(monkeypatch, FakeAnswerToolChatModel(arg_chunks=chunks))
     state = {
         "messages": [HumanMessage(content="q")],
+        "prepared_query": 'q',
         "retrieved_chunks": [
             _chunk("doc-a", "Alpha."),
             _chunk("doc-b", "Beta."),
@@ -521,6 +628,7 @@ async def test_injected_client_id_and_tenant_id_in_the_tool_call_has_no_effect(m
     events = _patched(monkeypatch, FakeAnswerToolChatModel(arg_chunks=chunks))
     state = {
         "messages": [HumanMessage(content="How much is the Pro plan?")],
+        "prepared_query": "How much is the Pro plan?",
         "retrieved_chunks": [_chunk("doc-a", "The Pro plan costs $24.99/month.")],
     }
 
