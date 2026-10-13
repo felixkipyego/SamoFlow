@@ -13,16 +13,20 @@ from app.evals.golden_set import (
     CATEGORIES,
     DEFAULT_ITEMS_PATH,
     DEFAULT_SYNTHETIC_CORPUS_PATH,
+    EmbeddingStalenessError,
     EvidencePassageNotFoundError,
     FrozenChunk,
     FrozenCorpus,
     GoldenSet,
     GoldenSetItem,
+    assert_embedding_config_is_current,
     load_frozen_corpus,
     load_golden_set,
     resolve_golden_set,
     resolve_item_sources,
 )
+from app.ingest.embedding import EMBEDDING_MODEL, SPARSE_EMBEDDING_MODEL
+from app.qdrant import DENSE_VECTOR_SIZE
 
 _VALID_ITEM = {
     "id": "x-01",
@@ -150,14 +154,20 @@ def test_multi_source_with_two_distinct_documents_is_accepted():
 
 
 def _corpus(chunks: list[FrozenChunk]) -> FrozenCorpus:
-    return FrozenCorpus(corpus="synthetic", documents=["doc-a"], chunks=chunks)
+    # Direct construction, not load_frozen_corpus() -- the staleness
+    # guard (test_staleness_guard_*, below) only runs on the loader path,
+    # so placeholder embedding-config values are fine here.
+    return FrozenCorpus(
+        corpus="synthetic", documents=["doc-a"],
+        dense_embedding_model="fake", dense_vector_size=1, sparse_embedding_model="fake",
+        embedding_version="fake", chunks=chunks,
+    )
 
 
 def _chunk(document: str, text: str, chunk_index: int = 0) -> FrozenChunk:
     return FrozenChunk(
         document=document, chunk_index=chunk_index, heading_path=["Section"], text=text,
-        content_hash="hash", embedding_model="fake", embedding_version="fake",
-        dense_vector=[0.0], sparse_indices=[], sparse_values=[],
+        content_hash="hash", dense_vector=[0.0], sparse_indices=[], sparse_values=[],
     )
 
 
@@ -261,3 +271,91 @@ def test_pages_directory_has_no_orphaned_page_missing_from_the_frozen_corpus():
     page_documents = {p.stem for p in pages_dir.glob("*.md")}
     corpus = load_frozen_corpus(DEFAULT_SYNTHETIC_CORPUS_PATH)
     assert page_documents == set(corpus.documents)
+
+
+# --- staleness guard (Task 3.7.c) ----------------------------------------
+#
+# assert_embedding_config_is_current() is a PURE function here -- no
+# app.qdrant/app.ingest.embedding import anywhere in golden_set.py
+# (confirmed necessary: this module lives under the Qdrant read-path
+# guard's own scanned app/ tree). The "on load, compare with CURRENT,
+# fail loudly" integration -- actually fetching today's real embedder
+# config and calling load_frozen_corpus() first -- lives in backend/
+# scripts/retrieval_eval.py's own load_and_check_frozen_corpus(),
+# exercised by test_retrieval_eval.py instead; these tests cover the
+# pure comparison logic itself, with explicit current_* values.
+
+
+def _current_config(**overrides) -> dict:
+    config = {
+        "dense_embedding_model": EMBEDDING_MODEL,
+        "dense_vector_size": DENSE_VECTOR_SIZE,
+        "sparse_embedding_model": SPARSE_EMBEDDING_MODEL,
+    }
+    config.update(overrides)
+    return config
+
+
+def test_matching_config_does_not_raise():
+    current = _current_config()
+    assert_embedding_config_is_current(
+        dense_embedding_model=EMBEDDING_MODEL,
+        dense_vector_size=DENSE_VECTOR_SIZE,
+        sparse_embedding_model=SPARSE_EMBEDDING_MODEL,
+        current_dense_embedding_model=current["dense_embedding_model"],
+        current_dense_vector_size=current["dense_vector_size"],
+        current_sparse_embedding_model=current["sparse_embedding_model"],
+        refreeze_hint="refreeze",
+    )
+
+
+def test_staleness_guard_fires_on_dense_model_mismatch():
+    with pytest.raises(EmbeddingStalenessError):
+        assert_embedding_config_is_current(
+            dense_embedding_model="text-embedding-ada-002",
+            dense_vector_size=DENSE_VECTOR_SIZE,
+            sparse_embedding_model=SPARSE_EMBEDDING_MODEL,
+            current_dense_embedding_model=EMBEDDING_MODEL,
+            current_dense_vector_size=DENSE_VECTOR_SIZE,
+            current_sparse_embedding_model=SPARSE_EMBEDDING_MODEL,
+            refreeze_hint="refreeze",
+        )
+
+
+def test_staleness_guard_fires_on_dense_vector_size_mismatch():
+    with pytest.raises(EmbeddingStalenessError):
+        assert_embedding_config_is_current(
+            dense_embedding_model=EMBEDDING_MODEL,
+            dense_vector_size=DENSE_VECTOR_SIZE + 1,
+            sparse_embedding_model=SPARSE_EMBEDDING_MODEL,
+            current_dense_embedding_model=EMBEDDING_MODEL,
+            current_dense_vector_size=DENSE_VECTOR_SIZE,
+            current_sparse_embedding_model=SPARSE_EMBEDDING_MODEL,
+            refreeze_hint="refreeze",
+        )
+
+
+def test_staleness_guard_fires_on_sparse_model_mismatch():
+    with pytest.raises(EmbeddingStalenessError):
+        assert_embedding_config_is_current(
+            dense_embedding_model=EMBEDDING_MODEL,
+            dense_vector_size=DENSE_VECTOR_SIZE,
+            sparse_embedding_model="some/other-bm25",
+            current_dense_embedding_model=EMBEDDING_MODEL,
+            current_dense_vector_size=DENSE_VECTOR_SIZE,
+            current_sparse_embedding_model=SPARSE_EMBEDDING_MODEL,
+            refreeze_hint="refreeze",
+        )
+
+
+def test_staleness_guard_message_names_every_mismatch_and_the_refreeze_hint():
+    with pytest.raises(EmbeddingStalenessError, match="re-run me.*dense_embedding_model"):
+        assert_embedding_config_is_current(
+            dense_embedding_model="old-model",
+            dense_vector_size=DENSE_VECTOR_SIZE,
+            sparse_embedding_model=SPARSE_EMBEDDING_MODEL,
+            current_dense_embedding_model=EMBEDDING_MODEL,
+            current_dense_vector_size=DENSE_VECTOR_SIZE,
+            current_sparse_embedding_model=SPARSE_EMBEDDING_MODEL,
+            refreeze_hint="re-run me",
+        )

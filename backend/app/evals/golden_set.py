@@ -1,9 +1,24 @@
 # backend/app/evals/golden_set.py
 # Task 3.7.b: golden-set item schema + loader, the frozen-corpus schema +
 # loader, and evidence-passage -> chunk resolution. No eval runner or
-# metrics here (Step 3.7.c onward) -- this module only defines the data
-# shapes and proves a committed set actually resolves against a real,
-# ingested corpus.
+# metrics here (3.7.c's own `retrieval_metrics.py`/`retrieval_eval.py`) --
+# this module only defines the data shapes and proves a committed set
+# actually resolves against a real, ingested corpus.
+#
+# Task 3.7.c addition: `FrozenCorpus` now also records its own embedding
+# configuration (dense model, dense vector size, sparse model) --
+# compared against the embedder's own CURRENT configuration via
+# `assert_embedding_config_is_current()` (`EmbeddingStalenessError` on a
+# mismatch), old document vectors paired with new query vectors must
+# never silently produce a plausible-looking but meaningless score. That
+# comparison is a PURE function here (no `app.qdrant`/`app.ingest.
+# embedding` import in this file -- confirmed necessary: this module
+# lives under the Qdrant read-path AST guard's own scanned `app/` tree,
+# which restricts `app.qdrant` imports to a narrow allowlist this module
+# is deliberately not added to). The actual "on load" automatic check
+# lives in `backend/scripts/retrieval_eval.py`'s own `load_and_check_
+# frozen_corpus()`/`load_and_check_frozen_query_vectors()`, OUTSIDE that
+# guarded tree, where importing the real current config is safe.
 #
 # Schema choice, dated deviation from the shape sketched at Task 3.7.a's
 # own PART 3 research note (PROJECT_SPEC.md): that note described
@@ -198,11 +213,21 @@ class FrozenChunk(BaseModel):
     heading_path: list[str]
     text: str
     content_hash: str
-    embedding_model: str
-    embedding_version: str
     dense_vector: list[float]
     sparse_indices: list[int]
     sparse_values: list[float]
+
+
+class EmbeddingStalenessError(ValueError):
+    """Task 3.7.c [correctness]: raised when a frozen corpus's own
+    recorded embedding configuration no longer matches what `app.ingest.
+    embedding`/`app.qdrant` actually use. Old document vectors, computed
+    under a DIFFERENT model/dimension/sparse scheme than whatever a query
+    is embedded with today, would still produce a `score` -- cosine
+    similarity between two differently-shaped or differently-meaning
+    vector spaces is not an error, it is a quiet, plausible-looking wrong
+    number. This is the guard that turns that into a loud failure instead.
+    """
 
 
 class FrozenCorpus(BaseModel):
@@ -214,10 +239,73 @@ class FrozenCorpus(BaseModel):
     # own item-writing rule) be checked mechanically against real data,
     # not just asserted in prose.
     documents: list[str]
+    # Recorded ONCE per corpus (moved here from a per-chunk field at Task
+    # 3.7.c -- every chunk in one generation run shares the identical
+    # values, so repeating them per chunk was redundant duplication, not
+    # a second source of truth). This triple is exactly what the
+    # staleness guard below compares against the embedder's own current
+    # configuration.
+    dense_embedding_model: str
+    dense_vector_size: int
+    sparse_embedding_model: str
+    embedding_version: str
     chunks: list[FrozenChunk]
 
 
+def assert_embedding_config_is_current(
+    *,
+    dense_embedding_model: str,
+    dense_vector_size: int,
+    sparse_embedding_model: str,
+    current_dense_embedding_model: str,
+    current_dense_vector_size: int,
+    current_sparse_embedding_model: str,
+    refreeze_hint: str,
+) -> None:
+    """A PURE comparison -- deliberately takes "current" as plain
+    parameters rather than importing `app.ingest.embedding`/`app.qdrant`
+    itself, confirmed necessary, not a style preference: this module
+    lives under `backend/app/`, which `tests/test_qdrant_read_path_
+    guard.py`'s own AST scan covers, and that guard's rule (a) (import
+    confinement) restricts which files may import `app.qdrant` at all --
+    confirmed live, importing it here tripped that guard before this fix.
+    `load_and_check_frozen_corpus()`/`load_and_check_frozen_query_
+    vectors()` (`backend/scripts/retrieval_eval.py`, OUTSIDE the guarded
+    `app/` tree) are the real "on load, compare with current, fail
+    loudly" callers -- they fetch the current values themselves and pass
+    them in here. Shared by both the frozen corpus and the frozen query-
+    vector cache: the identical "old vectors, new embedder" hazard
+    applies to each.
+    """
+    mismatches = []
+    if dense_embedding_model != current_dense_embedding_model:
+        mismatches.append(
+            f"dense_embedding_model: frozen={dense_embedding_model!r} "
+            f"current={current_dense_embedding_model!r}"
+        )
+    if dense_vector_size != current_dense_vector_size:
+        mismatches.append(
+            f"dense_vector_size: frozen={dense_vector_size!r} current={current_dense_vector_size!r}"
+        )
+    if sparse_embedding_model != current_sparse_embedding_model:
+        mismatches.append(
+            f"sparse_embedding_model: frozen={sparse_embedding_model!r} "
+            f"current={current_sparse_embedding_model!r}"
+        )
+    if mismatches:
+        raise EmbeddingStalenessError(
+            "frozen embedding config no longer matches the current embedder -- old vectors "
+            "and new ones must never be compared; " + refreeze_hint + ": " + "; ".join(mismatches)
+        )
+
+
 def load_frozen_corpus(path: Path) -> FrozenCorpus:
+    """Schema validation ONLY -- no staleness check here (see
+    `assert_embedding_config_is_current()`'s own docstring for why this
+    module cannot do that itself). Callers that need the "on load,
+    compare with current, fail loudly" guarantee must use `backend/
+    scripts/retrieval_eval.py`'s own `load_and_check_frozen_corpus()`.
+    """
     raw = json.loads(path.read_text(encoding="utf-8"))
     return FrozenCorpus.model_validate(raw)
 

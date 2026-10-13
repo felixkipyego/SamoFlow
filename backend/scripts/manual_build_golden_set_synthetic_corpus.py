@@ -27,8 +27,14 @@ import json
 from pathlib import Path
 
 from app.ingest.chunking import chunk_text, compute_content_hash
-from app.ingest.embedding import EMBEDDING_MODEL, embed_dense, embed_sparse
+from app.ingest.embedding import (
+    EMBEDDING_MODEL,
+    SPARSE_EMBEDDING_MODEL,
+    embed_dense,
+    embed_sparse,
+)
 from app.ingest.extract_text import extract_markdown
+from app.qdrant import DENSE_VECTOR_SIZE
 
 _GOLDEN_SET_DIR = Path(__file__).resolve().parents[2] / "evals" / "golden_set"
 _PAGES_DIR = _GOLDEN_SET_DIR / "pages"
@@ -76,15 +82,25 @@ async def main() -> None:
                 "heading_path": list(chunk.heading_path),
                 "text": chunk.text,
                 "content_hash": content_hash_by_document[document],
-                "embedding_model": EMBEDDING_MODEL,
-                "embedding_version": _EMBEDDING_VERSION,
                 "dense_vector": dense,
                 "sparse_indices": sparse.indices,
                 "sparse_values": sparse.values,
             }
         )
 
-    frozen_corpus = {"corpus": "synthetic", "documents": documents, "chunks": frozen_chunks}
+    # Task 3.7.c: recorded ONCE per corpus, not per chunk -- every chunk
+    # in one generation run shares the identical embedding config, and
+    # this is exactly what the staleness guard (scripts/retrieval_eval.py's
+    # own `load_and_check_frozen_corpus()`) compares on every load.
+    frozen_corpus = {
+        "corpus": "synthetic",
+        "documents": documents,
+        "dense_embedding_model": EMBEDDING_MODEL,
+        "dense_vector_size": DENSE_VECTOR_SIZE,
+        "sparse_embedding_model": SPARSE_EMBEDDING_MODEL,
+        "embedding_version": _EMBEDDING_VERSION,
+        "chunks": frozen_chunks,
+    }
     _OUTPUT_PATH.write_text(json.dumps(frozen_corpus, indent=2) + "\n", encoding="utf-8")
     print(f"Wrote {len(frozen_chunks)} chunks ({len(documents)} documents) to {_OUTPUT_PATH}")
 
