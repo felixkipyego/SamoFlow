@@ -460,6 +460,123 @@ async def test_chunk_id_looking_text_inside_the_answer_prose_is_never_treated_as
     ]
 
 
+# --- §16: "A model-generated tool call containing client_id has no -------
+# --- effect." Closed structurally this task (Task 3.6's own close-out  -----
+# --- of the deferred §9 marker), not merely asserted. ------------------------
+
+
+def test_the_real_bound_answer_tool_schema_has_no_tenant_or_client_field():
+    # Inspects the REAL wire-level schema LangChain sends to the API --
+    # bind_tools()'s own schema-conversion mechanism, not the Python
+    # Answer class read by eye. Zero real API call needed: building the
+    # tool schema is pure, local computation (only .ainvoke()/.astream()
+    # would need a real key) -- confirmed live, safe for CI.
+    from langchain_openai import ChatOpenAI
+
+    model = ChatOpenAI(model="gpt-4o-mini", api_key="sk-schema-inspection-only")
+    bound = model.bind_tools([Answer], tool_choice="Answer")
+    schema = bound.kwargs["tools"][0]["function"]["parameters"]
+    assert set(schema["properties"].keys()) == {"can_answer", "answer", "used_chunk_ids"}
+    for forbidden in ("client_id", "tenant_id", "vid", "thread_id", "configurable"):
+        assert forbidden not in schema["properties"]
+    assert bound.kwargs["tool_choice"] == {"type": "function", "function": {"name": "Answer"}}
+
+
+def _arg_chunks_with_injected_identity_keys(
+    *, can_answer: bool, used_chunk_ids: list[str], answer: str, other_tenant_id: uuid.UUID
+) -> list[str]:
+    import json
+
+    # Hand-built, not via build_fake_answer_arg_chunks(): deliberately
+    # includes two keys the real Answer schema does NOT declare
+    # (confirmed by the test above) -- simulating a model (or a provider
+    # not enforcing strict-schema validation) emitting extra tool-call
+    # arguments anyway. Appended after the real fields, matching how an
+    # adversarial/non-conforming addition would actually arrive.
+    payload = {
+        "can_answer": can_answer,
+        "answer": answer,
+        "used_chunk_ids": used_chunk_ids,
+        "client_id": str(other_tenant_id),
+        "tenant_id": str(other_tenant_id),
+    }
+    full = json.dumps(payload)
+    return [full[i : i + 3] for i in range(0, len(full), 3)]
+
+
+async def test_injected_client_id_and_tenant_id_in_the_tool_call_has_no_effect(monkeypatch):
+    # Non-vacuousness confirmed live during this task, not assumed:
+    # temporarily edited _answer_node's own final return statement to
+    # ALSO surface `final.get("client_id")` into the returned dict (the
+    # exact mistake this test guards against), re-ran this test, watched
+    # the `set(result.keys())` assertion below fail as expected, then
+    # reverted the edit -- proving this is a real guard, not a tautology.
+    other_tenant_id = uuid.uuid4()
+    chunks = _arg_chunks_with_injected_identity_keys(
+        can_answer=True,
+        used_chunk_ids=["c1"],
+        answer="The Pro plan costs $24.99/month.",
+        other_tenant_id=other_tenant_id,
+    )
+    events = _patched(monkeypatch, FakeAnswerToolChatModel(arg_chunks=chunks))
+    state = {
+        "messages": [HumanMessage(content="How much is the Pro plan?")],
+        "retrieved_chunks": [_chunk("doc-a", "The Pro plan costs $24.99/month.")],
+    }
+
+    result = await graph_module._answer_node(state)
+
+    # Same citations, same shape of persisted state a call WITHOUT the
+    # injected keys would produce.
+    assert result["can_answer"] is True
+    assert result["cited_chunk_labels"] == ["c1"]
+    assert result["citations"] == [
+        {"url": "https://tenant.example/doc-a", "heading_path": ["Section"]}
+    ]
+    assert "".join(e["text"] for e in events) == "The Pro plan costs $24.99/month."
+    # No error, AND no leak: the injected identity value never appears
+    # anywhere in this node's own returned state -- checked both by exact
+    # key-set (nothing extra returned at all) and by value (the injected
+    # UUID string itself never appears anywhere in the result).
+    assert set(result.keys()) == {"can_answer", "messages", "cited_chunk_labels", "citations"}
+    assert str(other_tenant_id) not in repr(result)
+
+
+async def test_injected_identity_keys_do_not_change_the_real_threads_own_config(monkeypatch):
+    # Same injection, through the REAL guarded entry point this time --
+    # confirms the live checkpoint's own config/thread identity (built
+    # from the REAL VerifiedIdentity, never from anything the model
+    # emits) is unaffected. _answer_node has no `config` parameter at all
+    # (confirmed by reading its own signature) -- structurally unable to
+    # read or act on tenant_id_from_config() in the first place.
+    other_tenant_id = uuid.uuid4()
+    chunks = _arg_chunks_with_injected_identity_keys(
+        can_answer=True,
+        used_chunk_ids=["c1"],
+        answer="Zebras are striped.",
+        other_tenant_id=other_tenant_id,
+    )
+    _patched(monkeypatch, FakeAnswerToolChatModel(arg_chunks=chunks))
+    _patch_retrieve_with_fixed_chunks(
+        monkeypatch, [_chunk("doc-a", "Zebras are black and white striped.")]
+    )
+    graph = await _fresh_real_graph(monkeypatch)
+    identity = _identity()
+    conversation_id = uuid.uuid4()
+
+    await _collect(run_turn(graph, identity, conversation_id, {"messages": ["what are zebras"]}))
+
+    snapshot = await read_state(graph, identity, conversation_id)
+    assert snapshot.values["can_answer"] is True
+    assert snapshot.values["citations"] == [
+        {"url": "https://tenant.example/doc-a", "heading_path": ["Section"]}
+    ]
+    real_thread_id = snapshot.config["configurable"]["thread_id"]
+    assert real_thread_id.startswith(f"{identity.tenant_id}:")
+    assert str(other_tenant_id) not in real_thread_id
+    assert str(other_tenant_id) not in repr(snapshot.values)
+
+
 # --- Full path, end to end, through the real guarded entry point ------------
 
 
