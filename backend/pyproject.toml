@@ -203,6 +203,18 @@ dependencies = [
     "langchain==1.4.4",
     "langchain-openai==1.7.1",
     "langchain-anthropic==1.7.6",
+    # Task 3.4.f: the greeting/thanks phrase-list loader (app/agent/
+    # greeting_phrases.py) parses backend/config/greeting_phrases.yaml.
+    # Already present transitively (pulled in by an existing dependency)
+    # -- promoted to an explicit direct pin here deliberately: relying on
+    # a transitive provider for a real, direct `import yaml` in
+    # application code is fragile (a future upstream change dropping its
+    # own use of PyYAML would silently stop pinning it, and this code's
+    # own import would then break with no warning from `make lock-check`
+    # until the exact moment it broke in production). Version re-verified
+    # current on PyPI at this task's own build time, matching every
+    # other dependency pin's own precedent.
+    "pyyaml==6.0.3",
 ]
 
 [project.optional-dependencies]

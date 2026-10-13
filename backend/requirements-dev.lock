@@ -2249,6 +2249,7 @@ pyyaml==6.0.3 \
     --hash=sha256:fc09d0aa354569bc501d4e787133afc08552722d3ab34836a80547331bb5d4a0
     # via
     #   -c backend/requirements.lock
+    #   widgetplatform (backend/pyproject.toml)
     #   huggingface-hub
     #   langchain-core
 qdrant-client==1.19.1 \

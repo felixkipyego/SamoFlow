@@ -83,6 +83,17 @@ COPY --from=builder /venv /venv
 COPY --chmod=0755 entrypoint.sh /usr/local/bin/entrypoint.sh
 COPY --chmod=0644 alembic.ini ./alembic.ini
 COPY --chmod=0755 alembic/ ./alembic/
+# Task 3.4.f: docs/SPEC.md §7's own "a YAML file in the backend config
+# folder" convention (the escalation trigger-phrase file, Step 4.4, not
+# built yet) -- this task's own greeting/thanks phrase list is the first
+# real file in it. Read-only data, root-owned (app user never needs
+# write access to it, matching alembic.ini's own treatment exactly) --
+# `app/` alone (COPY'd in the builder stage above) does NOT include this,
+# confirmed live: this directory is a sibling of `app/`, not nested
+# inside it, and the Dockerfile's own existing COPY list is an explicit
+# allow-list, not a wildcard -- a new top-level directory is invisible to
+# the running container unless named here.
+COPY --chmod=0644 config/ ./config/
 
 # Task 2.7.a: pre-create the upload-storage mount point, owned by the app
 # user, while still root. Found live, not assumed: Docker seeds a brand

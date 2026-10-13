@@ -38,6 +38,7 @@ from pydantic import BaseModel, Field
 
 from app.agent.chat_model import get_chat_model
 from app.agent.context import tenant_id_from_config
+from app.agent.greeting_phrases import is_greeting_or_thanks
 from app.config import get_settings
 from app.retrieval.service import RetrievedChunk, chunk_from_scored_point, retrieve
 
@@ -90,6 +91,68 @@ class AgentState(MessagesState):
     # streamed" and "what's persisted" are provably the same citation
     # set. Plain (OVERWRITE), matching every other per-turn field above.
     citations: list[Citation]
+    # Task 3.4.e: set True by `_retrieve_node`/`_answer_node` when a real
+    # dependency call (embedding/Qdrant, or the chat model's own fallback
+    # chain) fails outright, before any real answer exists -- read by
+    # `_route_after_gate()`/`_route_after_answer()` to route to the
+    # fixed dependency-failure reply instead of the generic no-relevant-
+    # answer one (docs/SPEC.md §6.1's own fixed-reply set: these are
+    # different visitor-facing messages for different reasons). Plain
+    # (OVERWRITE), reset to `False` every turn by `_reset_turn_state_
+    # node` below -- a stale `True` from an earlier turn's own failure
+    # must never linger into a turn that succeeds normally.
+    dependency_failed: bool
+
+
+# Task 3.4.e [SECURITY-adjacent]: every per-turn field in AgentState,
+# reset to its fresh-turn default in ONE place, run UNCONDITIONALLY
+# before this turn's own routing decision -- fixing a real bug class,
+# not a one-off: `_gate_node` (Task 3.4.d) had already found ONE
+# instance of this (a stale `can_answer` leaking across turns) and fixed
+# it locally; this generalizes that fix structurally so no future node
+# has to remember to do it itself. `messages` is the ONLY cross-turn
+# field (MessagesState's own `add_messages` reducer APPENDS, by design
+# -- conversation history must persist; every field below OVERWRITES,
+# by design -- each is this turn's own fresh verdict, never a prior
+# turn's).
+#
+# Concrete failure this closes, stated plainly: turn 1 answers a
+# question with real citations; turn 2, same thread, is gated out
+# (nothing relevant retrieved). Without this node, `citations`/
+# `cited_chunk_labels`/`retrieved_chunks`/`best_dense_score` would only
+# be reset by whichever node turn 2 happens to pass through -- `_gate_
+# node`'s own short-circuit already resets `can_answer`, but a turn
+# routed to `fallback`/`guardrail`/`coordinator` instead (bypassing
+# retrieve/gate entirely) touches NONE of these fields, leaving turn 1's
+# own values sitting in the checkpoint under turn 2's own final state --
+# exactly the kind of side channel docs/SPEC.md's own isolation
+# discipline exists to prevent, just across TURNS instead of TENANTS.
+#
+# A dedicated test (`tests/test_agent_graph_turn_reset.py`) proves this
+# directly: a real two-turn run on one thread, turn 1 answers with
+# citations, turn 2 gated out, asserts turn 2's own final state holds
+# NONE of turn 1's values -- proven non-vacuous by temporarily removing
+# this node from the graph and confirming the test then fails. That same
+# test file also asserts, structurally, that this function's own
+# returned keys are EXACTLY `AgentState`'s own field set minus
+# `messages` -- so adding a new per-turn field to `AgentState` without
+# also adding it here fails a test immediately, rather than silently
+# reintroducing this exact bug class later.
+def _reset_turn_state_node(state: AgentState) -> dict:
+    """Returns a FRESH dict/list literal every call (never a shared,
+    reused mutable object) -- even though nothing in this codebase
+    mutates a returned state value in place today, constructing fresh
+    collections here costs nothing and removes any future risk of one
+    turn's own reset accidentally aliasing another's.
+    """
+    return {
+        "retrieved_chunks": [],
+        "best_dense_score": None,
+        "can_answer": False,
+        "cited_chunk_labels": [],
+        "citations": [],
+        "dependency_failed": False,
+    }
 
 
 # Task 3.3.b: the rule-based router (docs/SPEC.md §6.2's own 4 rules,
@@ -115,11 +178,26 @@ def _quota_exhausted(state: AgentState) -> bool:
     return False
 
 
-def _is_greeting_thanks_or_unsafe(state: AgentState) -> bool:
-    # TODO(3.4): no classification mechanism is specified anywhere in
-    # docs/SPEC.md for this rule specifically -- see PROJECT_SPEC.md's own
-    # §9 marker (owner Step 3.4, which owns the Guardrail specialist's own
-    # real replies).
+def _is_greeting_or_thanks(state: AgentState) -> bool:
+    """Task 3.4.f: the real check, split from the original single
+    "greeting/thanks/unsafe" predicate -- greeting/thanks is built now
+    (`greeting_phrases.is_greeting_or_thanks()`); unsafe/abusive detection
+    is a SEPARATE predicate below, deliberately still a stub (research-
+    only this task, see its own TODO/§9 marker). Splitting these into two
+    functions, rather than keeping one combined stub that now does half
+    its own job, matches this project's own "name what's real vs
+    deferred accurately" discipline (e.g. the Step 3.3 Q1 correction).
+    """
+    message = _latest_human_message_text(state["messages"])
+    return is_greeting_or_thanks(message)
+
+
+def _is_unsafe_or_abusive(state: AgentState) -> bool:
+    # TODO(3.4.f follow-up): research-only this task -- OpenAI's
+    # moderation endpoint evaluated live (latency, cost, failure
+    # behaviour, fit with this rule's own "no LLM hop" design, the
+    # privacy point), NOT built. See PROJECT_SPEC.md's own §9 marker for
+    # the full recommendation and what remains undecided.
     return False
 
 
@@ -137,7 +215,7 @@ def route(state: AgentState) -> str:
     """
     if _quota_exhausted(state):
         return "fallback"
-    if _is_greeting_thanks_or_unsafe(state):
+    if _is_greeting_or_thanks(state) or _is_unsafe_or_abusive(state):
         return "guardrail"
     if _is_escalation_intent(state):
         return "coordinator"
@@ -158,10 +236,23 @@ def _fallback_node(state: AgentState) -> dict:
     )
 
 
+# One neutral reply for BOTH greeting and thanks -- docs/SPEC.md §6.1
+# groups them as one fixed-reply case ("greetings and thanks"), and this
+# single sentence reads naturally as a response to either ("hi" or
+# "thanks" alike), so a category-specific reply mechanism is not built
+# (nothing today needs it -- rule 11). Unsafe/abusive input is NOT built
+# (`_is_unsafe_or_abusive` always False this task), so this node is only
+# ever reached via the greeting/thanks path today.
+_GUARDRAIL_REPLY_TEXT = "Hello! How can I help you today?"
+
+
 def _guardrail_node(state: AgentState) -> dict:
-    raise NotImplementedError(
-        "Fallback & Guardrail specialist (greeting/thanks/unsafe reply) not built yet (Step 3.4)"
-    )
+    """docs/SPEC.md §6.1's own Guardrail reply -- fixed, never model-
+    written, passed through `_sanitize_answer_text()` (Task 3.4.c) like
+    every other piece of visitor-facing text in this graph, matching
+    Task 3.4.e's own "one choke point" discipline.
+    """
+    return {"messages": [AIMessage(content=_sanitize_answer_text(_GUARDRAIL_REPLY_TEXT))]}
 
 
 def _coordinator_node(state: AgentState) -> dict:
@@ -224,32 +315,35 @@ async def _retrieve_node(state: AgentState, config: RunnableConfig) -> dict:
     `client_id`.
 
     Production lens, confirmed live, not assumed, stated plainly rather
-    than silently absorbed: if Qdrant or the OpenAI embedding call is down
-    or slow during this call, nothing here catches it -- the exception
-    propagates uncaught through this node, through `astream()`, to this
-    graph's own caller. Confirmed live: Qdrant's own client default
-    timeout is 5s (`AsyncQdrantRemote.DEFAULT_GRPC_TIMEOUT`); OpenAI's own
-    default is far longer (`openai._constants.DEFAULT_TIMEOUT`, `read=600`
-    seconds), with the SDK's own built-in retry (`embed_dense()`'s own
-    header comment: 2 retries) potentially compounding that further on a
-    slow-but-not-fully-down provider -- a visitor-facing turn could hang
-    for minutes in the worst case, today, with no visitor-facing fallback
-    behavior decided. See PROJECT_SPEC.md's own two §9 markers (Task
-    3.3.d split the original single "owner undecided" one in two, with
-    concrete owners) -- not decided or built here, deliberately: this
-    node's own job is the search call itself, not a retry/circuit-breaker
-    policy spanning arbitrary future nodes.
+    than silently absorbed: Qdrant's own client default timeout is 5s
+    (`AsyncQdrantRemote.DEFAULT_GRPC_TIMEOUT`); OpenAI's own default is
+    far longer (`openai._constants.DEFAULT_TIMEOUT`, `read=600` seconds),
+    with the SDK's own built-in retry (`embed_dense()`'s own header
+    comment: 2 retries) potentially compounding that further on a
+    slow-but-not-fully-down provider -- a visitor-facing turn can still
+    HANG for minutes in the worst case before anything here ever gets a
+    chance to catch it; that remains Step 4.1's own job (the overall
+    request timeout/stream handling half of the already-recorded,
+    split §9 marker). Task 3.4.e [SECURITY] built the OTHER half of that
+    same split marker: once `retrieve()` DOES raise (the call returns,
+    just with a failure, not a hang), this node now catches it and
+    returns the fixed dependency-failure state instead of propagating a
+    raw exception -- logged server-side (never the raw exception message
+    shown to a visitor), `dependency_failed=True` read by `_route_after_
+    gate()` to route to the real dependency-failure reply (`_dependency_
+    failure_fallback_node`), never the generic no-relevant-answer one.
     """
     tenant_id = tenant_id_from_config(config)
     query = _latest_human_message_text(state["messages"])
-    result = await retrieve(tenant_id, query)
+    try:
+        result = await retrieve(tenant_id, query)
+    except Exception as exc:
+        logger.warning("retrieve() failed (dependency failure), falling back: %s", exc)
+        return {"retrieved_chunks": [], "best_dense_score": None, "dependency_failed": True}
     return {
         "retrieved_chunks": [chunk_from_scored_point(point) for point in result.points],
         "best_dense_score": result.best_dense_score,
     }
-
-
-_NO_ANSWER_SHORT_CIRCUIT = {"can_answer": False, "cited_chunk_labels": [], "citations": []}
 
 
 def _gate_node(state: AgentState) -> dict:
@@ -276,12 +370,16 @@ def _gate_node(state: AgentState) -> dict:
         (default 0.20, an ASSUMPTION -- see that field's own comment,
         `app/config.py`, and PROJECT_SPEC.md's own §9 marker for the
         re-tuning obligation).
-      - The short-circuit dict is byte-identical to `_answer_node`'s own
-        `can_answer=False` early return (`cited_chunk_labels`/
-        `citations` reset to `[]`, never left stale from an earlier turn
-        in the same conversation thread) -- both routes must look
-        identical to anything downstream reading this state, regardless
-        of WHICH node decided `can_answer=False`.
+      - The short-circuit (`{"can_answer": False}` only) relies on
+        `_reset_turn_state_node` (Task 3.4.e, runs unconditionally before
+        this node, every turn) for `cited_chunk_labels`/`citations`/
+        `dependency_failed` already being this turn's own fresh values
+        -- not re-set here redundantly. If `_retrieve_node` set
+        `dependency_failed=True` this same turn (a real retrieve()
+        failure, not "nothing relevant"), that value is simply never
+        overwritten by this node's own short-circuit (this node returns
+        no `dependency_failed` key at all), so `_route_after_gate()`
+        still sees it correctly.
       - Logged at INFO (useful for Step 3.7's own tuning): the pass/fail
         decision, the score and the threshold, and the chunk count --
         deliberately NEVER the query text or chunk text (a visitor
@@ -301,7 +399,7 @@ def _gate_node(state: AgentState) -> dict:
     )
 
     if not passed:
-        return dict(_NO_ANSWER_SHORT_CIRCUIT)
+        return {"can_answer": False}
     # `can_answer=True` here is a ROUTING signal only, read by
     # `_route_after_gate()` immediately below, in this same turn -- the
     # real answer node unconditionally overwrites `can_answer` with its
@@ -317,20 +415,32 @@ def _gate_node(state: AgentState) -> dict:
 
 
 def _route_after_gate(state: AgentState) -> str:
-    """Mirrors `_route_after_answer()`'s own logic exactly (read `state
+    """Mirrors `_route_after_answer()`'s own logic (read `state
     ["can_answer"]`, route accordingly) but a SEPARATE function, not a
-    shared one: the two call sites route to DIFFERENT targets on the
-    "true" path (`_route_after_answer` -> `END`, since the answer node
+    shared one: the two call sites route the "true" path to DIFFERENT
+    targets (`_route_after_answer` -> `END`, since the answer node
     already produced the final `AIMessage`; this one -> the `answer`
-    node itself, which has not run yet) -- the identical one-line body
-    reused under two names would be more confusing, not less, since
-    `_AFTER_ANSWER_PATH_MAP` and `_AFTER_GATE_PATH_MAP` below are
-    deliberately different.
+    node itself, which has not run yet). Task 3.4.e adds a THIRD path,
+    shared in spirit with `_route_after_answer()`'s own new branch: a
+    real dependency failure (`_retrieve_node`'s own try/except, this
+    task) routes to the fixed dependency-failure reply, never the
+    generic no-relevant-answer one -- checked only on the "false" side,
+    since `dependency_failed` and a genuine "nothing relevant" gate
+    rejection both set `can_answer=False`, and only the FAILURE case
+    also sets `dependency_failed=True`.
     """
-    return "answered" if state["can_answer"] else "no_answer_fallback"
+    if state["can_answer"]:
+        return "answered"
+    if state.get("dependency_failed"):
+        return "dependency_failure"
+    return "no_answer_fallback"
 
 
-_AFTER_GATE_PATH_MAP = {"answered": "answer", "no_answer_fallback": "no_answer_fallback"}
+_AFTER_GATE_PATH_MAP = {
+    "answered": "answer",
+    "no_answer_fallback": "no_answer_fallback",
+    "dependency_failure": "dependency_failure",
+}
 
 
 # Task 3.4.b [SECURITY]: the Answer tool schema docs/SPEC.md §6.3's own
@@ -703,7 +813,11 @@ async def _answer_node(state: AgentState) -> dict:
                 can_answer_known = True
                 can_answer_value = bool(partial["can_answer"])
                 if not can_answer_value:
-                    return {"can_answer": False, "cited_chunk_labels": [], "citations": []}
+                    # Relies on `_reset_turn_state_node` (Task 3.4.e) for
+                    # `cited_chunk_labels`/`citations` already being this
+                    # turn's own fresh `[]` -- not re-set here
+                    # redundantly (see that node's own header comment).
+                    return {"can_answer": False}
 
             if not can_answer_known or not can_answer_value:
                 continue
@@ -747,7 +861,20 @@ async def _answer_node(state: AgentState) -> dict:
                 "the chat model failed after streaming had already begun -- no "
                 "partial answer is persisted"
             ) from exc
-        raise
+        # Task 3.4.e: the chat model's own full fallback chain
+        # (`.with_fallbacks()`, Task 3.4.a) exhausted BEFORE any real
+        # answer text ever started streaming -- previously propagated
+        # raw and uncaught (Task 3.4.b's own documented behavior); now
+        # caught here and converted into the fixed dependency-failure
+        # reply, matching `_retrieve_node`'s own identical treatment of
+        # its own dependency call failing. Logged server-side (never the
+        # raw exception shown to a visitor); `AnswerStreamNotAppendOnly
+        # Error` above is deliberately NOT folded into this -- that is a
+        # genuine internal-consistency bug, not a dependency failure, and
+        # must keep failing loudly, never silently become a visitor-
+        # facing fallback.
+        logger.warning("chat model failed before any answer text was emitted: %s", exc)
+        return {"can_answer": False, "dependency_failed": True}
 
     final = parse_partial_json(accumulated_args) or {}
     cited_labels = final.get("used_chunk_ids") or []
@@ -759,21 +886,96 @@ async def _answer_node(state: AgentState) -> dict:
     }
 
 
+# Task 3.4.e: docs/SPEC.md §6.3's own "Fallback text: a template filled
+# from the dashboard's support details (email, phone, contact link,
+# hours, optional message). Never written by the model." NO per-tenant
+# support details exist anywhere in this codebase today -- confirmed by
+# reading directly, not assumed: `tenants.config` is a raw, untyped JSONB
+# column (`app/tenancy/models.py`); the closest existing reference
+# (`app/auth/routes.py`'s own `_PUBLIC_WIDGET_CONFIG_FIELDS` comment)
+# explicitly states these are described-by-docs-only field NAMES, "no
+# prior task defines tenants.config's actual key names (the dashboard,
+# which will actually write them, is a later phase)"; and `tenancy/
+# repository.py`'s own `create_site_key()` confirms the draft-to-live
+# support-details requirement check itself is "done elsewhere -- not
+# this method's job", i.e. not built anywhere yet either. A PLATFORM-
+# DEFAULT fixed text stands in for the real per-tenant template until
+# then -- see the new §9 marker (PROJECT_SPEC.md, owner Step 6.2,
+# "Tenant settings", docs/SPEC.md §18 Phase 6 -- the step that actually
+# adds real, named support-details fields to `tenants.config` and a
+# dashboard UI to edit them) for the real templating mechanism this will
+# need once that data exists.
+#
+# Both fixed texts below are DIFFERENT visitor-facing messages for
+# DIFFERENT reasons (docs/SPEC.md §6.1's own enumerated fixed-reply
+# list treats "no relevant answer" and a dependency failure as distinct
+# cases) -- never the model's own words either way, and both pass
+# through `_sanitize_answer_text()` (Task 3.4.c) before ever being
+# wrapped in an `AIMessage`, the SAME single choke point every other
+# piece of visitor-facing text in this graph already goes through.
+# Today neither string itself contains any of that function's own six
+# escaped characters, so this is currently a no-op in practice -- it is
+# written this way so that whenever Step 6.2's REAL per-tenant template
+# interpolates tenant-supplied text (support details ARE tenant-
+# controlled content shown to visitors, the identical trust boundary
+# the model's own answer text already has) into either string, that
+# interpolated content is automatically covered, with no separate
+# decision required at that point.
+_NO_ANSWER_FALLBACK_TEXT = (
+    "I'm sorry, I don't have the information to answer that question. "
+    "Please reach out to our support team for further help."
+)
+_DEPENDENCY_FAILURE_TEXT = (
+    "Something went wrong on our end while looking for an answer. Please try again "
+    "in a moment, or contact our support team if the problem continues."
+)
+
+
 def _no_answer_fallback_node(state: AgentState) -> dict:
-    raise NotImplementedError(
-        "no-relevant-answer fallback text not built yet (Step 3.4.e)"
-    )
+    """docs/SPEC.md §6.3: reached when the gate finds nothing relevant
+    retrieved, OR the model itself returns `can_answer=false` despite
+    real retrieved content -- the SAME fixed reply either way (§6.3's own
+    wording treats both as "the fallback", singular, not two different
+    texts for two different triggers).
+    """
+    return {"messages": [AIMessage(content=_sanitize_answer_text(_NO_ANSWER_FALLBACK_TEXT))]}
+
+
+def _dependency_failure_fallback_node(state: AgentState) -> dict:
+    """Task 3.4.e: reached when `_retrieve_node`'s own call to
+    `retrieve()`, or `_answer_node`'s own chat-model call (its FULL
+    `.with_fallbacks()` chain exhausted, before any answer text ever
+    started streaming), fails outright this turn -- `dependency_failed`
+    set by whichever of those two caught its own failure. A mid-stream
+    failure (`AnswerStreamFailedMidStreamError`, after emission has
+    already begun) does NOT reach this node -- that stays Step 4.1's own
+    job per the already-recorded §9 marker, unchanged by this task.
+    """
+    return {"messages": [AIMessage(content=_sanitize_answer_text(_DEPENDENCY_FAILURE_TEXT))]}
 
 
 def _route_after_answer(state: AgentState) -> str:
-    """docs/SPEC.md §6.3: `can_answer=false` -> the fixed fallback (Step
-    3.4.e); `can_answer=true` -> the turn is already complete (the real
-    `AIMessage` was already returned by `_answer_node` itself).
+    """docs/SPEC.md §6.3: `can_answer=false` -> the fixed fallback;
+    `can_answer=true` -> the turn is already complete (the real
+    `AIMessage` was already returned by `_answer_node` itself). Task
+    3.4.e adds a THIRD path, mirroring `_route_after_gate()`'s own new
+    branch exactly: a real dependency failure (the chat model's own
+    full fallback chain exhausted before any answer text streamed)
+    routes to the fixed dependency-failure reply instead of the generic
+    no-relevant-answer one.
     """
-    return "answered" if state["can_answer"] else "no_answer_fallback"
+    if state["can_answer"]:
+        return "answered"
+    if state.get("dependency_failed"):
+        return "dependency_failure"
+    return "no_answer_fallback"
 
 
-_AFTER_ANSWER_PATH_MAP = {"answered": END, "no_answer_fallback": "no_answer_fallback"}
+_AFTER_ANSWER_PATH_MAP = {
+    "answered": END,
+    "no_answer_fallback": "no_answer_fallback",
+    "dependency_failure": "dependency_failure",
+}
 
 
 def build_graph(checkpointer: AsyncPostgresSaver) -> CompiledStateGraph:
@@ -786,6 +988,7 @@ def build_graph(checkpointer: AsyncPostgresSaver) -> CompiledStateGraph:
     PROJECT_SPEC.md's own §9 marker, recorded at the Step 3.3 breakdown).
     """
     builder = StateGraph(AgentState)
+    builder.add_node("reset_turn_state", _reset_turn_state_node)
     builder.add_node("fallback", _fallback_node)
     builder.add_node("guardrail", _guardrail_node)
     builder.add_node("coordinator", _coordinator_node)
@@ -793,11 +996,14 @@ def build_graph(checkpointer: AsyncPostgresSaver) -> CompiledStateGraph:
     builder.add_node("gate", _gate_node)
     builder.add_node("answer", _answer_node)
     builder.add_node("no_answer_fallback", _no_answer_fallback_node)
-    builder.add_conditional_edges(START, route, _ROUTE_PATH_MAP)
+    builder.add_node("dependency_failure", _dependency_failure_fallback_node)
+    builder.add_edge(START, "reset_turn_state")
+    builder.add_conditional_edges("reset_turn_state", route, _ROUTE_PATH_MAP)
     builder.add_edge("retrieve", "gate")
     builder.add_conditional_edges("gate", _route_after_gate, _AFTER_GATE_PATH_MAP)
     builder.add_conditional_edges("answer", _route_after_answer, _AFTER_ANSWER_PATH_MAP)
     builder.add_edge("no_answer_fallback", END)
+    builder.add_edge("dependency_failure", END)
     for node in ("fallback", "guardrail", "coordinator"):
         builder.add_edge(node, END)
     return builder.compile(checkpointer=checkpointer)

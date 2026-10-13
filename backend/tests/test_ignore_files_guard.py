@@ -11,9 +11,10 @@ _DOCKERIGNORE = REPO_ROOT / "backend" / ".dockerignore"
 
 # Files the Dockerfile actually COPYs from the build context (backend/):
 # pyproject.toml, requirements.lock (Task 1.1.o.d), app/, entrypoint.sh,
-# alembic.ini, alembic/. A .dockerignore pattern that would exclude any of
-# these breaks the image build -- a pattern hiding requirements.lock in
-# particular would silently fall back to an un-hash-checked install.
+# alembic.ini, alembic/, config/ (Task 3.4.f). A .dockerignore pattern
+# that would exclude any of these breaks the image build -- a pattern
+# hiding requirements.lock in particular would silently fall back to an
+# un-hash-checked install.
 _DOCKERFILE_COPY_PATTERNS = (
     "app",
     "alembic",
@@ -21,6 +22,7 @@ _DOCKERFILE_COPY_PATTERNS = (
     "pyproject.toml",
     "requirements.lock",
     "entrypoint.sh",
+    "config",
 )
 
 

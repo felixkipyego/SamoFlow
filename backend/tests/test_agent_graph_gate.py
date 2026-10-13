@@ -76,7 +76,7 @@ def test_gate_zero_chunks_routes_to_fallback_shape(monkeypatch):
     set_valid_env(monkeypatch, VALID_ENV)
     state = {"retrieved_chunks": [], "best_dense_score": None}
     result = graph_module._gate_node(state)
-    assert result == {"can_answer": False, "cited_chunk_labels": [], "citations": []}
+    assert result == {"can_answer": False}  # Task 3.4.e: reset_turn_state_node now owns the rest
     assert graph_module._route_after_gate({**state, **result}) == "no_answer_fallback"
 
 
@@ -88,7 +88,7 @@ def test_gate_below_threshold_routes_to_fallback_shape(monkeypatch):
         "best_dense_score": threshold - 0.01,
     }
     result = graph_module._gate_node(state)
-    assert result == {"can_answer": False, "cited_chunk_labels": [], "citations": []}
+    assert result == {"can_answer": False}  # Task 3.4.e: reset_turn_state_node now owns the rest
     assert graph_module._route_after_gate({**state, **result}) == "no_answer_fallback"
 
 
@@ -125,7 +125,7 @@ def test_gate_none_score_with_nonempty_chunks_routes_to_fallback_shape(monkeypat
     set_valid_env(monkeypatch, VALID_ENV)
     state = {"retrieved_chunks": [_chunk("doc-a", "Some text.")], "best_dense_score": None}
     result = graph_module._gate_node(state)
-    assert result == {"can_answer": False, "cited_chunk_labels": [], "citations": []}
+    assert result == {"can_answer": False}  # Task 3.4.e: reset_turn_state_node now owns the rest
 
 
 def test_gate_logs_decision_without_query_or_chunk_text(caplog, monkeypatch):
@@ -224,14 +224,20 @@ async def test_below_threshold_reaches_fallback_with_zero_model_calls(monkeypatc
         identity = _identity(tenant_id)
         conversation_id = uuid.uuid4()
 
-        with pytest.raises(NotImplementedError, match="Step 3.4.e"):
-            await _collect(
-                run_turn(graph, identity, conversation_id, {"messages": [_QUERY_TEXT]})
-            )
+        # Task 3.4.e: no_answer_fallback is real now -- reaches the
+        # fixed reply instead of raising; the chat-model spy above still
+        # proves zero model calls regardless.
+        results = await _collect(
+            run_turn(graph, identity, conversation_id, {"messages": [_QUERY_TEXT]})
+        )
+        assert results
 
         snapshot = await read_state(graph, identity, conversation_id)
         assert snapshot.values["can_answer"] is False
         assert snapshot.values["best_dense_score"] == pytest.approx(0.0)
+        assert snapshot.values["messages"][-1].content == graph_module._sanitize_answer_text(
+            graph_module._NO_ANSWER_FALLBACK_TEXT
+        )
     finally:
         if await client.collection_exists(name):
             await client.delete_collection(name)
@@ -283,15 +289,18 @@ async def test_zero_chunks_routes_to_fallback_through_the_real_graph(monkeypatch
         identity = _identity(tenant_id)
         conversation_id = uuid.uuid4()
 
-        with pytest.raises(NotImplementedError, match="Step 3.4.e"):
-            await _collect(
-                run_turn(graph, identity, conversation_id, {"messages": [_QUERY_TEXT]})
-            )
+        results = await _collect(
+            run_turn(graph, identity, conversation_id, {"messages": [_QUERY_TEXT]})
+        )
+        assert results
 
         snapshot = await read_state(graph, identity, conversation_id)
         assert snapshot.values["retrieved_chunks"] == []
         assert snapshot.values["best_dense_score"] is None
         assert snapshot.values["can_answer"] is False
+        assert snapshot.values["messages"][-1].content == graph_module._sanitize_answer_text(
+            graph_module._NO_ANSWER_FALLBACK_TEXT
+        )
     finally:
         if await client.collection_exists(name):
             await client.delete_collection(name)

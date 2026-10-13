@@ -3149,8 +3149,8 @@ Researched first (the prior Step 3.4 research task, reported and accepted before
 | 3.4.b [SECURITY] | The answer node: resolved the structured-output-vs-token-streaming tension (`.bind_tools()` + incremental `tool_call_chunks` parsing, not `.with_structured_output()`); §8's data/instruction delimiting with delimiter-breakout neutralisation; `can_answer=false` → fallback stub; mid-stream-failure handling; carry-over fixes to 3.4.a's own `chat_model.py` | Done |
 | 3.4.c [SECURITY] | Citations and output safety: citations built only from the overlap of `used_chunk_ids` and the chunks actually retrieved; web pages only; no upload filenames/database table names leaked; server-side markdown image/link neutralisation | Done |
 | 3.4.d [SECURITY] | Gate: light research first (RRF scores are rank-based, not relevance-calibrated — evaluate a calibrated signal, e.g. top dense cosine similarity or a Qdrant `score_threshold` floor, confirm live what 1.19.1 supports) and report before building; then the mechanism, a platform-default `Settings` field, provisional threshold + ASSUMPTION, tuned in 3.7 | Done |
-| 3.4.e | Fallback text template (dashboard support details) + the fixed dependency-failure reply | Not started |
-| 3.4.f | Rule 2: greeting/thanks deterministic phrase list (short messages only); unsafe/abusive — research first (OpenAI's moderation endpoint: latency measured live, cost, fit with §6.2's "no LLM hop"), report before building | Not started |
+| 3.4.e | Fallback text template (dashboard support details) + the fixed dependency-failure reply | Done |
+| 3.4.f | Rule 2: greeting/thanks deterministic phrase list (short messages only); unsafe/abusive — research first (OpenAI's moderation endpoint: latency measured live, cost, fit with §6.2's "no LLM hop"), report before building | Done (greeting/thanks built; unsafe/abusive research-only, per this row's own wording — not built) |
 | 3.4.g | Close-out: acceptance against §6.3/§16's injection lines, closure summary; opt-in, NOT-in-CI, FULL-TURN (embedding + Qdrant + chat model) time-to-first-visible-text measurement against real services — N real runs (N stated when run), real p50 AND p95 against §17's own 1.5s/3s targets, prompt input size recorded per run; if p50 misses, name the candidate levers (fewer/shorter retrieved chunks, a different primary model, trimming the `can_answer`/`used_chunk_ids` preamble) rather than picking one speculatively | Not started |
 
 **Decisions, Q1-Q8, each confirmed/approved before building:**
@@ -4245,6 +4245,438 @@ exactly the expected ten, no `.env`, no migration, no new dependency.
    built around today's specific 0.20 value, elsewhere in the suite,
    without a test file dedicated to watching for it.
 
+### Part 0 [SECURITY-adjacent]: per-turn state reset, built structurally (2026-11-14)
+
+The stale-`can_answer` bug Task 3.4.d found and fixed LOCALLY (inside
+`_gate_node`'s own short-circuit) is a CLASS, not a one-off — graph
+state persists across turns on the same thread (`AsyncPostgresSaver`),
+and every per-turn field (`retrieved_chunks`, `best_dense_score`,
+`can_answer`, `cited_chunk_labels`, `citations`, plus `dependency_failed`
+added by Part 1 below) needed the SAME fix, in one place, not
+rediscovered node by node. `messages` is the only cross-turn field
+(`MessagesState`'s own `add_messages` reducer APPENDS, by design).
+
+**Built**: `_reset_turn_state_node` (`app/agent/graph.py`), a new node
+inserted unconditionally between `START` and the router (`add_edge(START,
+"reset_turn_state")`, then `add_conditional_edges("reset_turn_state",
+route, _ROUTE_PATH_MAP)`, replacing the old direct `add_conditional_edges
+(START, route, ...)`) — runs before ANY routing decision, every turn,
+resetting every per-turn field to its fresh default. `_gate_node`'s own
+local fix (Task 3.4.d) and `_answer_node`'s own `can_answer=false` branch
+are BOTH simplified as a result — neither redundantly re-sets `cited_
+chunk_labels`/`citations` anymore, since the turn-start reset already
+guarantees it; each now returns only the ONE field it genuinely needs to
+communicate for routing (`can_answer`).
+
+**Concrete failure this closes** (the exact scenario named by direct
+instruction): turn 1 answers a question with real citations; turn 2, same
+thread, is gated out. Without this node, a turn routed to `fallback`/
+`guardrail`/`coordinator` (bypassing retrieve/gate entirely) touches NONE
+of the per-turn fields, leaving turn 1's own values sitting in the
+checkpoint under turn 2's own final state — the same class of leak
+docs/SPEC.md's own tenant-isolation discipline exists to prevent, just
+across TURNS instead of TENANTS.
+
+**Structural guard against recurrence, not just a one-time fix**: a new
+test (`test_reset_turn_state_node_covers_every_per_turn_agentstate_field`,
+`tests/test_agent_graph_turn_reset.py`) asserts the reset node's own
+returned keys are EXACTLY `AgentState.__annotations__.keys() - {"messages"}`
+— a future task adding a new per-turn field to `AgentState` without also
+adding it here fails this test immediately, rather than silently
+reintroducing the exact bug class this task closes.
+
+**Proven non-vacuous, not merely asserted**: the main cross-turn test
+(`test_per_turn_state_does_not_leak_across_turns_on_the_same_thread`) was
+run against a temporarily-sabotaged graph (the reset node's own edge
+wiring removed, `add_conditional_edges(START, route, ...)` restored
+directly) — confirmed it fails with the EXACT leaked value (turn 2's own
+`citations` showing turn 1's real citation instead of `[]`), then restored
+byte-identical (`diff`-confirmed) before re-running clean.
+
+**New test**: `tests/test_agent_graph_turn_reset.py` (new, 4 tests): 3
+pure/offline (`_reset_turn_state_node`'s own fresh-default shape; fresh-
+object-per-call, no shared mutable aliasing; the structural per-field
+coverage meta-test above) plus 1 live (test-db, fakes only — the real
+two-turn same-thread scenario, through `run_turn()`/`read_state()`,
+asserting turn 2 holds none of turn 1's values AND the chat model was
+invoked exactly once, proving turn 2 never reached the answer node at
+all).
+
+ASSUMPTION: none new. UNCERTAIN: none. TODO: none new.
+
+Verified: `make lint` clean. `test_agent_graph_turn_reset.py` alone,
+re-run 3 times: **4 passed** every run, zero skips. See this entry's own
+combined `Verified:` paragraph with Parts 1/2 below for the full-suite
+counts (all three parts were built, tested and verified together in one
+pass, per the user's own single combined verification instruction) — not
+repeated three times.
+
+**Senior engineer check:**
+1. **Chose not to build**: a more elaborate "per-field reset registry"
+   or decorator-based mechanism — a plain function returning a literal
+   dict, backed by one structural meta-test, is the smallest correct
+   fix for a problem that is fundamentally "don't forget a field,"
+   not a problem needing its own abstraction layer (rule 11).
+2. **Main trade-off accepted**: `_gate_node`/`_answer_node`'s own
+   short-circuit returns now depend on `_reset_turn_state_node` having
+   already run earlier in the SAME turn for their own correctness (no
+   longer locally defensive) — a real, if small, coupling accepted
+   because the alternative (every node re-defending itself) is exactly
+   the duplicated-reset-logic anti-pattern this task exists to remove.
+3. **Pushed back on / would have done differently**: nothing — the
+   prompt's own diagnosis (a class of bug, not a one-off; fix it once,
+   structurally) was exactly right, and its own worked example (turn 1
+   citations leaking into turn 2's fallback) was the right test to
+   build, not a simplified stand-in.
+4. **Highest production risk in this change**: none newly introduced —
+   this is a strict correctness improvement, proven by the same
+   sabotage-and-restore cycle that proved the bug was real. The
+   structural meta-test is the real safeguard against this risk
+   resurfacing; its own value depends on nobody ever deleting or
+   weakening it later.
+
+### Part 1: Step 3.4.e — fallback text (2026-11-14)
+
+**Where tenant support details live today: nowhere.** Confirmed by
+reading directly, not assumed: `tenants.config` is a raw, untyped JSONB
+column (`app/tenancy/models.py`); `app/auth/routes.py`'s own existing
+comment on `_PUBLIC_WIDGET_CONFIG_FIELDS` already states "no prior task
+defines `tenants.config`'s actual key names (the dashboard, which will
+actually write them, is a later phase)"; and `app/tenancy/repository.py`'s
+own `create_site_key()` confirms the draft-to-live support-details
+requirement check itself (docs/SPEC.md §6.3's own "a site key moves from
+draft to live only through a server-side check that requires at least
+one contact method") is "done elsewhere -- not this method's job" —
+i.e. not built anywhere either. A PLATFORM-DEFAULT fixed text stands in
+for the real per-tenant template until Step 6.2 ("Tenant settings",
+docs/SPEC.md §18 Phase 6) adds real, named support-details fields and a
+dashboard UI to edit them — see the new §9 marker below.
+
+**Built**: two fixed, never-model-written texts (`_NO_ANSWER_FALLBACK_
+TEXT`, `_DEPENDENCY_FAILURE_TEXT`, `app/agent/graph.py`) for two
+DIFFERENT visitor-facing reasons (docs/SPEC.md §6.1's own enumerated
+fixed-reply list treats these as distinct cases):
+- `_no_answer_fallback_node`: reached when the gate finds nothing
+  relevant, OR the model itself returns `can_answer=false` despite real
+  retrieved content — the SAME reply either way (§6.3's own wording
+  treats both as "the fallback", singular, not two different texts for
+  two different triggers — a deliberate reuse decision, stated here
+  explicitly, not silently assumed).
+- `_dependency_failure_fallback_node` (new node): reached when a REAL
+  dependency call fails outright — `_retrieve_node`'s own call to
+  `retrieve()` (embedding or Qdrant failure), or `_answer_node`'s own
+  chat-model call with its FULL `.with_fallbacks()` chain exhausted
+  BEFORE any answer text ever started streaming. A mid-stream failure
+  (`AnswerStreamFailedMidStreamError`, after emission has begun) does
+  NOT reach this node — unchanged, stays Step 4.1's own job per the
+  already-recorded split marker (Task 3.3.d).
+
+**Wiring, the minimal shape**: one new per-turn field, `dependency_
+failed: bool` (reset every turn by Part 0's own node). `_retrieve_node`
+now wraps its own `retrieve()` call in a narrow `try/except Exception`
+(scoped to JUST that call, not the chunk-conversion that follows) --
+logs the real exception server-side, returns `{"retrieved_chunks": [],
+"best_dense_score": None, "dependency_failed": True}`, never propagates
+raw. `_answer_node`'s own existing `except Exception` branch (the
+"failure before any emission" case, previously a bare `raise`) now
+returns `{"can_answer": False, "dependency_failed": True}` instead —
+`AnswerStreamNotAppendOnlyError`'s own re-raise is UNCHANGED (a genuine
+internal-consistency bug, never silently downgraded to a visitor-facing
+fallback). `_route_after_gate()`/`_route_after_answer()` each gained a
+THIRD branch: `can_answer` true → proceed; `dependency_failed` true →
+the new `dependency_failure` node; otherwise → the generic no-answer
+fallback. Neither `_gate_node` nor the gate's own threshold logic needed
+to change at all — a real retrieve() failure already naturally produces
+zero chunks (failing the gate's own existing check), and `dependency_
+failed` survives into the gate's own output un-touched (gate's own
+short-circuit returns no `dependency_failed` key, so the value `_retrieve_
+node` already set THIS turn is simply never overwritten) — the routing
+FUNCTIONS are the only place that needed to learn the new distinction.
+
+**One choke point, extended to every piece of fixed text, not just model
+answers**: both new fixed texts, PLUS the Guardrail's own reply (Part 2
+below), are passed through `_sanitize_answer_text()` (Task 3.4.c) before
+ever being wrapped in an `AIMessage` — the SAME function, the SAME call
+site shape, as the model's own answer text. Neither string contains any
+of that function's own six escaped characters today, so this is
+currently a no-op in practice — written this way so that once Step 6.2's
+REAL per-tenant template interpolates tenant-supplied support details
+(tenant-controlled content shown to visitors, the IDENTICAL trust
+boundary the model's own answer text already has) into the no-answer
+text, that interpolated content is automatically covered, with no
+separate decision required at that point.
+
+**`offer_escalation`: NOT built, a genuine judgment call, not a default.**
+§6.1 says the fallback "offers the escalation button when a person may be
+needed." Considered and declined: a new `offer_escalation: bool` state
+field would sit COMPLETELY UNUSED for a materially longer stretch than
+any other speculative field this project has built ahead of its consumer
+(`cited_chunk_labels`/`citations` at 3.4.b waited exactly one task, 3.4.c,
+for their real consumer; this would wait through 3.4.f, 3.5, 3.6, 3.7, and
+all of Phase 4.1-4.3 before Step 4.1/4.4 ever reads it) — and, more
+importantly, the underlying fact it would encode ("was this turn one of
+the fallback TYPES that offers escalation") is ALREADY fully recoverable
+from existing state (`can_answer`, `dependency_failed`, which node
+actually produced the final message) without a new field at all. Adding
+one now would be duplicate information, not new capability — exactly
+the kind of plumbing-ahead-of-need rule 11 exists to catch. Recorded as
+a §9 marker (below) instead, naming what Step 4.1 needs to read.
+
+**Dependency-failure failure-mode honesty, restated plainly**: this task
+catches whatever exception eventually SURFACES from `retrieve()`/the
+chat-model call — it does NOT add a timeout of its own. A slow-but-not-
+yet-failed call can still hang for the existing default windows (Qdrant
+~5s, OpenAI ~600s) before this catch has anything to catch at all —
+unchanged, still Step 4.1's own job (the "overall request timeout" half
+of the already-recorded split marker, Task 3.3.d). This task resolves
+only the OTHER half of that same marker: once a dependency call DOES
+raise, the visitor now sees a graceful, fixed reply instead of the
+turn crashing uncaught.
+
+**New tests** (counted together with Part 2's own new tests in this
+entry's shared `Verified:` paragraph below, not double-counted): the
+three fixed-reply node tests (`test_no_answer_fallback_node_returns_the_
+real_fixed_sanitized_reply`, `test_dependency_failure_fallback_node_
+returns_the_real_fixed_sanitized_reply`, plus the Guardrail's own,
+Part 2) in `tests/test_agent_graph.py`; `test_retrieve_node_catches_a_
+retrieve_failure_and_sets_dependency_failed` (pure); `test_run_turn_
+reaches_the_dependency_failure_reply_when_retrieve_fails` (live, test-db,
+chat-model spy proving zero model calls). Three EXISTING tests updated,
+each flagged with its own reason, not silently patched: `test_can_answer_
+false_emits_zero_deltas`/`test_gate_*_routes_to_fallback_shape` (x3,
+`test_agent_graph_gate.py`) simplified to `{"can_answer": False}` only,
+matching Part 0's own simplification; `test_failure_before_any_emission_
+is_not_wrapped` RENAMED and rewritten (its own premise — "must propagate
+raw" — is now deliberately false, matching this task's own new design);
+`test_can_answer_false_routes_to_the_no_answer_fallback_stub`/`test_
+below_threshold_reaches_fallback_with_zero_model_calls`/`test_zero_
+chunks_routes_to_fallback_through_the_real_graph` updated from asserting
+a raised stub error to asserting the real fixed reply.
+
+ASSUMPTION: the platform-default fallback text itself (both strings) —
+not tenant-specific, a stand-in until Step 6.2 exists. UNCERTAIN: none.
+TODO: none new in code (the dashboard/escalation deferrals are both
+tracked as §9 markers below, not left as bare TODOs).
+
+**Senior engineer check:**
+1. **Chose not to build**: `offer_escalation` (see its own reasoning
+   above — a genuine "not yet, here's why" call, not an oversight);
+   per-category (greeting vs. thanks vs. dependency-failure-specific)
+   reply text variants — nothing today needs more than one sentence per
+   case; a request timeout on the dependency calls this task now
+   catches — still explicitly Step 4.1's own job, unchanged.
+2. **Main trade-off accepted**: the no-answer fallback uses ONE reply
+   for two different triggers (gate rejection vs. the model's own
+   `can_answer=false`) — simpler, matches §6.3's own singular wording,
+   but means a visitor cannot tell from the TEXT ALONE which case
+   produced it (not a capability anything today needs, but a real,
+   stated simplification, not an oversight).
+3. **Pushed back on / would have done differently**: nothing — the
+   prompt's own scoping (two fixed replies, wire to today's REAL
+   failure paths only, leave mid-stream and timeouts to their already-
+   recorded owners) was precise and matched exactly what existing
+   markers already anticipated; the `offer_escalation` question was
+   explicitly left open for judgment, and I'm confident in the "not
+   yet" answer given the reasoning above, but flag it as the one place
+   a different call was plausible.
+4. **Highest production risk in this change**: a real dependency failure
+   (Qdrant/OpenAI down) now produces a graceful, generic reply instead
+   of an uncaught crash — a strict improvement, with the honestly-
+   stated residual risk that a SLOW (not yet failed) dependency still
+   hangs for the existing default windows, unchanged, until Step 4.1
+   adds a real timeout.
+
+### Part 2: Step 3.4.f — Rule 2 (2026-11-14)
+
+**Greeting/thanks, built.** `backend/config/greeting_phrases.yaml` (new
+top-level data directory, mirroring docs/SPEC.md §7's own "a YAML file in
+the backend config folder" convention for the sibling escalation
+trigger-phrase file, Step 4.4, not yet built) — ~30 entries, one phrase
+per entry, a `category` (`greeting`/`thanks`), English only, matching §7's
+own scope for its sibling file. `app/agent/greeting_phrases.py`: loaded
+once (`@lru_cache`, this project's own established lazy-singleton
+convention), validated against a real schema (two small pydantic models)
+-- a malformed file fails LOUDLY (a real `ValidationError`/`yaml.
+YAMLError`), never silently degrading to "nothing matches" (a silent
+production quality regression, not a crash, exactly the failure mode that
+must be loud here).
+
+**The length rule, stated explicitly, per direct instruction**: (1) a
+message longer than 40 characters is NEVER checked against the list at
+all — a named, independently-testable short-circuit, not merely an
+emergent property of exact matching; (2) the message is normalised
+(lowercased, trailing punctuation stripped, internal whitespace
+collapsed); (3) the normalised message must EXACTLY equal a listed
+phrase — never a substring/"contains" match. Rule (3) is what correctly
+rejects "thanks, but how do I return this?" (38 characters, under the
+length cap, but normalises to the full sentence, not to the bare word
+"thanks") — proven directly as its own named test case, not merely
+implied by the matcher's general behavior.
+
+**`_is_greeting_thanks_or_unsafe` split into two predicates**, matching
+this project's own "name what's real vs deferred accurately" discipline
+(e.g. the Step 3.3 Q1 correction): `_is_greeting_or_thanks` (real now,
+calls `greeting_phrases.is_greeting_or_thanks()`) and `_is_unsafe_or_
+abusive` (still a stub, `TODO(3.4.f follow-up)` — research-only this
+task, see the recommendation and §9 marker below). `_guardrail_node` is
+real: ONE neutral reply for both greeting and thanks (§6.1 groups them as
+one fixed-reply case; one sentence reads naturally for either, so a
+category-specific mechanism is not built — nothing today needs it),
+sanitised through the same one choke point as every other piece of
+visitor-facing text.
+
+**New direct dependency, promoted deliberately**: `pyyaml==6.0.3` was
+ALREADY present transitively (pulled in by an existing dependency,
+confirmed via `requirements.lock`'s own "via" comment before this task's
+own change) — promoted to an EXPLICIT direct pin in `pyproject.toml`
+rather than left implicit: a real, direct `import yaml` in application
+code relying on a transitive-only provider is fragile (a future upstream
+change dropping its own use of PyYAML would silently stop pinning it,
+and this code's own import would break with no warning from `make
+lock-check` until the exact moment it broke in production). Version
+re-verified current on PyPI at this task's own build time. `make lock`
+regenerated; `requirements.lock`'s own "via" comment for `pyyaml` now
+lists `widgetplatform (backend/pyproject.toml)` alongside its existing
+transitive providers, confirmed by reading the regenerated lockfile
+directly, not assumed. `make audit`: clean.
+
+**Dockerfile fix, found and closed, not just a note**: `backend/config/`
+is a NEW top-level directory, a SIBLING of `app/` — confirmed live, by
+reading `Dockerfile` directly, that only `app/`/`alembic/` (plus a few
+named files) are ever `COPY`'d into the runtime image; a new top-level
+directory is invisible to the running container unless named explicitly
+(the Dockerfile's own COPY list is an allow-list, not a wildcard). Added
+`COPY --chmod=0644 config/ ./config/` to the final runtime stage
+(read-only data, root-owned, matching `alembic.ini`'s own treatment
+exactly) — without this, the real container would have raised
+`FileNotFoundError` on its own first real greeting-check call, a gap
+that would NOT have been caught by any existing test (nothing in this
+suite builds and runs the real image). Also updated `tests/test_ignore_
+files_guard.py`'s own `_DOCKERFILE_COPY_PATTERNS` tuple (a real guard
+test asserting `.dockerignore` can never exclude something the Dockerfile
+actually `COPY`s) to include `"config"` — found by reading that guard
+directly before assuming it needed no change, not skipped.
+
+**Unsafe/abusive: RESEARCH ONLY, per direct instruction — not built.**
+`backend/scripts/manual_research_moderation_endpoint.py` (new, opt-in,
+never-in-CI, matching this project's own established manual-script
+convention): 5 real OpenAI moderation-endpoint calls, run live this task.
+
+Real, measured results: **443-1295ms latency, mean 865ms** (a second,
+independent run during this same task measured 823-1382ms, mean 1105ms —
+consistent, not a fluke). Cost: **free** (confirmed live via OpenAI's own
+current published pricing/docs, not assumed from training data alone —
+the moderation endpoint itself has no per-token charge, unlike a real
+chat-model or embedding call; free-tier rate limits are 250 RPM/5,000
+RPD/10,000 TPM, paid-tier limits not independently confirmed this task).
+
+**Recommendation: do NOT adopt this endpoint as a synchronous, on-the-
+critical-path check for Rule 2's unsafe/abusive half, as currently
+scoped.** The measured ~0.4-1.4s latency is comparable to, and in some
+samples worse than, a full chat-model call — directly undermining
+docs/SPEC.md §6.2's own "rules, no LLM hop" design intent for ROUTING
+decisions specifically (routing is meant to be fast and deterministic;
+a real ~1s network dependency on every message, even ones that turn out
+to be ordinary questions, works directly against that, and risks §17's
+own already-flagged p50/p95 budget, Task 3.4.b/3.4.g). Failure behavior,
+if adopted: MUST fail OPEN (a timeout/error on the moderation call treats
+the message as "not flagged" and continues normal rule-based routing) —
+blocking or erroring the whole turn because a classifier call failed
+would be a worse outcome than occasionally missing a classification, and
+the answer path's own existing protections (grounded only in retrieved
+DATA, forced single-tool schema) already provide some mitigation even
+when unsafe content slips through unflagged. Privacy: no NEW third-party
+vendor (OpenAI is already a disclosed sub-processor for the chat model
+and embeddings) — but this would meaningfully WIDEN what visitor text
+reaches that vendor for what purpose (every message, not just ones later
+embedded/answered), which should be made explicit in docs/SPEC.md §13's
+own sub-processor disclosure if ever adopted, not left implicit under
+the existing "LLM" line. A possible alternative, NOT decided here: handle
+unsafe/abusive the SAME way §6.2's own closing line already handles
+injection-looking input — log and flag for offline/async review, never
+gating the real-time response — which would capture some of the
+signal's value without the synchronous latency cost. Recorded as a §9
+marker below, owner "3.4.f's own follow-up", per direct instruction.
+
+**New tests**: `tests/test_greeting_phrases.py` (new, 37 tests): matches
+(16, a real sample from the committed YAML file, including case/
+punctuation/whitespace variants); near-misses that must NOT match (8,
+including the exact "thanks, but how do I return this?" example named by
+direct instruction); the length-cap boundary (2, over the cap and exactly
+at it); `_normalize()` as its own unit (6); schema validation (5: malformed
+YAML, a missing required key, an invalid category value, a missing
+`entries` key, each failing loudly — plus the real committed file loading
+and validating successfully on its own).
+
+ASSUMPTION: none new. UNCERTAIN: whether the moderation endpoint's paid-
+tier rate limits would matter at any real tenant's scale — not
+independently confirmed this task, named plainly rather than assumed
+adequate. TODO: `TODO(3.4.f follow-up)` on `_is_unsafe_or_abusive`,
+matching the new §9 marker below exactly.
+
+Verified (Parts 0, 1 and 2, built and verified together in one pass, per
+direct instruction): `make lint` clean. Changed/new test files, re-run 3
+times together (test-db + test-qdrant up): **134 passed** every run, zero
+skips. Full `backend/tests` without a test database: **772 passed, 334
+skipped** (up from 730 passed, 332 skipped at the 3.4.d close — exactly
++42/+2, reconciled exactly: the two new files contribute 40 passed + 1
+skipped [test_agent_graph_turn_reset.py's own one live test needs
+test-db]; `test_agent_graph.py`'s own net +3 new tests contribute the
+remaining +2 passed [pure] + 1 skipped [the new live dependency-failure
+test, needs test-db]). `make test-all` (both real services, fresh
+containers): **1106 passed, 9 warnings** (up from 1062 — exactly +44,
+the same +42 plus the 2 tests that only skip without real services now
+passing), 0 failed, both test services confirmed fully removed
+afterward. `make hooks`: **76 markers** (up from 75 — net +1, confirmed
+by direct `git diff` inspection, not assumed: -1 the old `_is_greeting_
+thanks_or_unsafe` stub's own `TODO(3.4)` comment line, removed; +2 new
+lines each containing the word TODO — the real `TODO(3.4.f follow-up)`
+marker, and one incidental prose mention inside `_is_greeting_or_
+thanks`'s own docstring ("see its own TODO/§9 marker") that the marker
+scanner's own plain-text matching cannot distinguish from a real one,
+matching this project's own established precedent for this exact kind
+of incidental match). `make lock-check`: exit 0, clean. `make audit`:
+"No known vulnerabilities found" (covers the new direct `pyyaml` pin
+too). `git status --short` named and cross-checked file by file:
+`backend/Dockerfile`, `backend/app/agent/graph.py`, `backend/pyproject.
+toml`, `backend/requirements.lock`, `backend/requirements-dev.lock`,
+`backend/tests/test_agent_graph.py`, `backend/tests/test_agent_graph_
+answer.py`, `backend/tests/test_agent_graph_gate.py`, `backend/tests/
+test_ignore_files_guard.py` (all modified); `backend/app/agent/greeting_
+phrases.py`, `backend/config/greeting_phrases.yaml`, `backend/scripts/
+manual_research_moderation_endpoint.py`, `backend/tests/test_agent_graph_
+turn_reset.py`, `backend/tests/test_greeting_phrases.py` (all new) —
+exactly the expected fourteen, no `.env`, no migration.
+
+**Senior engineer check:**
+1. **Chose not to build**: unsafe/abusive detection itself (explicitly
+   research-only, per direct instruction); a category-specific Guardrail
+   reply; any change to the escalation YAML file itself (Step 4.4's own
+   job, unbuilt, only mirrored in SHAPE here).
+2. **Main trade-off accepted**: promoting `pyyaml` from transitive-only
+   to an explicit direct pin touches a lockfile that would otherwise
+   have been untouched by this task — a small, deliberate footprint
+   increase (one more pin to review on future upgrades) accepted for
+   real resilience against a future upstream dependency change silently
+   breaking this code's own import.
+3. **Pushed back on / would have done differently**: nothing in the
+   prompt's own scoping — "research only, don't build" for unsafe/
+   abusive was exactly right given the measured latency, and finding
+   this out NOW (with real numbers) rather than after building a
+   synchronous moderation check is the entire point of a research-first
+   task. One thing I'd flag as a genuine judgment call, not a
+   disagreement: `offer_escalation`'s own "don't build it yet" answer
+   (Part 1) — reasonable people could land differently, and it's named
+   explicitly as a close call, not an obvious one.
+4. **Highest production risk in this change**: none introduced by what
+   was BUILT (greeting/thanks is a pure, deterministic, well-tested
+   addition). The real risk this task surfaces is a DECISION risk for
+   whoever builds unsafe/abusive detection next: the moderation
+   endpoint's own real latency makes the synchronous, blocking design
+   a poor fit, and that evidence needs to actually inform that future
+   task's own design, not be rediscovered the hard way after shipping a
+   slow routing path.
+
 ### Estimates to measure
 
 - The default limits in §9 and the budgets in §17 are starting points.
@@ -4268,9 +4700,9 @@ exactly the expected ten, no `.env`, no migration, no new dependency.
 
 ## 7. Current task and next task
 
-Current: Step 3.4.e (fallback text template + fixed dependency-failure reply) — 3.4.a/3.4.b/3.4.c/3.4.d are all Done.
-Next: Step 3.4.f (Rule 2 greeting/thanks/unsafe-input handling), once 3.4.e is confirmed good.
-Do not modify (completed tasks): 1.1.a, 1.1.b, 1.1.c, 1.1.d, 1.1.e, 1.1.f, 1.1.g, 1.1.h, 1.1.i, 1.1.j, 1.1.k, 1.1.l, 1.1.m, 1.1.n, 1.1.o.a, 1.1.o.b, 1.1.o.c, 1.1.o.d, 1.1.o.e, 1.1.o.f, 1.1.o.g, 1.1.o.h, 1.1b, 1.1c, 1.2.a, 1.2.b, 1.2.c, 1.2.d, 1.2.e, 1.2.f, 1.3.a1, 1.3.a2, 1.3.b, 1.3.c, 1.3.d, 1.3.e, 1.3.f, 1.4.a, 1.4.b, 1.4.c, 1.4.d, 1.4.e, 1.4.f, 1.4.g, 1.4.h, 1.4.i, 1.4.j, 1.4.k, 1.4.l, 1.5.a, 1.5.b, 1.5.c, 1.5.d, 1.5.e, 1.5.f, 1.6.a, 1.6.b, 1.6.c, 1.6.d, 1.6.e, 2.1.a, 2.1.b, 2.1.c, 2.1.d, 2.1.e, 2.1.f, 2.1.g, 2.1.h, 2.2.a, 2.2.b, 2.2.c, 2.2.d, 2.2.e, 2.2.f, 2.2.g, 2.2.h, 2.2.i, 2.3.a, 2.3.b, 2.3.c, 2.3.d, 2.3.e, 2.4.a, 2.4.b, 2.4.c, 2.4.d, 2.4.e, 2.4.f, 2.4.g, 2.5.a, 2.5.b, 2.5.c, 2.5.d, 2.5.e, 2.5.f, 2.6.a, 2.6.b, 2.6.c, 2.6.d, 2.6.e, 2.6.f, 2.7.a, 2.7.b, 2.7.c, 2.7.d, 2.7.e, 2.7.f, 2.8.a, 2.8.b, 2.8.c, 2.8.d, 2.8.e, 2.8.f, 2.9.a, 2.9.b, 2.9.c, 2.9.d, 2.9.e, 2.9.f, 2.9.g, 2.10.a, 2.10.b, 2.10.c, 3.1.a, 3.1.b, 3.1.c, 3.1.d, 3.1.e, 3.1.f, 3.2.a, 3.2.b, 3.2.c, 3.2.d, 3.3.a, 3.3.b, 3.3.c, 3.3.d, 3.4.a, 3.4.b, 3.4.c, 3.4.d.
+Current: Step 3.4.g (close-out: §6.3/§16 acceptance, closure summary, the opt-in full-turn latency measurement) — 3.4.a through 3.4.f are all Done.
+Next: nothing beyond 3.4.g is scheduled yet within Step 3.4; Step 3.5 (follow-up rewrite) follows once 3.4.g closes out the step.
+Do not modify (completed tasks): 1.1.a, 1.1.b, 1.1.c, 1.1.d, 1.1.e, 1.1.f, 1.1.g, 1.1.h, 1.1.i, 1.1.j, 1.1.k, 1.1.l, 1.1.m, 1.1.n, 1.1.o.a, 1.1.o.b, 1.1.o.c, 1.1.o.d, 1.1.o.e, 1.1.o.f, 1.1.o.g, 1.1.o.h, 1.1b, 1.1c, 1.2.a, 1.2.b, 1.2.c, 1.2.d, 1.2.e, 1.2.f, 1.3.a1, 1.3.a2, 1.3.b, 1.3.c, 1.3.d, 1.3.e, 1.3.f, 1.4.a, 1.4.b, 1.4.c, 1.4.d, 1.4.e, 1.4.f, 1.4.g, 1.4.h, 1.4.i, 1.4.j, 1.4.k, 1.4.l, 1.5.a, 1.5.b, 1.5.c, 1.5.d, 1.5.e, 1.5.f, 1.6.a, 1.6.b, 1.6.c, 1.6.d, 1.6.e, 2.1.a, 2.1.b, 2.1.c, 2.1.d, 2.1.e, 2.1.f, 2.1.g, 2.1.h, 2.2.a, 2.2.b, 2.2.c, 2.2.d, 2.2.e, 2.2.f, 2.2.g, 2.2.h, 2.2.i, 2.3.a, 2.3.b, 2.3.c, 2.3.d, 2.3.e, 2.4.a, 2.4.b, 2.4.c, 2.4.d, 2.4.e, 2.4.f, 2.4.g, 2.5.a, 2.5.b, 2.5.c, 2.5.d, 2.5.e, 2.5.f, 2.6.a, 2.6.b, 2.6.c, 2.6.d, 2.6.e, 2.6.f, 2.7.a, 2.7.b, 2.7.c, 2.7.d, 2.7.e, 2.7.f, 2.8.a, 2.8.b, 2.8.c, 2.8.d, 2.8.e, 2.8.f, 2.9.a, 2.9.b, 2.9.c, 2.9.d, 2.9.e, 2.9.f, 2.9.g, 2.10.a, 2.10.b, 2.10.c, 3.1.a, 3.1.b, 3.1.c, 3.1.d, 3.1.e, 3.1.f, 3.2.a, 3.2.b, 3.2.c, 3.2.d, 3.3.a, 3.3.b, 3.3.c, 3.3.d, 3.4.a, 3.4.b, 3.4.c, 3.4.d, 3.4.e, 3.4.f.
 
 ### Step 1.1 task list (approved)
 
@@ -4692,7 +5124,7 @@ here.
 
 ## 8. Task counter since the last duplication check
 
-**n = 1** (3.4.d — real code/tests. Reset to n=0 on 2026-11-12, following the duplication check after 3.4.a/b/c; see that section above for the full findings/fix/verification record.)
+**n = 4** (3.4.d, Part 0 [the per-turn reset structural fix], 3.4.e, 3.4.f — all real code/tests; 3.4.f's own moderation-endpoint research does not count separately, bundled into the same task entry as its own greeting/thanks build. Reset to n=0 on 2026-11-12, following the duplication check after 3.4.a/b/c. **A duplication check is now due per rule 9 ("never past 4 without one") — recorded here, not run this task, per direct instruction ("counter updated, state the count" — no instruction to run one).**)
 
 ## 9. Open markers
 
@@ -4803,3 +5235,6 @@ here.
 - Owner Step 4.1 (the real `/chat` endpoint) (recorded at Task 3.4.b, 2026-11-10): a mid-stream chat-model failure (`AnswerStreamFailedMidStreamError`, `app/agent/graph.py`) is confirmed, by design, to leave no completed `AIMessage` in the checkpoint and to propagate as a distinctly-named exception out of `run_turn()` -- but what the VISITOR actually sees when this happens (a generic error? a specific "something went wrong, try again" message? does the widget offer a retry reusing the same `client_message_id`, matching docs/SPEC.md §10's own dropped-connection UX?) is not decided here. This node's own job is detecting and naming the failure correctly, not rendering it -- Step 4.1 owns the real visitor-facing behavior.
 - **Owner Step 5.2 (Chat UI core [SECURITY], docs/SPEC.md §18 Phase 5)** (recorded at the 3.4.c sanitiser redesign, 2026-11-12): server-side answer-text escaping (`_sanitize_answer_text()`, `app/agent/graph.py`) must NOT be the only layer -- the widget's own message renderer (§11: "the widget strips images and allows links only to cited pages and the tenant's verified domains") needs its own INDEPENDENT enforcement: images disabled outright, raw HTML disabled outright, GFM bare-URL auto-linking ("linkify") disabled outright, and any link rendering that IS allowed restricted to the turn's own citation URLs plus the tenant's verified domains -- checked client-side regardless of what the server already escaped. **Concretely motivated by this redesign's own adversarial pass, not a generic caution**: a fullwidth Unicode look-alike construct (`！［...］（url）`) passes through the server-side escape untouched (it contains none of the six escaped ASCII characters) -- if the widget's own renderer ever applies Unicode (NFKC) normalisation BEFORE or instead of markdown parsing, the fullwidth characters fold to live ASCII `!`/`[`/`]` AFTER the server has already run, reconstructing a real construct. **Step 5.2 must therefore also confirm its own renderer does not Unicode-normalise text before markdown-parsing it** (or if it does, that normalisation happens BEFORE any trust boundary, never after) -- this is the concrete reason two independent layers matter here, not merely defense-in-depth as a general principle.
 - **Owner Step 4.4 (Escalation [SECURITY]) for the email body, and Step 6.4 (Escalation inbox and usage) for the dashboard screen** (recorded at the 3.4.c sanitiser redesign, 2026-11-12): docs/SPEC.md §7 -- `escalations.transcript snapshot` is delivered both as "an email with the transcript" (Step 4.4) and "it also appears in the dashboard inbox" (Step 6.4), **neither of which is a markdown renderer**. The persisted `AIMessage`/answer text these transcripts embed is now backslash-escaped by `_sanitize_answer_text()` (e.g. a cited URL reads as literal `\[text\](url)`, not prose) -- whoever builds these two surfaces must apply the EXACT INVERSE of this module's own escape table before display, so a transcript reads as natural prose, not literally backslash-laden text. This is a SEPARATE, additional operation from §7's own existing "Transcripts are stored as text and always escaped on output" requirement (that line is HTML-escaping, an XSS defense for inserting arbitrary visitor/model text into an email or dashboard view) -- both operations are needed together: markdown-UNescape first (to recover readable prose), then HTML-escape (to stay safe to render), never the reverse order and never only one of the two. **Extended (2026-11-13) to a third, non-display surface**: Step 3.5 (follow-up rewrite) feeds prior conversation history back into a model prompt, not a renderer — that history must be markdown-unescaped first too, or the rewrite model reads backslash-laden prose and a naive re-application of `_sanitize_answer_text()` to its own output would compound the escaping turn over turn.
+- **Owner Step 6.2 (Tenant settings, docs/SPEC.md §18 Phase 6)** (recorded at Task 3.4.e, 2026-11-14): no real per-tenant support details (email, phone, contact link, hours, optional message) exist anywhere in this codebase today -- confirmed by reading `app/tenancy/models.py` (`tenants.config` is a raw, untyped JSONB column), `app/auth/routes.py` (`_PUBLIC_WIDGET_CONFIG_FIELDS`'s own comment: "no prior task defines tenants.config's actual key names"), and `app/tenancy/repository.py`'s own `create_site_key()` ("a site key moves from draft to live only through a server-side check, done elsewhere -- not this method's job") directly, not assumed. `_no_answer_fallback_node`/`_dependency_failure_fallback_node` (`app/agent/graph.py`) use a PLATFORM-DEFAULT fixed text as a stand-in. Step 6.2 must: add real, named support-details fields to `tenants.config`; build the real per-tenant template (interpolating email/phone/contact link/hours/optional message into the fixed text's own placeholders); and route that interpolated, tenant-supplied text through `_sanitize_answer_text()`'s own existing call site (already wired for exactly this, Task 3.4.e) -- never bypass it, since support details are tenant-controlled content shown to visitors, the identical trust boundary the model's own answer text already has.
+- **Owner Step 4.1 (the real `/chat` endpoint)** (recorded at Task 3.4.e, 2026-11-14): `offer_escalation` (docs/SPEC.md §6.1: the fallback "offers the escalation button when a person may be needed") is NOT a state field -- considered and declined (see Task 3.4.e's own decision log for the full reasoning): the underlying fact is already fully recoverable from existing state (`can_answer`, `dependency_failed`, which node produced the final message) without one. Whoever builds Step 4.1's real response assembly must apply docs/SPEC.md §6.1's own rule itself at that point (which fallback TYPES warrant an escalation offer) rather than expect a field that does not exist.
+- **Owner "3.4.f's own follow-up" (unsafe/abusive detection, whenever it is actually built)** (recorded at Task 3.4.f, 2026-11-14): OpenAI's moderation endpoint was evaluated live, not built (research-only this task, per direct instruction) -- real measured latency **443-1295ms / 823-1382ms across two independent runs, mean roughly 0.9-1.1s** -- comparable to or worse than a full chat-model call, directly undermining docs/SPEC.md §6.2's own "rules, no LLM hop" design intent for ROUTING specifically and risking §17's own already-flagged p50/p95 budget. Cost: free (confirmed live). Recommendation, NOT a decision: do not adopt it as a synchronous, on-the-critical-path routing check as currently scoped; if adopted at all, it must fail OPEN (a timeout/error never blocks or errors the turn, just continues normal rule-based routing); consider instead handling unsafe/abusive the SAME way §6.2's own closing line already handles injection-looking input (log and flag for offline/async review, never gating the real-time response) -- NOT decided here, a real option worth evaluating, not a recommendation of its own. Privacy: no new third-party vendor (OpenAI already disclosed for the chat model/embeddings), but adopting this would meaningfully widen what visitor text reaches that vendor for what purpose -- docs/SPEC.md §13's own sub-processor disclosure would need updating to name this explicitly, not leave it implicit under the existing "LLM" line. UNCERTAIN, named plainly: paid-tier moderation rate limits were not independently confirmed this task (only free-tier: 250 RPM/5,000 RPD/10,000 TPM) -- whoever builds this for real must re-confirm the real limits at whatever tier this project's own OpenAI account uses.

@@ -1,0 +1,79 @@
+# backend/config/greeting_phrases.yaml
+# Task 3.4.f: docs/SPEC.md §6.2 Rule 2 ("Greeting, thanks or unsafe/abusive
+# input -> Guardrail reply") -- the GREETING/THANKS half only (unsafe/
+# abusive is research-only this task, not built -- see PROJECT_SPEC.md's
+# own §9 marker). Mirrors the shape docs/SPEC.md §7 describes for the
+# escalation trigger-phrase YAML (not yet built, Step 4.4): one entry per
+# phrase, a category, loaded at startup, validated against a schema in
+# the tests (backend/app/agent/greeting_phrases.py's own pydantic models).
+#
+# English only, matching §7's own scope for the sibling escalation file.
+# Each entry is matched EXACTLY against the visitor's own message, after
+# normalisation (lowercased, trailing punctuation stripped, internal
+# whitespace collapsed) -- never a substring/"contains" match, so "thanks,
+# but how do I return this?" does NOT match "thanks" (it is a real
+# question riding on a polite opener, not a bare acknowledgement) even
+# though the word itself appears in the message. See greeting_phrases.py's
+# own module docstring for the full matching rule, including the length
+# cap.
+entries:
+  - phrase: hi
+    category: greeting
+  - phrase: hello
+    category: greeting
+  - phrase: hey
+    category: greeting
+  - phrase: hiya
+    category: greeting
+  - phrase: yo
+    category: greeting
+  - phrase: good morning
+    category: greeting
+  - phrase: good afternoon
+    category: greeting
+  - phrase: good evening
+    category: greeting
+  - phrase: morning
+    category: greeting
+  - phrase: howdy
+    category: greeting
+  - phrase: greetings
+    category: greeting
+  - phrase: hi there
+    category: greeting
+  - phrase: hello there
+    category: greeting
+  - phrase: thanks
+    category: thanks
+  - phrase: thank you
+    category: thanks
+  - phrase: thanks a lot
+    category: thanks
+  - phrase: thank you so much
+    category: thanks
+  - phrase: thanks so much
+    category: thanks
+  - phrase: many thanks
+    category: thanks
+  - phrase: cheers
+    category: thanks
+  - phrase: ok thanks
+    category: thanks
+  - phrase: okay thanks
+    category: thanks
+  - phrase: great thanks
+    category: thanks
+  - phrase: appreciate it
+    category: thanks
+  - phrase: much appreciated
+    category: thanks
+  - phrase: thanks for your help
+    category: thanks
+  - phrase: thank you for your help
+    category: thanks
+  - phrase: perfect thanks
+    category: thanks
+  - phrase: got it thanks
+    category: thanks
+  - phrase: ty
+    category: thanks

@@ -188,7 +188,10 @@ async def test_can_answer_false_emits_zero_deltas(monkeypatch):
 
     result = await graph_module._answer_node(state)
 
-    assert result == {"can_answer": False, "cited_chunk_labels": [], "citations": []}
+    # Task 3.4.e: _reset_turn_state_node now owns cited_chunk_labels/
+    # citations' own fresh-turn defaults -- _answer_node's own can_answer
+    # =false branch no longer redundantly re-sets them.
+    assert result == {"can_answer": False}
     assert events == []
 
 
@@ -205,11 +208,19 @@ async def test_can_answer_false_routes_to_the_no_answer_fallback_stub(monkeypatc
     _patch_retrieve_with_fixed_chunks(monkeypatch, [_chunk("doc-a", "Some retrieved text.")])
     graph = await _fresh_real_graph(monkeypatch)
     identity = _identity()
+    conversation_id = uuid.uuid4()
 
-    with pytest.raises(NotImplementedError, match="Step 3.4.e"):
-        await _collect(
-            run_turn(graph, identity, uuid.uuid4(), {"messages": ["anything"]})
-        )
+    # Task 3.4.e: no_answer_fallback is real now -- reaches the fixed
+    # reply instead of raising.
+    results = await _collect(
+        run_turn(graph, identity, conversation_id, {"messages": ["anything"]})
+    )
+    assert results
+
+    snapshot = await read_state(graph, identity, conversation_id)
+    assert snapshot.values["messages"][-1].content == graph_module._sanitize_answer_text(
+        graph_module._NO_ANSWER_FALLBACK_TEXT
+    )
 
 
 async def test_append_only_violation_fails_loudly(monkeypatch):
@@ -230,18 +241,25 @@ async def test_append_only_violation_fails_loudly(monkeypatch):
         await graph_module._answer_node(state)
 
 
-async def test_failure_before_any_emission_is_not_wrapped(monkeypatch):
-    # fail_after=0: the model never yields a single real chunk -- the
-    # case .with_fallbacks() is designed to catch; this node must not
-    # interfere with that by wrapping it into a different exception type.
+async def test_failure_before_any_emission_returns_the_dependency_failure_state(monkeypatch):
+    # Task 3.4.e: this test's own premise CHANGED, deliberately, not
+    # updated to paper over it -- fail_after=0 (the model never yields a
+    # single real chunk, the exact case .with_fallbacks() is designed to
+    # catch in production; this fake stands in for the WHOLE chain
+    # already being exhausted) previously propagated raw and uncaught
+    # (3.4.b's own documented behavior). Task 3.4.e's own job is exactly
+    # catching this and converting it into the fixed dependency-failure
+    # reply instead -- see _dependency_failure_fallback_node and its own
+    # new graph wiring.
     _patched(
         monkeypatch,
         FakeAnswerToolChatModel(arg_chunks=["irrelevant"], fail_after=0),
     )
     state = {"messages": [HumanMessage(content="q")], "retrieved_chunks": []}
 
-    with pytest.raises(RuntimeError, match="scripted failure"):
-        await graph_module._answer_node(state)
+    result = await graph_module._answer_node(state)
+
+    assert result == {"can_answer": False, "dependency_failed": True}
 
 
 async def test_failure_after_emission_began_raises_the_named_mid_stream_error(monkeypatch):
@@ -281,9 +299,14 @@ async def test_mid_stream_failure_leaves_no_completed_aimessage_in_the_checkpoin
     identity = _identity()
     conversation_id = uuid.uuid4()
 
+    # Task 3.4.f: NOT "hello" -- that is now a real, matched greeting
+    # phrase (backend/config/greeting_phrases.yaml), which would route
+    # this turn to the real guardrail reply instead of retrieve/gate/
+    # answer, never reaching the mid-stream failure this test exists to
+    # prove at all.
     with pytest.raises(graph_module.AnswerStreamFailedMidStreamError):
         await _collect(
-            run_turn(graph, identity, conversation_id, {"messages": ["hello"]})
+            run_turn(graph, identity, conversation_id, {"messages": ["what color is the sky"]})
         )
 
     snapshot = await read_state(graph, identity, conversation_id)
