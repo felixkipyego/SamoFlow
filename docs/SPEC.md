@@ -475,7 +475,7 @@ React SPA served statically.
 | Budget | Target |
 |---|---|
 | Session creation | p95 under 100ms (no external calls) |
-| Time to first token | First turn p50 under 1.5s, p95 under 3s. Follow-ups p50 under 2s (includes the rewrite step) |
+| Time to first token | First turn p50 under 1.5s, p95 under 3s. Follow-ups p50 under 2s (includes the rewrite step), p95 under 3.5s (added 2026-10-13, Step 3.5 research — first-turn p95 plus the same 500ms allowance already given to follow-up p50) |
 | Retrieval (hybrid) | p95 under 100ms at pilot scale |
 | Concurrency | Starting goal of 200 concurrent streams on the single server |
 | Widget | Loader about 4KB gzipped, chat UI about 60KB gzipped, no requests before the launcher click beyond the loader |
