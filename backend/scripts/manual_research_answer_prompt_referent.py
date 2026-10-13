@@ -31,25 +31,10 @@
 import asyncio
 import os
 import uuid
-from urllib.parse import urlsplit
 
-_ALLOWED_TEST_HOSTS = frozenset({"localhost", "127.0.0.1"})
+from scripts._shared import point_test_env_at_env_vars
 
-
-def _point_test_env_at_env_vars() -> None:
-    required = ("TEST_QDRANT_URL", "TEST_QDRANT_API_KEY", "TEST_QDRANT_READ_ONLY_API_KEY")
-    missing = [name for name in required if not os.environ.get(name)]
-    if missing:
-        raise SystemExit(f"Missing required env var(s): {', '.join(missing)}.")
-    url = os.environ["TEST_QDRANT_URL"]
-    if urlsplit(url).hostname not in _ALLOWED_TEST_HOSTS:
-        raise SystemExit(f"TEST_QDRANT_URL host is not in {sorted(_ALLOWED_TEST_HOSTS)}.")
-    os.environ["QDRANT_URL"] = url
-    os.environ["QDRANT_API_KEY"] = os.environ["TEST_QDRANT_API_KEY"]
-    os.environ["QDRANT_READ_ONLY_API_KEY"] = os.environ["TEST_QDRANT_READ_ONLY_API_KEY"]
-
-
-_point_test_env_at_env_vars()  # MUST run before any `app.*` import below
+point_test_env_at_env_vars()  # MUST run before any `app.*` import below
 
 from langchain.chat_models import init_chat_model  # noqa: E402
 

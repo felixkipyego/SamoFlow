@@ -34,40 +34,12 @@
 # production code directly -- this script proves against the REAL
 # retrieval path, not a separately maintained copy of it.
 import asyncio
-import os
 import time
 import uuid
-from urllib.parse import urlsplit
 
-_ALLOWED_TEST_HOSTS = frozenset({"localhost", "127.0.0.1"})
+from scripts._shared import point_test_env_at_env_vars
 
-
-def _point_test_env_at_env_vars() -> None:
-    # Same shape as manual_research_gate_signal.py's own function of the
-    # same name (copied, not imported, to keep this script fully
-    # self-contained -- see that script's own header for why importing
-    # it wholesale, rather than just its data, would be the wrong call).
-    required = ("TEST_QDRANT_URL", "TEST_QDRANT_API_KEY", "TEST_QDRANT_READ_ONLY_API_KEY")
-    missing = [name for name in required if not os.environ.get(name)]
-    if missing:
-        raise SystemExit(
-            f"Missing required env var(s): {', '.join(missing)}. Start test-qdrant first "
-            "(`make test-qdrant`) and export its URL/keys -- see this script's own header."
-        )
-    url = os.environ["TEST_QDRANT_URL"]
-    host = urlsplit(url).hostname
-    if host not in _ALLOWED_TEST_HOSTS:
-        raise SystemExit(
-            f"TEST_QDRANT_URL host {host!r} is not in the allowed test-host list "
-            f"{sorted(_ALLOWED_TEST_HOSTS)} -- refusing to run against a non-local Qdrant "
-            "instance."
-        )
-    os.environ["QDRANT_URL"] = url
-    os.environ["QDRANT_API_KEY"] = os.environ["TEST_QDRANT_API_KEY"]
-    os.environ["QDRANT_READ_ONLY_API_KEY"] = os.environ["TEST_QDRANT_READ_ONLY_API_KEY"]
-
-
-_point_test_env_at_env_vars()  # MUST run before any `app.*` import below
+point_test_env_at_env_vars()  # MUST run before any `app.*` import below
 
 from openai import AsyncOpenAI  # noqa: E402
 
