@@ -456,41 +456,66 @@ _AFTER_GATE_PATH_MAP = {
 }
 
 
-# Task 3.4.b [SECURITY]: the Answer tool schema docs/SPEC.md §6.3's own
-# "answer" bullet names directly (`{can_answer, answer, used_chunk_ids}`)
-# -- field order DELIBERATE, confirmed live to be load-bearing, not
-# cosmetic: `can_answer` first, `used_chunk_ids` second, `answer` LAST.
-# OpenAI's own "Structured Outputs" strict JSON-schema mode generates
-# tool-call arguments in EXACTLY this declared field order (confirmed
-# live, real `gpt-4o-mini` call, via `.bind_tools()`'s own streamed
-# `tool_call_chunks`) -- so `can_answer` (and, cheaply, `used_chunk_ids`,
-# needed by 3.4.c) are both fully known BEFORE the model has emitted a
-# single character of `answer`, with ZERO answer-text bytes existing in
-# the stream at that point. Putting `answer` anywhere earlier would mean
-# some answer text might already be streaming before `can_answer`
-# resolves -- the one requirement this design cannot compromise on (a
-# visitor must never see a partial "real" answer immediately followed by
-# the fixed fallback reply).
+# Task 3.4.b [SECURITY], REORDERED at Task 3.4.g's own latency task
+# (2026-10-13): the Answer tool schema's own field order -- `can_answer`
+# first, `answer` SECOND, `used_chunk_ids` LAST. `can_answer` FIRST is
+# the one requirement this design cannot compromise on and does NOT
+# change here: OpenAI's own "Structured Outputs" strict JSON-schema mode
+# generates tool-call arguments in EXACTLY the declared field order
+# (confirmed live, real `gpt-4o-mini` call, via `.bind_tools()`'s own
+# streamed `tool_call_chunks`), so `can_answer` is always fully known
+# before a single character of anything else streams -- ZERO answer-text
+# bytes ever exist in the stream before it resolves, regardless of what
+# follows it.
 #
-# `.with_structured_output()` was evaluated FIRST and rejected: confirmed
-# live, `.astream()` on a `with_structured_output()`-wrapped model yields
-# exactly ONE chunk -- the complete, fully-parsed final object -- no
-# incremental delivery at all, regardless of the underlying model's own
-# token-by-token generation. The lower-level `.bind_tools()` API is what
-# actually streams incremental `tool_call_chunks`; `can_answer`/`answer`
-# are reconstructed from those, below, via `parse_partial_json()` (an
-# EXISTING `langchain_core` utility, not a hand-rolled JSON parser --
-# confirmed live it correctly handles a trailing incomplete escape
-# sequence without ever producing a shrinking/incorrect partial value).
+# What DID change, and why: Task 3.4.g's own real, measured full-turn
+# latency data (opt-in script, real OpenAI calls) found the p50 time to
+# first visible answer text missing docs/SPEC.md §17's own 1.5s budget
+# by a real, measured margin, and found that the gap sat almost entirely
+# between the model's first streamed chunk and the first VISIBLE answer
+# token -- i.e. inside the `used_chunk_ids`-then-`answer` preamble the
+# ORIGINAL order forced a visitor to wait through before any text could
+# start. Moving `used_chunk_ids` to LAST means `answer` text can start
+# streaming the moment `can_answer` resolves true, with no list of
+# labels to wait for first. Re-run of the same opt-in script, same
+# corpus, confirmed a measurable p50 improvement with this reorder (see
+# PROJECT_SPEC.md's own Task 3.4.g latency follow-up entry for the real
+# before/after numbers) -- kept because it measurably helped, every
+# existing test still passed, and a dedicated adversarial pass (below
+# and in `test_agent_graph_answer.py`/`test_agent_graph_citations.py`)
+# found nothing new: a model emitting `used_chunk_ids` out of the
+# DECLARED order anyway, duplicate keys, a list truncated at stream end,
+# and ids interleaved inside the answer text were all exercised live and
+# found already handled correctly by the EXISTING intersection-only
+# design (`_build_citations()` below) -- this reorder changes nothing
+# about citation CORRECTNESS, only WHEN citation-building runs (see
+# `_answer_node`'s own updated docstring: now triggered once, after the
+# stream completes, using the complete `used_chunk_ids` list, never
+# incrementally mid-stream).
+#
+# `.with_structured_output()` was evaluated FIRST (at 3.4.b) and
+# rejected: confirmed live, `.astream()` on a `with_structured_output()`-
+# wrapped model yields exactly ONE chunk -- the complete, fully-parsed
+# final object -- no incremental delivery at all, regardless of the
+# underlying model's own token-by-token generation. The lower-level
+# `.bind_tools()` API is what actually streams incremental `tool_call_
+# chunks`; `can_answer`/`answer`/`used_chunk_ids` are reconstructed from
+# those, below, via `parse_partial_json()` (an EXISTING `langchain_core`
+# utility, not a hand-rolled JSON parser -- confirmed live it correctly
+# handles a trailing incomplete escape sequence without ever producing a
+# shrinking/incorrect partial value, and, re-confirmed at this reorder,
+# a trailing incomplete LIST element too -- see `_build_citations()`'s
+# own intersection check for why an auto-closed, possibly-garbled
+# trailing label is still safe).
 class Answer(BaseModel):
     can_answer: bool = Field(
         description="True only if the DATA blocks actually contain enough information to answer."
     )
-    used_chunk_ids: list[str] = Field(
-        description="Labels (e.g. 'c1') of DATA blocks actually used. Empty if can_answer is false."
-    )
     answer: str = Field(
         description="The answer, grounded only in the DATA blocks. Empty if can_answer is false."
+    )
+    used_chunk_ids: list[str] = Field(
+        description="Labels (e.g. 'c1') of DATA blocks actually used. Empty if can_answer is false."
     )
 
 
@@ -519,6 +544,16 @@ class AnswerStreamFailedMidStreamError(Exception):
     from "it started, then broke" (it didn't, and can't, here) -- see
     PROJECT_SPEC.md's own new §9 marker (owner Step 4.1) for the
     visitor-facing rendering decision this still leaves open.
+
+    **Task 3.4.g**: since citation-building now happens only AFTER the
+    streaming loop completes (`_answer_node`'s own post-loop code, using
+    the final, fully-parsed `used_chunk_ids`), raising this exception --
+    which only ever happens FROM INSIDE that loop -- means citation
+    building never runs at all for this turn. No partial or guessed
+    citation list is ever produced for an answer that did not finish;
+    `test_agent_graph_answer.py`'s own dedicated test proves this by
+    inspecting the node's real return value/raised state, not merely by
+    reasoning about control flow.
     """
 
 
@@ -771,20 +806,36 @@ async def _answer_node(state: AgentState) -> dict:
     docstring, the two exception classes, and `_sanitize_answer_text()`'s
     own docstring for the full reasoning):
       - ZERO answer-text bytes are emitted before `can_answer` is known
-        to be true (the schema's own field order guarantees this).
+        to be true (the schema's own field order guarantees this, and
+        this specific guarantee is UNCHANGED by the 3.4.g reorder below
+        -- `can_answer` still comes first).
       - `can_answer=false` emits nothing and returns immediately --
         routed to the fixed fallback path by `build_graph()`'s own
         conditional edge, not decided in this node.
-      - Citations are built from `used_chunk_ids` the MOMENT that field
-        resolves (field order: `can_answer` -> `used_chunk_ids` ->
-        `answer`, confirmed live -- `used_chunk_ids` is always fully
-        known before any `answer` text starts streaming) -- this is for
-        the persisted `citations` state field (the "Sources shown" list,
-        docs/SPEC.md §6.3), NOT a sanitiser allow-list: `_sanitize_
-        answer_text()` does not take or need one, so the answer text's
-        OWN sanitisation has no dependency on citations being ready at
-        all (a simplification from the replaced design, see this
-        module's own header comment).
+      - **Citation building moved at Task 3.4.g** (field order now
+        `can_answer` -> `answer` -> `used_chunk_ids`, reordered for
+        latency -- see `Answer`'s own docstring for the real measured
+        effect): citations are no longer built incrementally mid-stream
+        from a partial `used_chunk_ids` snapshot. They are now built
+        EXACTLY ONCE, after the streaming loop completes successfully,
+        from the FINAL, fully-parsed `used_chunk_ids` list -- the same
+        post-loop `parse_partial_json(accumulated_args)` call this node
+        already made to recover the final answer text, reused rather
+        than a second, separate parse. This is NOT merely "moved later
+        for convenience": it is a STRICTLY SAFER trigger than the one it
+        replaces, which relied on "the `answer` key appearing in the
+        partial parse means `used_chunk_ids` is already closed" being
+        true under the field order THEN in force -- the new trigger
+        ("the loop exited without raising") has no dependency on field
+        order at all, so it stays correct even against a model that
+        streams the declared tool-call fields out of order (exercised
+        directly, adversarially, in this task's own test suite).
+        Consequence, BY CONSTRUCTION, not by a separate check: a
+        mid-stream failure (`AnswerStreamFailedMidStreamError` below)
+        means the loop never completed, so this post-loop citation-
+        building code never runs at all, and no `citations` are ever
+        returned -- see that exception's own docstring and this task's
+        own dedicated test proving it.
       - Every emitted RAW (pre-sanitisation) delta is a strict extension
         of what came before; a non-extending partial parse fails loudly
         (`AnswerStreamNotAppendOnlyError`), never emits inconsistent text.
@@ -797,8 +848,8 @@ async def _answer_node(state: AgentState) -> dict:
         AFTER sanitised emission has begun raises `AnswerStreamFailed
         MidStreamError` -- `.with_fallbacks()` cannot recover a stream it
         has already started delivering (confirmed live) -- and no
-        partial answer is ever returned as a completed `AIMessage` in
-        either case.
+        partial answer, and (since Task 3.4.g) no citations either, is
+        ever returned as completed state in either case.
     """
     writer = get_stream_writer()
     question = _latest_human_message_text(state["messages"])
@@ -811,8 +862,6 @@ async def _answer_node(state: AgentState) -> dict:
     emitted_sanitized = ""
     can_answer_known = False
     can_answer_value = False
-    citations: list[Citation] = []
-    citations_built = False
     started_emitting = False
     try:
         async for chunk in model.astream(messages):
@@ -834,22 +883,6 @@ async def _answer_node(state: AgentState) -> dict:
 
             if not can_answer_known or not can_answer_value:
                 continue
-
-            # Triggered on "answer" (NOT "used_chunk_ids") appearing in
-            # the partial parse -- a real bug, caught by this task's own
-            # test suite, not assumed correct: triggering on the KEY
-            # NAME "used_chunk_ids" first appearing can fire while that
-            # LIST ITSELF is still mid-stream (e.g. `["c1", "c"]` a few
-            # characters before it finishes becoming `["c1", "c99"]`),
-            # silently locking in citations from an incomplete snapshot.
-            # The schema's own field order guarantees "used_chunk_ids"
-            # is fully closed out the moment "answer" starts appearing
-            # at all (that key cannot exist in valid JSON before the
-            # prior one has closed), so THAT is the correct trigger.
-            if not citations_built and "answer" in partial:
-                citations_built = True
-                cited_labels = partial.get("used_chunk_ids") or []
-                citations = _build_citations(cited_labels, retrieved_chunks)
 
             new_answer = partial.get("answer") or ""
             if len(new_answer) < len(emitted_raw_answer) or not new_answer.startswith(
@@ -889,8 +922,15 @@ async def _answer_node(state: AgentState) -> dict:
         logger.warning("chat model failed before any answer text was emitted: %s", exc)
         return {"can_answer": False, "dependency_failed": True}
 
+    # Citation building, Task 3.4.g: ONLY reached when the loop above
+    # exited normally (the stream genuinely completed) -- a mid-stream
+    # failure raises out of the try block above and never reaches here,
+    # so no citations are ever built or returned for an incomplete
+    # answer (see this node's own docstring and `AnswerStreamFailed
+    # MidStreamError`'s own docstring).
     final = parse_partial_json(accumulated_args) or {}
     cited_labels = final.get("used_chunk_ids") or []
+    citations = _build_citations(cited_labels, retrieved_chunks)
     return {
         "can_answer": True,
         "messages": [AIMessage(content=emitted_sanitized)],

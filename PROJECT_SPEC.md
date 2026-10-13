@@ -3151,7 +3151,7 @@ Researched first (the prior Step 3.4 research task, reported and accepted before
 | 3.4.d [SECURITY] | Gate: light research first (RRF scores are rank-based, not relevance-calibrated — evaluate a calibrated signal, e.g. top dense cosine similarity or a Qdrant `score_threshold` floor, confirm live what 1.19.1 supports) and report before building; then the mechanism, a platform-default `Settings` field, provisional threshold + ASSUMPTION, tuned in 3.7 | Done |
 | 3.4.e | Fallback text template (dashboard support details) + the fixed dependency-failure reply | Done |
 | 3.4.f | Rule 2: greeting/thanks deterministic phrase list (short messages only); unsafe/abusive — research first (OpenAI's moderation endpoint: latency measured live, cost, fit with §6.2's "no LLM hop"), report before building | Done (greeting/thanks built; unsafe/abusive research-only, per this row's own wording — not built) |
-| 3.4.g | Close-out: unsafe/abusive deferred for the pilot (dated deviation + replacement marker, owner Step 6.4); duplication check after 3.4.d/Part 0/3.4.e/3.4.f recorded, counter reset to n=0; real full-turn latency measurement (N=30 real turns, p50=1698ms MISS/p95=2535ms PASS against §17, one lever experiment run, no default changed); real-model injection probe (4 planted pages, structural layers held); marker review; acceptance against §6.1/§6.2/§6.3/§16, not rounded up; closure summary; full verification | Done |
+| 3.4.g | Close-out: unsafe/abusive deferred for the pilot (dated deviation + replacement marker, owner Step 6.4); duplication check after 3.4.d/Part 0/3.4.e/3.4.f recorded, counter reset to n=0; real full-turn latency measurement (N=30 real turns, p50=1698ms MISS/p95=2535ms PASS against §17 — **superseded by the latency follow-up task below: p50=1167ms PASS after the Answer-schema reorder**); real-model injection probe (4 planted pages, structural layers held); marker review; acceptance against §6.1/§6.2/§6.3/§16, not rounded up; closure summary; full verification | Done |
 
 **Decisions, Q1-Q8, each confirmed/approved before building:**
 
@@ -4753,6 +4753,16 @@ changed. Recorded for whoever next tunes this (most naturally Step 3.7's
 own golden-set tuning pass, or a future model-choice decision) — a
 real number to start from, not a guess.
 
+**SUPERSEDED (2026-10-13, latency follow-up task, see that entry below)**:
+this p50 MISS was traced to the `can_answer`/`used_chunk_ids`/`answer`
+preamble, not retrieval or prompt size — the `Answer` schema was
+reordered (`used_chunk_ids` moved last) and a re-run of this SAME script
+measured **p50 = 1167ms, p95 = 2349ms**, both now PASSING §17. The
+1698ms/1647ms figures above are the real, honest record of what was
+measured AT THE TIME and are left as written, not rewritten — see the
+follow-up entry for the real before/after comparison and why the figures
+above no longer describe current behavior.
+
 **Part 2 — real-model injection probe**
 (`backend/scripts/manual_research_injection_probe.py`, new, opt-in,
 never in CI). Planted four adversarial pages (one chunk each, real
@@ -5009,6 +5019,191 @@ database: **772 passed, 334 skipped** (unchanged — no test or logic
 touched by this check itself). `git status --short` named and cross-
 checked file by file at the time this check was run: clean (3.4.e/3.4.f
 were already committed as `ddc412a` before this check began).
+
+### Latency follow-up to Step 3.4.g — Answer schema reorder [SECURITY] (2026-10-13)
+
+**Flagged per rule 2, per direct instruction**: Step 3.4 is already marked
+Done; this task deliberately reopens and modifies 3.4.b/3.4.c's own
+production logic (`Answer`'s field order, `_answer_node`'s citation-
+building trigger) — authorized explicitly, scoped narrowly, not a silent
+reopening.
+
+**Part 1 — per-phase medians from 3.4.g's own already-collected data (no
+new runs)**. Challenging the prompt's own framing first, per the senior-
+engineer-judgment rule: the four phases requested — embedding, Qdrant,
+"model time to first token event", and "first token event -> first
+VISIBLE answer text" — are NOT all separately present in 3.4.g's own
+data. What was actually instrumented (`manual_research_full_turn_
+latency.py`'s own `_Instrumentation` class): `embedding_ms`, `qdrant_ms`,
+and `first_token_ms` — this last one is a timestamp on the FIRST call to
+the real stream writer inside `_answer_node`, which (3.4.g's own
+confirmed finding) only ever fires on real, non-empty, already-sanitised
+answer text. There was no separate instrumentation of the model's own
+first raw streamed chunk (the first `tool_call_chunks` event from `model.
+astream()`, before any field has even resolved) — so "model time to
+first token event" and "first token event -> first visible answer text"
+as two SEPARATE numbers were never captured; only their COMBINED value
+is recoverable from existing data. Reported honestly as one combined
+number, not split into two others invented from nothing.
+
+Combined figure, baseline (3.4.g's own 30-turn run, default `retrieval_
+k`): `first_token_ms` p50 (1698ms) minus `embedding_ms` p50 (308ms) minus
+`qdrant_ms` p50 (17ms) = **~1373ms median** sitting inside "model call
+start -> first visible text", versus embedding+Qdrant's own combined
+~325ms. This combined bucket is unambiguously MATERIAL — it is ~81% of
+the 1698ms p50 total and the entire reason §17's own 1500ms p50 target
+was missed (embedding+Qdrant alone would clear it with over 1100ms to
+spare). Whether that ~1373ms is mostly network/time-to-first-chunk or
+mostly the `can_answer`/`used_chunk_ids` preamble specifically could not
+be separated from old data — Part 2's own reorder experiment answers
+this empirically, by intervention, rather than by a decomposition the
+existing instrumentation cannot produce.
+
+**Part 2 — the reorder experiment, run for real.** `Answer`'s own field
+order changed from `can_answer -> used_chunk_ids -> answer` to `can_
+answer -> answer -> used_chunk_ids` (`app/agent/graph.py`) — `can_answer`
+UNCHANGED as the first field (the one requirement that cannot move: zero
+answer-text bytes before `can_answer` resolves, confirmed still true
+below). Citation building moved from "triggered when `answer` first
+appears in the partial parse" (3.4.c's own design, which relied on the
+OLD field order to guarantee `used_chunk_ids` was already closed at that
+point) to "triggered once, after the streaming loop completes normally,
+from the final, fully-parsed `used_chunk_ids`" — reusing the SAME
+post-loop `parse_partial_json()` call `_answer_node` already made for the
+final answer text, not a second parse. Mid-stream failure: citation-
+building code is now ONLY reachable from the success path, after the
+loop — `AnswerStreamFailedMidStreamError` raises from inside the loop and
+never reaches it, so no citations are ever returned for an incomplete
+answer, BY CONSTRUCTION; proven directly, not just reasoned about, by
+`test_mid_stream_failure_leaves_no_completed_aimessage_in_the_checkpoint`'s
+own two new assertions (`citations == []`, `cited_chunk_labels == []` on
+the real checkpointed state after a real mid-stream failure through the
+real graph).
+
+Re-ran the SAME opt-in script (`manual_research_full_turn_latency.py`),
+same corpus, same 10 "A: clearly answerable" queries, N=30, default
+`retrieval_k`. Real result: `first_token_ms` **p50 = 1167ms (was 1698ms),
+p95 = 2349ms (was 2535ms)**; `total_ms` p50 = 1537ms (was 1904ms), p95 =
+2650ms (was 2702ms); embedding/Qdrant sub-timings unchanged within noise
+(p50 306ms/21ms); `can_answer=True` 30/30. Against §17 (p50 < 1.5s, p95 <
+3s): **BOTH NOW PASS** (p50 1167ms, p95 2349ms) — the prior p50 MISS is
+resolved. A ~531ms (31%) p50 improvement from a field-order change alone,
+confirming Part 1's own finding: the preamble, not the model's raw
+network time, was the dominant cost sitting between the model's first
+chunk and the first visible token.
+
+**Adversarial pass, per direct instruction, each converted into a
+committed regression test (`test_agent_graph_answer.py`)**:
+1. *A model emitting `used_chunk_ids` BEFORE `answer` anyway, ignoring
+   the newly-declared order* (hand-built JSON, old-order byte layout) —
+   handled correctly: zero text before `can_answer`, correct final text,
+   correct citations. The post-loop trigger has no dependency on field
+   order at all (only "did the loop exit without raising"), so this was
+   expected to hold, and does.
+2. *Duplicate `used_chunk_ids` keys* in the raw JSON — confirmed live
+   (`parse_partial_json()`, which builds on Python's own `json` parsing)
+   resolves to the LAST occurrence, never merges or crashes; the node
+   correctly cites only the last value.
+3. *A list truncated at stream end* (the model's own stream simply ends
+   before `used_chunk_ids` closes, no exception) — confirmed live that
+   `parse_partial_json()` auto-closes an unterminated trailing string
+   element rather than dropping it, which COULD in principle manufacture
+   a label the model never finished intending; the EXISTING `_build_
+   citations()` intersection check already bounds this risk completely
+   (an out-of-bounds or invalid label is dropped, logged, never trusted)
+   — proven directly, not assumed, with retrieved_chunks deliberately
+   sized so the truncated-and-auto-closed label is out of bounds and
+   must be dropped. Answer text itself (already closed before the
+   truncation point) delivers in full, unaffected.
+4. *Chunk-id-looking text interleaved inside the free-text answer itself*
+   (e.g. "checking c1 and c2 in the guide") — zero effect on the real
+   citations list; citations are read only from the structured `used_
+   chunk_ids` field, never by scanning answer prose.
+No new finding above the bar — all four behaved exactly as the
+intersection-based design already predicted. **Decision: KEEP the
+reorder** — p50 measurably improved (passed §17, not just "better"),
+every existing test passes (see Verified below), and the adversarial
+pass found nothing new.
+
+**Prompt caching — report only, no change.** The system message
+(`_SYSTEM_INSTRUCTION`, `_build_messages()`) is already correctly
+POSITIONED first, with nothing per-request ahead of it — a necessary
+condition for OpenAI's automatic prefix caching, confirmed by reading
+`_build_messages()` directly (`[SystemMessage(...), HumanMessage(data_
+section + question)]`, always in that order, never interpolated). It is
+NOT long enough to actually benefit TODAY, though: measured live
+(`tiktoken`, the chat model's own `gpt-4o-mini` encoding), `_SYSTEM_
+INSTRUCTION` is **109 tokens** — far under OpenAI's own documented 1024-
+token minimum for automatic caching to activate at all, and the content
+immediately following it (the DATA blocks + question) varies every
+single turn, so no caching benefit exists today regardless of position.
+Forward-looking note, not a recommendation to act now: if the system
+instruction is ever extended (e.g. Phase 6's own per-tenant tone/greeting
+customization, docs/SPEC.md §6.1) past roughly 1024 tokens, it is already
+positioned to benefit from caching automatically, with no per-request
+content breaking the prefix — worth re-checking at that point, not
+before.
+
+Verified: `make lint` clean. Full `backend/tests` without a test
+database: **776 passed, 334 skipped** (+4 — the four new adversarial
+tests; zero skips are test-db-gated, unaffected here). Changed tests
+(`test_agent_graph_answer.py` plus every file sharing `build_fake_
+answer_arg_chunks()`/`FakeAnswerToolChatModel` — `test_agent_graph_
+citations.py`, `test_agent_graph_gate.py`, `test_agent_graph_retrieve.py`,
+`test_agent_graph_turn_reset.py`, `test_agent_graph.py`) run live 3
+times against real test-db/test-qdrant: **74 passed, 0 skipped, each of
+3 runs** (identical every time). `make test-all` (both real services,
+fresh containers): **1110 passed** (+4), 9 warnings, 0 failed, both
+services confirmed fully removed afterward. `make hooks`: **75 marker
+lines across 15 categories** (unchanged — only dated explanatory
+comments added, no new TODO/ASSUMPTION/UNCERTAIN). `make lock-check`:
+exit 0, clean (no dependency touched). `make audit`: "No known
+vulnerabilities found." `git status --short` named and cross-checked
+file by file: `PROJECT_SPEC.md`, `backend/app/agent/graph.py`,
+`backend/tests/conftest.py`, `backend/tests/test_agent_graph_answer.py`
+(all modified) — exactly the expected four, no `.env`, no migration, no
+new dependency. The two opt-in scripts from 3.4.g were re-run for real
+(Part 2's own before/after numbers above), not simulated.
+
+Counter: **n = 1** (this task — the first against the n=0 reset at
+3.4.g's own duplication check; 3 more before the next one is due per
+rule 9).
+
+**Senior engineer check:**
+1. **Chose not to build**: a separate instrumentation pass to split
+   "model time to first raw chunk" from "preamble generation time" —
+   Part 2's own empirical before/after already answers the question Part
+   1 couldn't decompose, more directly and more cheaply than adding a
+   fifth monkeypatch to a script that already has four.
+2. **Main trade-off accepted**: citation-building now happens entirely
+   after the stream completes rather than as early as the old design
+   allowed under the OLD field order — meaning a (hypothetical, future)
+   consumer wanting citations to stream incrementally ahead of the full
+   answer would need a new mechanism; not a real cost today since
+   nothing in this codebase reads `citations` before the turn completes
+   (checked: `_route_after_answer`/`read_state()` both only run after
+   `_answer_node` returns).
+3. **Pushed back on / would have done differently**: Part 1, directly —
+   the prompt asked for two numbers ("model time to first token event"
+   and "first token event -> first visible answer text") that the
+   existing instrumentation cannot actually produce; reported the honest
+   combined number and explained the gap rather than inventing a split.
+   Nothing else in scope needed pushback — the reorder's own safety
+   invariant (`can_answer` first) was correctly identified as
+   non-negotiable in the prompt itself, and the keep/revert criteria were
+   genuinely decisive (clear improvement, all tests passed, nothing new
+   from the adversarial pass), not a close call needing a different
+   judgment.
+4. **Highest production risk in this change**: a model provider that
+   does NOT respect the declared Structured Outputs field order at all
+   (adversarial test 1 covers a hand-crafted BYTE-LEVEL simulation of
+   this, not a second real-provider proof) — OpenAI's own strict-mode
+   guarantee is what this whole design leans on; Anthropic's own field-
+   order behavior remains separately gated by the existing two-key
+   switch (`chat_model_secondary_verified`) and `manual_check_chat_
+   model_streaming.py`, unchanged by this task, and must be re-run
+   against the new field order specifically before that key is ever
+   flipped on for real.
 
 ### Estimates to measure
 
@@ -5457,7 +5652,7 @@ here.
 
 ## 8. Task counter since the last duplication check
 
-**n = 0** (reset 2026-10-13, following the duplication check after 3.4.d/Part 0/3.4.e/3.4.f — see that entry, under Step 3.4.g, for the full findings and its own `Verified:` paragraph. No task counted against the new count yet.)
+**n = 1** (the latency follow-up to Step 3.4.g, Answer schema reorder [SECURITY] — counted against the n=0 reset at 3.4.g's own duplication check after 3.4.d/Part 0/3.4.e/3.4.f. 3 more before the next check is due per rule 9.)
 
 ## 9. Open markers
 

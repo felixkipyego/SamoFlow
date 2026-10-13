@@ -1174,9 +1174,14 @@ def build_fake_answer_arg_chunks(
     *, can_answer: bool, used_chunk_ids: list[str], answer: str, split_every: int = 3
 ) -> list[str]:
     # Field order matches the real Answer schema exactly (app/agent/
-    # graph.py) -- can_answer, used_chunk_ids, answer -- since that order
-    # is itself load-bearing (confirmed live against real OpenAI) and
-    # every test relying on this helper depends on it being right.
-    payload = {"can_answer": can_answer, "used_chunk_ids": used_chunk_ids, "answer": answer}
+    # graph.py) -- can_answer, answer, used_chunk_ids -- REORDERED at
+    # Task 3.4.g (was can_answer/used_chunk_ids/answer) for measured
+    # latency reasons, see that schema's own docstring. This helper's own
+    # keyword-argument NAMES are unchanged (every existing caller passes
+    # them by keyword, not position), only the payload dict's own
+    # iteration order below, since that order is itself load-bearing
+    # (confirmed live against real OpenAI) and every test relying on this
+    # helper depends on it matching the real schema.
+    payload = {"can_answer": can_answer, "answer": answer, "used_chunk_ids": used_chunk_ids}
     full = json.dumps(payload)
     return [full[i : i + split_every] for i in range(0, len(full), split_every)]

@@ -267,10 +267,13 @@ async def test_failure_after_emission_began_raises_the_named_mid_stream_error(mo
         can_answer=True, used_chunk_ids=["c1"], answer="The sky is blue today."
     )
     # Confirmed, by inspecting build_fake_answer_arg_chunks()'s own output
-    # for this exact input, that index 22 falls after real answer-text
-    # chunks have already been yielded ("Th", "e s", "ky " by then).
+    # for this exact input (REORDERED field order, Task 3.4.g -- can_
+    # answer, answer, used_chunk_ids -- recomputed, not left stale after
+    # the reorder), that index 14 falls mid-way through real answer-text
+    # chunks already yielded ("The sky is bl" so far), with more of the
+    # answer and the whole used_chunk_ids list still to come.
     events = _patched(
-        monkeypatch, FakeAnswerToolChatModel(arg_chunks=chunks, fail_after=22)
+        monkeypatch, FakeAnswerToolChatModel(arg_chunks=chunks, fail_after=14)
     )
     state = {
         "messages": [HumanMessage(content="q")],
@@ -291,7 +294,7 @@ async def test_mid_stream_failure_leaves_no_completed_aimessage_in_the_checkpoin
     chunks = build_fake_answer_arg_chunks(
         can_answer=True, used_chunk_ids=["c1"], answer="The sky is blue today."
     )
-    _patched(monkeypatch, FakeAnswerToolChatModel(arg_chunks=chunks, fail_after=22))
+    _patched(monkeypatch, FakeAnswerToolChatModel(arg_chunks=chunks, fail_after=14))
     _patch_retrieve_with_fixed_chunks(
         monkeypatch, [_chunk("doc-a", "The sky is blue today.")]
     )
@@ -314,13 +317,147 @@ async def test_mid_stream_failure_leaves_no_completed_aimessage_in_the_checkpoin
     assert not any(isinstance(m, AIMessage) for m in messages), (
         f"expected no AIMessage persisted after a mid-stream failure, got: {messages}"
     )
+    # Task 3.4.g: citations are now built ONLY after the stream completes
+    # -- a mid-stream failure must leave none, not a partial/guessed list.
+    assert snapshot.values.get("citations") == []
+    assert snapshot.values.get("cited_chunk_labels") == []
 
 
 # --- The real Answer schema's own field order (load-bearing) ---------------
 
 
-def test_answer_schema_field_order_is_can_answer_then_used_chunk_ids_then_answer():
-    assert list(Answer.model_fields.keys()) == ["can_answer", "used_chunk_ids", "answer"]
+def test_answer_schema_field_order_is_can_answer_then_answer_then_used_chunk_ids():
+    # REORDERED at Task 3.4.g (was can_answer/used_chunk_ids/answer) --
+    # can_answer still first (the one requirement that cannot change: see
+    # Answer's own docstring), answer moved second so visible text can
+    # start the moment can_answer resolves, without waiting for the
+    # (potentially multi-token) used_chunk_ids list to stream first.
+    assert list(Answer.model_fields.keys()) == ["can_answer", "answer", "used_chunk_ids"]
+
+
+# --- Task 3.4.g adversarial pass: the post-loop citation trigger must stay --
+# --- correct regardless of what a model actually streams, not just what ----
+# --- the DECLARED schema order says it should stream. ----------------------
+
+
+async def test_model_emitting_used_chunk_ids_before_answer_is_still_handled_correctly(
+    monkeypatch,
+):
+    # A model that ignores the declared can_answer/answer/used_chunk_ids
+    # order and streams the OLD order anyway (used_chunk_ids before
+    # answer) -- hand-built, not via build_fake_answer_arg_chunks() (which
+    # always emits the real, current schema order). The post-loop
+    # citation trigger has no dependency on field order at all (it only
+    # cares that the loop finished), so this must still produce correct
+    # text and correct citations, with zero text before can_answer.
+    full = '{"can_answer": true, "used_chunk_ids": ["c1"], "answer": "Our hours are 9-5."}'
+    chunks = [full[i : i + 3] for i in range(0, len(full), 3)]
+    events = _patched(monkeypatch, FakeAnswerToolChatModel(arg_chunks=chunks))
+    state = {
+        "messages": [HumanMessage(content="What are your hours?")],
+        "retrieved_chunks": [_chunk("doc-a", "Our hours are 9-5.")],
+    }
+
+    result = await graph_module._answer_node(state)
+
+    assert result["can_answer"] is True
+    assert "".join(e["text"] for e in events) == "Our hours are 9-5."
+    assert all(e["text"] for e in events)  # no empty/scaffolding events
+    assert result["cited_chunk_labels"] == ["c1"]
+    assert result["citations"] == [
+        {"url": "https://tenant.example/doc-a", "heading_path": ["Section"]}
+    ]
+
+
+async def test_duplicate_used_chunk_ids_key_resolves_to_the_last_occurrence(monkeypatch):
+    # Malformed/adversarial: "used_chunk_ids" appears twice in the raw
+    # JSON. Confirmed live (before writing this test) that Python's own
+    # json parsing -- which parse_partial_json() builds on -- resolves a
+    # duplicate key to its LAST occurrence, never merges or crashes; this
+    # proves _answer_node's own post-loop citation trigger inherits that
+    # same, safe behavior, not a different one.
+    full = (
+        '{"can_answer": true, "answer": "Combined answer.", '
+        '"used_chunk_ids": ["c1"], "used_chunk_ids": ["c2"]}'
+    )
+    chunks = [full[i : i + 3] for i in range(0, len(full), 3)]
+    _patched(monkeypatch, FakeAnswerToolChatModel(arg_chunks=chunks))
+    state = {
+        "messages": [HumanMessage(content="q")],
+        "retrieved_chunks": [
+            _chunk("doc-a", "Alpha."),
+            _chunk("doc-b", "Beta."),
+        ],
+    }
+
+    result = await graph_module._answer_node(state)
+
+    assert result["cited_chunk_labels"] == ["c2"]
+    assert result["citations"] == [
+        {"url": "https://tenant.example/doc-b", "heading_path": ["Section"]}
+    ]
+
+
+async def test_used_chunk_ids_truncated_at_stream_end_drops_safely_not_crashes(monkeypatch):
+    # The model's own stream simply ends (astream()'s generator is
+    # exhausted, no exception) before "used_chunk_ids" ever closes --
+    # e.g. a real length-limited completion. The answer TEXT itself is
+    # already fully closed/complete before the truncation point, so it
+    # must be delivered in full regardless; the trailing, truncated list
+    # must never crash this node and must never silently cite a chunk
+    # that does not exist (only one chunk, "c1", is retrieved here -- the
+    # truncated-and-auto-closed label below is out of bounds and MUST be
+    # dropped by _build_citations()'s own intersection check, not
+    # accepted on faith).
+    full = '{"can_answer": true, "answer": "Hi there", "used_chunk_ids": ["c1", "c2'
+    chunks = [full[i : i + 3] for i in range(0, len(full), 3)]
+    events = _patched(monkeypatch, FakeAnswerToolChatModel(arg_chunks=chunks))
+    state = {
+        "messages": [HumanMessage(content="q")],
+        "retrieved_chunks": [_chunk("doc-a", "Hi there")],
+    }
+
+    result = await graph_module._answer_node(state)
+
+    assert "".join(e["text"] for e in events) == "Hi there"
+    assert result["messages"][0].content == "Hi there"
+    # "c2" is out of bounds (only one chunk retrieved) -- dropped, not
+    # accepted; "c1" is a genuinely valid label and survives.
+    assert result["citations"] == [
+        {"url": "https://tenant.example/doc-a", "heading_path": ["Section"]}
+    ]
+
+
+async def test_chunk_id_looking_text_inside_the_answer_prose_is_never_treated_as_a_citation(
+    monkeypatch,
+):
+    # A label-looking substring appearing inside the free-text "answer"
+    # itself (e.g. the model mentioning "c2" in prose) must have zero
+    # effect on the real citations list -- citations are built ONLY from
+    # the structured used_chunk_ids field, never by scanning answer text.
+    chunks = build_fake_answer_arg_chunks(
+        can_answer=True,
+        used_chunk_ids=["c1"],
+        answer="I recommend checking c1 and c2 in the guide.",
+    )
+    events = _patched(monkeypatch, FakeAnswerToolChatModel(arg_chunks=chunks))
+    state = {
+        "messages": [HumanMessage(content="q")],
+        "retrieved_chunks": [
+            _chunk("doc-a", "Alpha."),
+            _chunk("doc-b", "Beta."),
+        ],
+    }
+
+    result = await graph_module._answer_node(state)
+
+    assert "".join(e["text"] for e in events) == "I recommend checking c1 and c2 in the guide."
+    # Only "c1" is a real used_chunk_ids entry -- "c2" mentioned in prose
+    # never becomes a citation despite looking exactly like a real label.
+    assert result["cited_chunk_labels"] == ["c1"]
+    assert result["citations"] == [
+        {"url": "https://tenant.example/doc-a", "heading_path": ["Section"]}
+    ]
 
 
 # --- Full path, end to end, through the real guarded entry point ------------
