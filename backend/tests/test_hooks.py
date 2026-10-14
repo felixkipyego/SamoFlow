@@ -83,7 +83,7 @@ def _run_hooks(cwd) -> str:
     return result.stdout
 
 
-def test_the_real_repository_marker_count_is_77():
+def test_the_real_repository_marker_count_is_75():
     # The real, live regression this task's own exclusion exists for:
     # Task 3.7.d's own injection-detector constant and its test both
     # mirror real planted-injection text verbatim, which happens to
@@ -94,11 +94,20 @@ def test_the_real_repository_marker_count_is_77():
     # avoids spelling any of the four trigger words literally anywhere in
     # THIS file's own comments/strings -- this file is itself scanned,
     # and is not in the exclusion set below.)
+    #
+    # 77 -> 75 at Task 3.7.f (2026-10-14), real, not accidental: rule 10
+    # ("verify then remove" a resolved marker) applied to
+    # `gate_relevance_threshold`'s own provisional-default marker
+    # (app/config.py) once real golden-set evidence (3.7.c's gate sweep)
+    # let Felix ratify 0.20 -- the field's own comment AND its mirrored
+    # one-line reference in app/agent/graph.py's `_gate_node` docstring
+    # both lost that word, confirmed by grepping both files directly
+    # before pinning this new number (no other marker moved).
     stdout = _run_hooks(REPO_ROOT)
     first_line = stdout.splitlines()[0]
     count = int(first_line.split()[0])
-    assert count == 77, (
-        f"expected 77 markers against the real repository, got {count} -- "
+    assert count == 75, (
+        f"expected 75 markers against the real repository, got {count} -- "
         f"either a real marker was added/removed, or the exclusion below "
         f"needs revisiting:\n{stdout}"
     )

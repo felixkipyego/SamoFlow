@@ -95,11 +95,15 @@ from app.auth.dependencies import VerifiedIdentity  # noqa: E402
 from app.config import Settings, get_settings  # noqa: E402
 from app.evals.answer_eval_metrics import (  # noqa: E402
     TurnOutcome,
+    can_answer_confusion_by_category,
     can_answer_confusion_matrix,
     citation_hit_rate,
+    false_negative_items,
+    false_positive_items,
     group_by_category,
     infer_actual_route,
     route_confusion_matrix,
+    stopping_stage_breakdown,
     zero_citation_violations,
 )
 from app.evals.eval_summary import (  # noqa: E402
@@ -240,6 +244,7 @@ def _build_outcome(item: GoldenSetItem, values: dict, item_id_suffix: str = "") 
         citations=citations,
         retrieved_chunk_texts=tuple(c["text"] for c in retrieved_chunks),
         final_text=final_text,
+        best_dense_score=values.get("best_dense_score"),
     )
 
 
@@ -519,6 +524,15 @@ async def main() -> None:
         print("\n=== Route confusion matrix (expected -> actual) ===")
         print(json.dumps(route_confusion_matrix(outcomes), indent=2))
 
+        # Task 3.7.f, item 0: the route confusion matrix's own "answer"
+        # row conflates a real can_answer false negative with a correct
+        # related_unanswerable refusal (both render the identical fixed
+        # reply text) -- stopping_stage_breakdown() separates them by
+        # WHERE the turn actually stopped, per category.
+        print("\n=== Stopping stage per category (router/gate/can_answer_false/answered) ===")
+        stage_breakdown = stopping_stage_breakdown(outcomes, settings.gate_relevance_threshold)
+        print(json.dumps(stage_breakdown, indent=2, sort_keys=True))
+
         print("\n=== can_answer confusion matrix ===")
         confusion = can_answer_confusion_matrix(outcomes)
         print(
@@ -526,6 +540,44 @@ async def main() -> None:
             f"TN={confusion.true_negative} FN={confusion.false_negative} "
             f"accuracy={confusion.accuracy:.3f}"
         )
+
+        print("\n=== can_answer confusion matrix PER CATEGORY ===")
+        confusion_by_category = can_answer_confusion_by_category(outcomes)
+        confusion_by_category_summary: dict[str, dict] = {}
+        for category in sorted(confusion_by_category):
+            cat_confusion = confusion_by_category[category]
+            confusion_by_category_summary[category] = {
+                "tp": cat_confusion.true_positive, "fp": cat_confusion.false_positive,
+                "tn": cat_confusion.true_negative, "fn": cat_confusion.false_negative,
+            }
+            print(
+                f"  {category}: TP={cat_confusion.true_positive} "
+                f"FP={cat_confusion.false_positive} TN={cat_confusion.true_negative} "
+                f"FN={cat_confusion.false_negative}"
+            )
+
+        print("\n=== can_answer FALSE POSITIVES (expected false, got true) ===")
+        for outcome in false_positive_items(outcomes):
+            base_id = outcome.item_id.split("#")[0]
+            question = items_by_id[base_id].question
+            print(f"  [{outcome.item_id}] ({outcome.category}) question: {question!r}")
+            print(
+                f"    can_answer={outcome.actual_can_answer} "
+                f"cited={list(outcome.cited_chunk_labels)}"
+            )
+            print(f"    answer: {outcome.final_text!r}")
+
+        print("\n=== can_answer FALSE NEGATIVES (expected true, got false) ===")
+        for outcome in false_negative_items(outcomes):
+            base_id = outcome.item_id.split("#")[0]
+            question = items_by_id[base_id].question
+            prompted_labels = [f"c{i + 1}" for i in range(len(outcome.retrieved_chunk_texts))]
+            print(f"  [{outcome.item_id}] ({outcome.category}) question: {question!r}")
+            print(
+                f"    can_answer={outcome.actual_can_answer} "
+                f"prompted_chunks={prompted_labels} cited={list(outcome.cited_chunk_labels)}"
+            )
+            print(f"    answer: {outcome.final_text!r}")
 
         print("\n=== Citation hit rate per category ===")
         citation_hit_rate_by_category: dict[str, float] = {}
@@ -557,11 +609,13 @@ async def main() -> None:
 
         summary = {
             "route_confusion": route_confusion_matrix(outcomes),
+            "stopping_stage": stage_breakdown,
             "can_answer_confusion": {
                 "tp": confusion.true_positive, "fp": confusion.false_positive,
                 "tn": confusion.true_negative, "fn": confusion.false_negative,
                 "accuracy": confusion.accuracy,
             },
+            "can_answer_confusion_by_category": confusion_by_category_summary,
             "citation_hit_rate": citation_hit_rate_by_category,
             "zero_citation_violation_count": len(violations),
             "injection_passed": injection_passed,

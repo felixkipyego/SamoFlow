@@ -101,6 +101,7 @@ def test_build_outcome_captures_can_answer_and_citations():
                 "score": 0.9,
             }
         ],
+        "best_dense_score": 0.74,
     }
     outcome = M._build_outcome(item, values)
     assert outcome.item_id == "ans-01"
@@ -108,6 +109,15 @@ def test_build_outcome_captures_can_answer_and_citations():
     assert outcome.actual_route == "answer"
     assert outcome.cited_chunk_labels == ("c1",)
     assert outcome.retrieved_chunk_texts == ("Standard domestic shipping takes 5 to 7 days.",)
+    assert outcome.best_dense_score == 0.74
+
+
+def test_build_outcome_defaults_best_dense_score_to_none_when_absent():
+    golden_set = _real_golden_set()
+    item = _item(golden_set, "off-01")
+    values = {"messages": [AIMessage(content="some answer")], "can_answer": False}
+    outcome = M._build_outcome(item, values)
+    assert outcome.best_dense_score is None
 
 
 def test_build_outcome_appends_the_item_id_suffix():

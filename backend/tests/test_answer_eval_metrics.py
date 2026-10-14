@@ -11,12 +11,17 @@ from app.agent.graph import (
 )
 from app.evals.answer_eval_metrics import (
     TurnOutcome,
+    can_answer_confusion_by_category,
     can_answer_confusion_matrix,
     citation_hit_rate,
     citation_is_a_hit,
+    false_negative_items,
+    false_positive_items,
     group_by_category,
     infer_actual_route,
     route_confusion_matrix,
+    stopping_stage,
+    stopping_stage_breakdown,
     zero_citation_violations,
 )
 
@@ -81,6 +86,73 @@ def test_route_confusion_matrix_counts_matches_and_mismatches():
     assert matrix["gate_fallback"] == {"gate_fallback": 1}
 
 
+# --- stopping_stage / stopping_stage_breakdown ------------------------------
+
+_THRESHOLD = 0.20
+
+
+def test_stopping_stage_router_for_greeting():
+    outcome = _outcome(actual_route="greeting", actual_can_answer=False)
+    assert stopping_stage(outcome, _THRESHOLD) == "router"
+
+
+def test_stopping_stage_dependency_failure():
+    outcome = _outcome(actual_route="dependency_failure", actual_can_answer=False)
+    assert stopping_stage(outcome, _THRESHOLD) == "dependency_failure"
+
+
+def test_stopping_stage_answered_when_can_answer_true():
+    outcome = _outcome(actual_route="answer", actual_can_answer=True)
+    assert stopping_stage(outcome, _THRESHOLD) == "answered"
+
+
+def test_stopping_stage_gate_when_zero_chunks():
+    outcome = _outcome(
+        actual_route="gate_fallback", actual_can_answer=False,
+        retrieved_chunk_texts=(), best_dense_score=None, cited_chunk_labels=(),
+    )
+    assert stopping_stage(outcome, _THRESHOLD) == "gate"
+
+
+def test_stopping_stage_gate_when_score_below_threshold():
+    outcome = _outcome(
+        actual_route="gate_fallback", actual_can_answer=False,
+        retrieved_chunk_texts=("some chunk",), best_dense_score=_THRESHOLD - 0.01,
+        cited_chunk_labels=(),
+    )
+    assert stopping_stage(outcome, _THRESHOLD) == "gate"
+
+
+def test_stopping_stage_can_answer_false_when_gate_passed_but_model_declined():
+    # The real conflation this function exists to resolve: gate passed
+    # (score above threshold, real chunks present) but the model itself
+    # said can_answer=false -- a genuine model-level refusal, not a gate
+    # rejection, even though both render the identical fixed reply text.
+    outcome = _outcome(
+        actual_route="gate_fallback", actual_can_answer=False,
+        retrieved_chunk_texts=("some chunk",), best_dense_score=_THRESHOLD + 0.5,
+        cited_chunk_labels=(),
+    )
+    assert stopping_stage(outcome, _THRESHOLD) == "can_answer_false"
+
+
+def test_stopping_stage_breakdown_groups_by_category():
+    outcomes = [
+        _outcome(category="answerable", actual_route="answer", actual_can_answer=True),
+        _outcome(
+            category="answerable", actual_route="gate_fallback", actual_can_answer=False,
+            retrieved_chunk_texts=("c",), best_dense_score=_THRESHOLD + 0.1,
+        ),
+        _outcome(
+            category="off_topic", actual_route="gate_fallback", actual_can_answer=False,
+            retrieved_chunk_texts=(), best_dense_score=None,
+        ),
+    ]
+    breakdown = stopping_stage_breakdown(outcomes, _THRESHOLD)
+    assert breakdown["answerable"] == {"answered": 1, "can_answer_false": 1}
+    assert breakdown["off_topic"] == {"gate": 1}
+
+
 # --- can_answer_confusion_matrix --------------------------------------------
 
 
@@ -104,6 +176,39 @@ def test_can_answer_confusion_matrix_accuracy_rejects_empty_input():
     confusion = can_answer_confusion_matrix([])
     with pytest.raises(ValueError, match="no outcomes"):
         _ = confusion.accuracy
+
+
+def test_can_answer_confusion_by_category_separates_categories():
+    # The real 3.7.d finding this guards: a flat total cannot show WHICH
+    # category a false positive came from -- grouping first must.
+    outcomes = [
+        _outcome(
+            category="related_unanswerable", expected_can_answer=False, actual_can_answer=True,
+        ),
+        _outcome(
+            category="related_unanswerable", expected_can_answer=False, actual_can_answer=False,
+        ),
+        _outcome(category="answerable", expected_can_answer=True, actual_can_answer=True),
+    ]
+    by_category = can_answer_confusion_by_category(outcomes)
+    assert by_category["related_unanswerable"].false_positive == 1
+    assert by_category["related_unanswerable"].true_negative == 1
+    assert by_category["answerable"].true_positive == 1
+    assert by_category["answerable"].false_positive == 0
+
+
+def test_false_positive_items_returns_only_unexpected_answers():
+    fp = _outcome(item_id="fp-1", expected_can_answer=False, actual_can_answer=True)
+    tn = _outcome(item_id="tn-1", expected_can_answer=False, actual_can_answer=False)
+    tp = _outcome(item_id="tp-1", expected_can_answer=True, actual_can_answer=True)
+    assert [o.item_id for o in false_positive_items([fp, tn, tp])] == ["fp-1"]
+
+
+def test_false_negative_items_returns_only_missed_answers():
+    fn = _outcome(item_id="fn-1", expected_can_answer=True, actual_can_answer=False)
+    tp = _outcome(item_id="tp-1", expected_can_answer=True, actual_can_answer=True)
+    tn = _outcome(item_id="tn-1", expected_can_answer=False, actual_can_answer=False)
+    assert [o.item_id for o in false_negative_items([fn, tp, tn])] == ["fn-1"]
 
 
 # --- citation hit rate -------------------------------------------------------

@@ -436,10 +436,16 @@ class Settings(BaseSettings):
     # Task 3.1.c: retrieve()'s own final result count -- the `k` in
     # `retrieve(client_id, query, k)` (docs/SPEC.md §6.3), made
     # Settings-configurable rather than hardcoded so it can be retuned
-    # later against the golden set (Step 3.7) without a code change. 8:
-    # an explicit starting point agreed before building, not treated as
-    # final -- retuned later with real numbers, like every other estimate
-    # in this project.
+    # later against the golden set (Step 3.7) without a code change.
+    #
+    # RATIFIED at 8 by Felix at Task 3.7.f (2026-10-14): the 3.7.c
+    # recall@k table shows recall@5 already equals recall@8 on every
+    # category except `multi_source`-all-documents (0.933 at @5 vs 1.000
+    # at @8 -- a real, measured gap, not noise), so dropping to 5 would
+    # cost exactly that one category's own worst-case recall for no
+    # measured latency/token saving (none measured this task -- no
+    # evidence to justify the cut). Kept at 8. See PROJECT_SPEC.md's own
+    # decision log for the full table and reasoning.
     retrieval_k: int = Field(default=8, gt=0)
     # Task 3.1.c: the per-sub-query `Prefetch(..., limit=...)` candidate
     # pool size -- deliberately SEPARATE from `retrieval_k` above, not the
@@ -458,8 +464,14 @@ class Settings(BaseSettings):
     # real reranker model/library, so this field exists purely to let
     # retrieve() branch on it correctly (see that function's own
     # docstring/body) without a code change once that signal exists.
-    # Default False: unchanged behavior from Task 3.1.c/3.1.d until a
-    # real decision is made to turn it on.
+    # RATIFIED off by Felix at Task 3.7.f (2026-10-14): 3.7.d's own real
+    # end-to-end run measured citation hit rate 1.000 on every category
+    # with a well-defined target (answerable, follow_up, multi_source,
+    # injection) -- the evidence this field's own docstring named as the
+    # enabling condition ("golden set measures the top-result quality as
+    # poor") is the opposite of what was found: no retrieval-ranking
+    # problem exists for a reranker to solve. Default False: unchanged
+    # behavior from Task 3.1.c/3.1.d.
     reranker_enabled: bool = False
     # Task 3.4.d [SECURITY]: the gate's own relevance floor, read against
     # retrieve()'s own best_dense_score (app/retrieval/service.py) -- the
@@ -468,14 +480,26 @@ class Settings(BaseSettings):
     # live these can differ). Below this floor, or zero retrieved chunks,
     # the gate routes straight to the fixed fallback, no model call.
     #
-    # ASSUMPTION: 0.20 is a provisional default, NOT a validated
-    # production threshold. Its only basis is a one-off research
-    # experiment (PROJECT_SPEC.md's own Step 3.4.d research entry,
-    # 2026-11-13): one hand-authored 32-chunk corpus in one domain, 30
-    # hand-written queries, not real visitor phrasing, not multiple
-    # languages, not a statistically meaningful sample. Tuned for real at
-    # Step 3.7 against the golden set, per docs/SPEC.md §6.3's own
-    # wording ("tuned in Phase 3 using the golden set").
+    # RATIFIED at 0.20 by Felix at Task 3.7.f (2026-10-14), replacing the
+    # original provisional default this field carried (PROJECT_SPEC.md's
+    # own Step 3.4.d research entry, a one-off research experiment) with
+    # real golden-set evidence (3.7.c's own gate sweep, 90 synthetic
+    # items): at 0.20,
+    # `off_topic` passes the gate 80% of the time, yet `can_answer`
+    # itself still refused 15/15 `off_topic` items in the real 3.7.d
+    # end-to-end run -- a false gate-PASS costs one extra model call that
+    # `can_answer` already catches. 0.30 is the sweep's own knee
+    # (`off_topic` drops to 27% passing, every answerable category still
+    # 1.00 recall) but `answerable`'s own minimum score (0.342) leaves
+    # only a 0.04 margin above it -- too close to a real answerable
+    # visitor's own worst case to adopt without real-site data. A false
+    # gate-OUT (an answerable visitor told "I don't know") costs more
+    # than a false pass, so the lower, safer threshold is kept.
+    # **Candidate range to test on a real tenant site: 0.25-0.30.**
+    #
+    # Revisit trigger (synthetic-only, per the 3.7.c §9 marker): re-check
+    # against a real tenant site before pilot -- every number above comes
+    # from one synthetic corpus, not yet confirmed to transfer.
     #
     # Specific to the CURRENT embedding model/version: this is a raw
     # cosine-similarity floor against `EMBEDDING_MODEL` (app/ingest/
@@ -483,9 +507,7 @@ class Settings(BaseSettings):
     # currently indexed under `EMBEDDING_VERSION` (app/ingest/
     # web_adapter.py, currently "v1") -- a different embedding model has
     # a different cosine-similarity distribution entirely, and this
-    # number would not transfer. See this field's own §9 marker
-    # (PROJECT_SPEC.md) for the re-tuning obligation whenever either
-    # changes.
+    # number would not transfer. Re-tune whenever either changes.
     gate_relevance_threshold: float = Field(default=0.20, ge=0.0, le=1.0)
 
     @field_validator("database_url")

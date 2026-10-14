@@ -473,6 +473,19 @@ async def _retrieve_node(state: AgentState, config: RunnableConfig) -> dict:
     }
 
 
+def _gate_passes(chunk_count: int, score: float | None, threshold: float) -> bool:
+    """The gate's own pass/fail rule, extracted as a pure function at
+    Task 3.7.f specifically so `app/evals/answer_eval_metrics.py` can
+    classify a real eval turn's own stopping stage (gate vs. can_answer
+    -- both produce the identical `_NO_ANSWER_FALLBACK_TEXT`, otherwise
+    indistinguishable from outside this module) WITHOUT reimplementing
+    this comparison a second time. `_gate_node` below is the only other
+    caller -- this is not a new behavior, just the existing one-liner
+    given a name and a second, legitimate call site.
+    """
+    return chunk_count > 0 and score is not None and score >= threshold
+
+
 def _gate_node(state: AgentState) -> dict:
     """Task 3.4.d [SECURITY]: docs/SPEC.md §6.3's own "gate" bullet --
     "if the best hit is below the relevance threshold, skip the AI call
@@ -494,9 +507,10 @@ def _gate_node(state: AgentState) -> dict:
         `_route_after_answer()` already reads the answer node's: (1)
         zero retrieved chunks at all (nothing to score); (2)
         `best_dense_score` below `Settings.gate_relevance_threshold`
-        (default 0.20, an ASSUMPTION -- see that field's own comment,
-        `app/config.py`, and PROJECT_SPEC.md's own §9 marker for the
-        re-tuning obligation).
+        (default 0.20, RATIFIED by Felix at Task 3.7.f, 2026-10-14 --
+        see that field's own comment, `app/config.py`, and
+        PROJECT_SPEC.md's own decision log for the real evidence and
+        revisit trigger).
       - The short-circuit (`{"can_answer": False}` only) relies on
         `_reset_turn_state_node` (Task 3.4.e, runs unconditionally before
         this node, every turn) for `cited_chunk_labels`/`citations`/
@@ -515,7 +529,7 @@ def _gate_node(state: AgentState) -> dict:
     chunk_count = len(state["retrieved_chunks"])
     score = state["best_dense_score"]
     threshold = get_settings().gate_relevance_threshold
-    passed = chunk_count > 0 and score is not None and score >= threshold
+    passed = _gate_passes(chunk_count, score, threshold)
 
     logger.info(
         "gate decision: passed=%s best_dense_score=%s threshold=%s chunk_count=%d",
