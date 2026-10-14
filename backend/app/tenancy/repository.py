@@ -45,8 +45,9 @@
 # choice get_conversation_by_id()/get_visitor_by_id() already make for reads).
 import uuid
 from dataclasses import dataclass
+from datetime import datetime
 
-from sqlalchemy import select, update
+from sqlalchemy import delete, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import InstrumentedAttribute
@@ -193,17 +194,31 @@ class TenantScopedRepository:
         await self.session.flush()
         return visitor
 
-    async def get_conversation_by_id(self, cid: uuid.UUID) -> Conversation | None:
+    async def get_conversation_by_id(
+        self, cid: uuid.UUID, *, vid: uuid.UUID | None = None
+    ) -> Conversation | None:
         # The tenant_id filter is added here, unconditionally, alongside the
         # caller's own id -- never accepted as a parameter, never optional.
         # A cid belonging to a different tenant matches no row and returns
         # None, exactly like a cid that doesn't exist at all.
-        result = await self.session.execute(
-            select(Conversation).where(
-                Conversation.cid == cid,
-                Conversation.tenant_id == self.tenant_id,
-            )
-        )
+        #
+        # Task 4.2 [SECURITY]: `vid`, OPTIONAL (default None, preserving
+        # every existing caller's own tenant-only behavior unchanged --
+        # confirmed by grepping every real call site in app/ and the
+        # existing tenant-scoping tests in tests/test_tenancy_repository.py
+        # before choosing this shape, not assumed safe). When given, ALSO
+        # filters by `Conversation.vid == vid` -- this is the real fix the
+        # Step 3.2/4.1-era §9 marker named ("get_conversation_by_id() needs
+        # vid-scoping"): a visitor-scoped caller (app/chat/routes.py's own
+        # GET endpoints below) now gets a REAL repository-level guarantee,
+        # not only the endpoint's own separate defense-in-depth check
+        # (Task 4.1's own `_resolve_conversation()`, kept as a second,
+        # independent layer -- matching this project's own established
+        # defense-in-depth convention, e.g. the SSRF guard/DB adapter).
+        conditions = [Conversation.cid == cid, Conversation.tenant_id == self.tenant_id]
+        if vid is not None:
+            conditions.append(Conversation.vid == vid)
+        result = await self.session.execute(select(Conversation).where(*conditions))
         return result.scalar_one_or_none()
 
     async def create_conversation(self, vid: uuid.UUID, title: str | None = None) -> Conversation:
@@ -213,6 +228,64 @@ class TenantScopedRepository:
         self.session.add(conversation)
         await self.session.flush()
         return conversation
+
+    async def list_conversations(self, vid: uuid.UUID) -> list[Conversation]:
+        """Task 4.2: `GET /api/v1/conversations` -- "previous chats"
+        (docs/SPEC.md §10). Scoped to BOTH `self.tenant_id` (the class's
+        own standing invariant) AND `vid` (never another visitor's own
+        conversations, even within the same tenant -- docs/SPEC.md §16's
+        own "Visitor A can't read or resume visitor B's conversation").
+        Most-recently-active first (`last_message_at` DESC) -- the natural
+        "previous chats" ordering, matching how every real messaging UI
+        this feature is modeled on already orders its own thread list.
+        """
+        result = await self.session.execute(
+            select(Conversation)
+            .where(Conversation.tenant_id == self.tenant_id, Conversation.vid == vid)
+            .order_by(Conversation.last_message_at.desc())
+        )
+        return list(result.scalars().all())
+
+    async def list_expired_conversations(self, cutoff: datetime) -> list[Conversation]:
+        """Task 4.2: the nightly chat-retention sweep's own read half
+        (docs/SPEC.md §13: "chats (default 30 days, range 1 to 90)... a
+        nightly sweep deletes expired requests" -- that line is written
+        about escalations specifically, but the identical "age out past
+        the tenant's own retention setting" rule applies to chats too,
+        per §3's own "Chat retention... default 30 days" decision).
+        `cutoff` is a caller-computed `datetime` (this tenant's own
+        `now() - retention_days`), never computed here -- keeps this
+        method a pure, injectable-clock-friendly read, matching this
+        project's own established `DateTimeClock` convention elsewhere
+        (app/db.py) rather than calling `datetime.now()` inside the
+        query itself.
+        """
+        result = await self.session.execute(
+            select(Conversation).where(
+                Conversation.tenant_id == self.tenant_id,
+                Conversation.last_message_at < cutoff,
+            )
+        )
+        return list(result.scalars().all())
+
+    async def delete_conversation(self, cid: uuid.UUID) -> None:
+        """Task 4.2: deletes ONLY the `conversations` row -- the matching
+        LangGraph checkpoint thread is a SEPARATE system (keyed by a
+        string `thread_id`, not a foreign key this row's own deletion
+        could ever cascade into) and must be pruned by the CALLER first
+        (`AsyncPostgresSaver.adelete_thread()`, docs/SPEC.md §4.6's own
+        "old LangGraph checkpoints are pruned on the same schedule") --
+        seeing this method's own name alone should never suggest the
+        checkpoint is handled too. Tenant-scoped like every other write
+        here; a cid belonging to another tenant deletes nothing (0 rows),
+        never raises -- matches `get_conversation_by_id()`'s own identical
+        "wrong tenant looks exactly like missing" philosophy.
+        """
+        await self.session.execute(
+            delete(Conversation).where(
+                Conversation.cid == cid, Conversation.tenant_id == self.tenant_id
+            )
+        )
 
     async def get_visitor_by_secret(self, secret: str, site_key_id: uuid.UUID) -> Visitor | None:
         # Task 1.4.e. Scoped to BOTH self.tenant_id AND the given

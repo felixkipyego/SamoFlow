@@ -20,6 +20,7 @@
 # database access) ever runs -- the same "reject at the boundary" shape
 # `extra="forbid"` already gives every other field.
 import uuid
+from datetime import datetime
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -30,3 +31,36 @@ class ChatRequest(BaseModel):
     message: str = Field(min_length=1)
     conversation_id: uuid.UUID | None = None
     client_message_id: uuid.UUID
+
+
+# Task 4.2: response shapes for GET /api/v1/conversations ("previous
+# chats") and GET /api/v1/conversations/{cid}/messages (docs/SPEC.md
+# §10). Same ASSUMPTION as SessionResponse (app/auth/schemas.py): docs/
+# SPEC.md names WHAT these endpoints return, never the exact JSON field
+# names -- this task's own choice, not a spec-mandated wire contract.
+class ConversationSummary(BaseModel):
+    conversation_id: uuid.UUID
+    title: str | None
+    created_at: datetime
+    last_message_at: datetime
+
+
+class ConversationListResponse(BaseModel):
+    conversations: list[ConversationSummary]
+
+
+# docs/SPEC.md §10: "history, showing completed turns only". No `citations`
+# field here -- a real, named limitation (see app/chat/routes.py's own
+# get_conversation_messages() docstring and PROJECT_SPEC.md's own Task 4.2
+# §9 marker): `AgentState.citations` is a per-turn OVERWRITE field (Task
+# 3.4.e), so only the LATEST turn's own citations are ever recoverable from
+# current graph state at all -- there is no way to reconstruct a PAST
+# turn's own citations without a dedicated, independently-persisted
+# messages table, which this task does not build.
+class ConversationMessage(BaseModel):
+    role: str
+    text: str
+
+
+class ConversationMessagesResponse(BaseModel):
+    messages: list[ConversationMessage]

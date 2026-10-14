@@ -83,7 +83,7 @@ def _run_hooks(cwd) -> str:
     return result.stdout
 
 
-def test_the_real_repository_marker_count_is_75():
+def test_the_real_repository_marker_count_is_76():
     # The real, live regression this task's own exclusion exists for:
     # Task 3.7.d's own injection-detector constant and its test both
     # mirror real planted-injection text verbatim, which happens to
@@ -94,6 +94,15 @@ def test_the_real_repository_marker_count_is_75():
     # avoids spelling any of the four trigger words literally anywhere in
     # THIS file's own comments/strings -- this file is itself scanned,
     # and is not in the exclusion set below.)
+    #
+    # 75 -> 76 at Task 4.2 (2026-10-14), real, not accidental: app/chat/
+    # schemas.py's two new response shapes (GET /conversations, GET
+    # /conversations/{cid}/messages) carry the identical wire-naming-
+    # freedom marker SessionResponse already had (app/auth/schemas.py) --
+    # a genuinely new instance of an already-established marker, not a
+    # duplicate of the same comment. Confirmed by diffing this task's own
+    # changed files against the four trigger words directly before
+    # re-pinning this number (no other marker moved).
     #
     # 77 -> 75 at Task 3.7.f (2026-10-14), real, not accidental: rule 10
     # ("verify then remove" a resolved marker) applied to
@@ -106,8 +115,8 @@ def test_the_real_repository_marker_count_is_75():
     stdout = _run_hooks(REPO_ROOT)
     first_line = stdout.splitlines()[0]
     count = int(first_line.split()[0])
-    assert count == 75, (
-        f"expected 75 markers against the real repository, got {count} -- "
+    assert count == 76, (
+        f"expected 76 markers against the real repository, got {count} -- "
         f"either a real marker was added/removed, or the exclusion below "
         f"needs revisiting:\n{stdout}"
     )

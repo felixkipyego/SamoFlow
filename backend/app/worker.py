@@ -48,6 +48,7 @@ from collections.abc import Awaitable, Callable
 from pathlib import Path
 
 from app import all_models  # noqa: F401
+from app.agent.checkpointer import close_checkpointer_pool, open_checkpointer_pool
 from app.cli import configure_cli_logging
 from app.config import SettingsError, get_settings
 from app.db import _session_factory
@@ -57,11 +58,16 @@ from app.ingest.job_handlers import (
     handle_ingest_upload,
     handle_ingest_url,
     handle_reconcile,
+    handle_retention_sweep,
     handle_scheduler_tick,
 )
 from app.ingest.models import Job
 from app.ingest.queue import claim_next_job, mark_job_failed, mark_job_succeeded, reap_stuck_jobs
-from app.ingest.scheduler import ensure_reconcile_ticks_seeded, ensure_scheduler_ticks_seeded
+from app.ingest.scheduler import (
+    ensure_reconcile_ticks_seeded,
+    ensure_retention_sweep_ticks_seeded,
+    ensure_scheduler_ticks_seeded,
+)
 
 # all_models above is imported for the side effect of registering every
 # domain's tables on Base.metadata -- without it, jobs.tenant_id's FK to
@@ -182,6 +188,7 @@ JOB_HANDLERS: dict[str, Callable[[Job], Awaitable[None]]] = {
     "ingest_db": handle_ingest_db,
     "scheduler_tick": handle_scheduler_tick,
     "reconcile": handle_reconcile,
+    "retention_sweep": handle_retention_sweep,
 }
 
 
@@ -253,6 +260,20 @@ async def _ensure_reconcile_ticks_seeded() -> list:
     async with _session_factory()() as session:
         seeded = await ensure_reconcile_ticks_seeded(
             session, interval_seconds=get_settings().reconcile_interval_seconds
+        )
+    return seeded
+
+
+async def _ensure_retention_sweep_ticks_seeded() -> list:
+    # Task 4.2: the nightly chat-retention sweep's own bootstrap/self-
+    # healing tick, same cadence and same reasoning as
+    # _ensure_reconcile_ticks_seeded() directly above -- a third,
+    # deliberate near-mirror (see ensure_retention_sweep_ticks_seeded()'s
+    # own docstring, app/ingest/scheduler.py, for why the REAL shared
+    # logic is a one-call addition there, not duplicated a third time).
+    async with _session_factory()() as session:
+        seeded = await ensure_retention_sweep_ticks_seeded(
+            session, interval_seconds=get_settings().retention_sweep_interval_seconds
         )
     return seeded
 
@@ -379,6 +400,17 @@ async def run(stop: asyncio.Event | None = None, max_iterations: int | None = No
                     len(reconcile_seeded),
                     reconcile_seeded,
                 )
+            # Task 4.2: the nightly chat-retention sweep's own bootstrap/
+            # self-healing sweep, same cadence and same try/except as
+            # every other per-iteration call above -- a transient
+            # failure here must not crash the worker either.
+            retention_seeded = await _ensure_retention_sweep_ticks_seeded()
+            if retention_seeded:
+                logger.info(
+                    "worker: seeded retention_sweep for %d tenant(s): %s",
+                    len(retention_seeded),
+                    retention_seeded,
+                )
             claimed = await _claim_and_process_one_job()
         except Exception as exc:
             # A transient failure reaching the database (or claiming/
@@ -420,6 +452,21 @@ def main() -> None:
     # checkpointer.py's own main() -- this function's signal-handling/
     # custom-event-loop control flow stays its own, not a candidate for
     # app/cli.py's own run_cli() helper.
+    #
+    # Task 4.2: the checkpointer pool is opened here, once, for this
+    # process's own whole lifetime -- the IDENTICAL "called exactly once,
+    # never lazily" discipline app/main.py's own lifespan hook already
+    # established for the API process (open_checkpointer_pool()'s own
+    # docstring), now extended to a SECOND, genuinely separate process
+    # (docs/SPEC.md §2: "a worker process (same image as the API)") --
+    # not a second call within the API's own process, which that
+    # docstring's "exactly once" language was written to prevent.
+    # handle_retention_sweep() (app/ingest/job_handlers.py) is this
+    # process's own first real need for it (AsyncPostgresSaver.
+    # adelete_thread(), pruning an expired conversation's own checkpoint
+    # thread) -- every other job handler needs no checkpointer access at
+    # all, so this stays a one-time process-level resource, not opened
+    # per-job the way a real per-request resource would be.
     configure_cli_logging()
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
@@ -427,11 +474,13 @@ def main() -> None:
     for sig in (signal.SIGTERM, signal.SIGINT):
         loop.add_signal_handler(sig, stop.set)
     try:
+        loop.run_until_complete(open_checkpointer_pool())
         loop.run_until_complete(run(stop))
     except SettingsError as exc:
         print(str(exc), file=sys.stderr)
         sys.exit(1)
     finally:
+        loop.run_until_complete(close_checkpointer_pool())
         loop.close()
 
 

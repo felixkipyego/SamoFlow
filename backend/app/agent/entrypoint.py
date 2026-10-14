@@ -57,6 +57,7 @@ from langchain_core.runnables import RunnableConfig
 from langgraph.graph.state import CompiledStateGraph
 from langgraph.types import Command, StateSnapshot
 
+from app.agent.context import build_thread_id
 from app.auth.dependencies import VerifiedIdentity
 
 # Duplication check after 3.2.b/c/d (2026-11-02), finding C.1: pinned
@@ -160,7 +161,7 @@ def _build_thread_config(identity: VerifiedIdentity, conversation_id: uuid.UUID)
     if not isinstance(conversation_id, uuid.UUID):
         raise ValueError("conversation_id must be a uuid.UUID")
 
-    thread_id = f"{identity.tenant_id}:{identity.vid}:{conversation_id}"
+    thread_id = build_thread_id(identity.tenant_id, identity.vid, conversation_id)
     return {"configurable": {"thread_id": thread_id, "tenant_id": identity.tenant_id}}
 
 

@@ -324,6 +324,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.sql import func
 
 from app import qdrant
+from app.agent import checkpointer
+from app.agent.context import build_thread_id
 from app.config import get_settings
 from app.db import _session_factory
 from app.ingest.crawl import run_crawl
@@ -344,6 +346,7 @@ from app.ingest.row_templates import MissingColumnError, MissingPrimaryKeyError,
 from app.ingest.scheduler import get_due_sources, is_tenant_active
 from app.ingest.upload_adapter import ingest_upload
 from app.ingest.web_adapter import ingest_url, is_domain_verified
+from app.tenancy.repository import TenantScopedRepository
 
 logger = logging.getLogger(__name__)
 
@@ -1032,3 +1035,82 @@ async def handle_reconcile(job: Job) -> None:
                 job.tenant_id,
                 deleted,
             )
+
+
+async def handle_retention_sweep(job: Job) -> None:
+    """Task 4.2: the nightly chat-retention sweep's own `JOB_HANDLERS
+    ["retention_sweep"]` entry -- mirrors `handle_reconcile()` directly
+    above exactly (per-tenant, suspended-tenant check + self-re-enqueue
+    FIRST via the shared `_check_active_and_reenqueue_self()`, so an
+    unexpected failure in the real sweep below can never break this
+    tenant's own chain).
+
+    Deletes every conversation past this tenant's own retention window
+    (`tenants.config["retention_days"]`, falling back to `Settings.
+    default_chat_retention_days` when absent or out of the documented
+    [1, 90] range -- a tenant has no dashboard to write this yet, Step
+    6.2's own future job) -- and, for each one, prunes its own LangGraph
+    checkpoint thread FIRST (`AsyncPostgresSaver.adelete_thread()`,
+    docs/SPEC.md §4.6's own "old LangGraph checkpoints are pruned on the
+    same schedule"), since a checkpoint thread has no FK tying its own
+    deletion to the `conversations` row's deletion -- confirmed by
+    reading app/tenancy/models.py directly, checkpoint tables are a
+    wholly separate system keyed by a plain string `thread_id`, never
+    cascaded by Postgres itself. Checkpoint pruned BEFORE the row delete,
+    not after: if the row delete were to fail/roll back, re-pruning an
+    already-pruned (or never-existent) thread on the NEXT sweep is a
+    harmless no-op (confirmed live, Task 3.2.b/c/d's own finding:
+    `adelete_thread()` on a thread with nothing to delete does not
+    raise) -- the reverse order would risk a row deleted with its own
+    checkpoint never pruned, a real orphan with no later chance to fix it
+    (nothing else ever looks up a checkpoint thread for a `conversations`
+    row that no longer exists).
+
+    **Escalation retention is OUT OF SCOPE here, not an oversight**:
+    docs/SPEC.md §13's own literal "a nightly sweep deletes expired
+    requests" line is about escalations specifically (§7's own 1-24-month
+    window) -- the `escalations` table does not exist yet (Step 4.4's own
+    job to create it); see PROJECT_SPEC.md's own new §9 marker, owner
+    Step 4.4.
+    """
+    settings = get_settings()
+    async with _session_factory()() as session:
+        if not await _check_active_and_reenqueue_self(
+            session,
+            job,
+            job_type="retention_sweep",
+            interval_seconds=settings.retention_sweep_interval_seconds,
+        ):
+            return
+
+        repo = TenantScopedRepository(tenant_id=job.tenant_id, session=session)
+        tenant = await repo.get_tenant()
+        retention_days = tenant.config.get("retention_days", settings.default_chat_retention_days)
+        if not isinstance(retention_days, int) or not (1 <= retention_days <= 90):
+            logger.warning(
+                "handle_retention_sweep: tenant %s has an invalid retention_days %r in "
+                "config, using the platform default %d instead",
+                job.tenant_id,
+                retention_days,
+                settings.default_chat_retention_days,
+            )
+            retention_days = settings.default_chat_retention_days
+
+        cutoff = datetime.now(UTC) - timedelta(days=retention_days)
+        expired = await repo.list_expired_conversations(cutoff)
+        if not expired:
+            return
+
+        saver = checkpointer.get_checkpointer()
+        for conversation in expired:
+            thread_id = build_thread_id(conversation.tenant_id, conversation.vid, conversation.cid)
+            await saver.adelete_thread(thread_id)
+            await repo.delete_conversation(conversation.cid)
+        await session.commit()
+        logger.info(
+            "handle_retention_sweep: tenant %s deleted %d expired conversation(s) "
+            "(retention_days=%d)",
+            job.tenant_id,
+            len(expired),
+            retention_days,
+        )

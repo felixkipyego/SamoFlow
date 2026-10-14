@@ -311,3 +311,23 @@ async def ensure_reconcile_ticks_seeded(
     return await _ensure_ticks_seeded(
         session, job_type="reconcile", interval_seconds=interval_seconds, clock=clock
     )
+
+
+async def ensure_retention_sweep_ticks_seeded(
+    session: AsyncSession,
+    *,
+    interval_seconds: float,
+    clock: DateTimeClock = lambda: datetime.now(UTC),
+) -> list[uuid.UUID]:
+    """Task 4.2: the nightly chat-retention sweep's own bootstrap/self-
+    healing tick for `retention_sweep` -- a third thin wrapper over
+    `_ensure_ticks_seeded()` above, matching `ensure_scheduler_ticks_
+    seeded()`/`ensure_reconcile_ticks_seeded()`'s own established shape
+    exactly (deliberately NOT a new, 4th hand-written near-copy -- the
+    whole reason `_ensure_ticks_seeded()` was extracted at the Task 2.9.g
+    duplication check was to make exactly this kind of new job type a
+    one-call addition, not a new multi-paragraph duplicate).
+    """
+    return await _ensure_ticks_seeded(
+        session, job_type="retention_sweep", interval_seconds=interval_seconds, clock=clock
+    )

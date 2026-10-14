@@ -57,7 +57,7 @@ import math
 import uuid
 from collections.abc import AsyncIterator
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse, Response
 from langchain_core.messages import AIMessage, HumanMessage
 from sqlalchemy import text
@@ -67,9 +67,15 @@ from sse_starlette.sse import EventSourceResponse
 
 from app.agent.entrypoint import read_state, run_turn
 from app.auth.dependencies import VerifiedIdentity, get_current_visitor
-from app.chat.schemas import ChatRequest
+from app.chat.schemas import (
+    ChatRequest,
+    ConversationListResponse,
+    ConversationMessage,
+    ConversationMessagesResponse,
+    ConversationSummary,
+)
 from app.config import get_settings
-from app.db import _session_factory
+from app.db import _session_factory, get_db_session
 from app.ratelimit import RateLimiter
 from app.tenancy.models import Conversation
 from app.tenancy.repository import TenantScopedRepository
@@ -285,19 +291,18 @@ async def _resolve_conversation(
     """docs/SPEC.md §10: "omitting conversation_id starts a new
     conversation". docs/SPEC.md §16: "Another visitor's conversation_id
     returns 404, and client-sent thread_id, client_id or configurable is
-    ignored." `get_conversation_by_id()` (app/tenancy/repository.py) is
-    tenant_id-scoped only today -- the `vid` check below is this
-    endpoint's OWN obligation until Step 4.2 makes the repository method
-    itself vid-aware (PROJECT_SPEC.md's own §9 marker, owner Step 4.2) --
-    not a redundant belt-and-suspenders check, the ONLY vid check that
-    exists anywhere right now.
+    ignored." Task 4.2 made `get_conversation_by_id()` (app/tenancy/
+    repository.py) itself vid-aware -- the explicit `conversation.vid !=
+    identity.vid` re-check below is now a deliberate, redundant DEFENSE-
+    IN-DEPTH backstop (per the Phase 4 kickoff decision this closes),
+    never the only layer again.
     """
     if conversation_id is None:
         conversation = await repo.create_conversation(vid=identity.vid)
         await repo.session.commit()
         return conversation
 
-    conversation = await repo.get_conversation_by_id(conversation_id)
+    conversation = await repo.get_conversation_by_id(conversation_id, vid=identity.vid)
     if conversation is None or conversation.vid != identity.vid:
         raise HTTPException(status_code=404, detail="conversation not found")
     return conversation
@@ -613,4 +618,86 @@ async def create_chat_turn(payload: ChatRequest, request: Request) -> Response:
             "Access-Control-Allow-Origin": identity.org,
             "Vary": "Origin",
         },
+    )
+
+
+# --- Task 4.2: conversations endpoints (docs/SPEC.md §10) -------------------
+#
+# Both endpoints below are ordinary, FAST, non-streaming JSON responses --
+# unlike POST /chat, `Depends(get_current_visitor)`/`Depends(get_db_
+# session)` ARE used normally here (as plain FastAPI dependencies). The
+# whole reason Task 4.1's own follow-up avoided that pattern was FastAPI's
+# own confirmed-live behavior of holding a yield-dependency's connection
+# open until the ENTIRE response body is sent -- for a response that
+# completes in milliseconds (these two), that is a non-issue, not a
+# connection-hold bug; rebuilding the manual-session dance here would be
+# needless complexity with no real benefit (rule 11).
+
+
+@router.get("/conversations", response_model=ConversationListResponse)
+async def list_conversations_endpoint(
+    identity: VerifiedIdentity = Depends(get_current_visitor),  # noqa: B008
+    session: AsyncSession = Depends(get_db_session),  # noqa: B008
+) -> ConversationListResponse:
+    repo = TenantScopedRepository(tenant_id=identity.tenant_id, session=session)
+    conversations = await repo.list_conversations(identity.vid)
+    return ConversationListResponse(
+        conversations=[
+            ConversationSummary(
+                conversation_id=c.cid,
+                title=c.title,
+                created_at=c.created_at,
+                last_message_at=c.last_message_at,
+            )
+            for c in conversations
+        ]
+    )
+
+
+@router.get("/conversations/{cid}/messages", response_model=ConversationMessagesResponse)
+async def get_conversation_messages(
+    cid: uuid.UUID,
+    request: Request,
+    identity: VerifiedIdentity = Depends(get_current_visitor),  # noqa: B008
+    session: AsyncSession = Depends(get_db_session),  # noqa: B008
+) -> ConversationMessagesResponse:
+    """docs/SPEC.md §10: "history, showing completed turns only".
+
+    Reads the real LangGraph checkpoint via `read_state()` (the same
+    guarded entry point `/chat` itself uses) -- no separate `messages`
+    table exists (docs/SPEC.md §15's own data model names none). "Completed
+    turns only": if the thread's own LAST message is a `HumanMessage` with
+    no following `AIMessage` (a turn that crashed, timed out, or is still
+    genuinely in flight), it is dropped from the response rather than shown
+    half-finished.
+
+    **Real, named limitation, not silently worked around**: only `role`
+    and `text` are returned, never `citations` -- `AgentState.citations`
+    (app/agent/graph.py) is a per-turn OVERWRITE field (Task 3.4.e, reset
+    every turn by design), so only the MOST RECENT turn's own citations
+    are ever recoverable from current graph state at all; reconstructing
+    every past turn's own citations would need a dedicated, independently-
+    persisted messages table, which is a real architectural decision
+    (whether/when to build one) this task does not make unilaterally --
+    see PROJECT_SPEC.md's own new §9 marker.
+    """
+    repo = TenantScopedRepository(tenant_id=identity.tenant_id, session=session)
+    conversation = await repo.get_conversation_by_id(cid, vid=identity.vid)
+    if conversation is None or conversation.vid != identity.vid:
+        raise HTTPException(status_code=404, detail="conversation not found")
+
+    graph = request.app.state.graph
+    snapshot = await read_state(graph, identity, cid)
+    messages = list(snapshot.values.get("messages", []))
+    if messages and isinstance(messages[-1], HumanMessage):
+        messages = messages[:-1]  # an incomplete/in-flight turn -- not shown
+
+    return ConversationMessagesResponse(
+        messages=[
+            ConversationMessage(
+                role="visitor" if isinstance(message, HumanMessage) else "assistant",
+                text=message.content,
+            )
+            for message in messages
+        ]
     )

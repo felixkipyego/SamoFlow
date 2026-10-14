@@ -930,3 +930,159 @@ async def test_cancelling_the_stream_releases_the_lease_and_leaves_valid_state(
             )
         ).fetchone()
     assert row[0] > 0  # a real, readable checkpoint exists -- not corrupted/missing
+
+
+# --- Task 4.2: GET /conversations, GET /conversations/{cid}/messages -------
+
+
+async def test_list_conversations_returns_only_this_visitors_own_conversations(
+    monkeypatch, _seeded
+):
+    app = create_app()
+    token = _token_for(_seeded)
+    other_token = _token_for(_seeded, vid_key="other_visitor")
+    async with db_session() as session:
+        repo = TenantScopedRepository(tenant_id=_seeded["tenant"], session=session)
+        mine = await repo.create_conversation(vid=_seeded["visitor"], title="mine")
+        await repo.create_conversation(vid=_seeded["other_visitor"], title="not mine")
+        await session.commit()
+        mine_cid = mine.cid
+
+    async with await http_client(app) as client:
+        response = await client.get(
+            "/api/v1/conversations",
+            headers={"Authorization": f"Bearer {token}", "Origin": ORIGIN},
+        )
+        other_response = await client.get(
+            "/api/v1/conversations",
+            headers={"Authorization": f"Bearer {other_token}", "Origin": ORIGIN},
+        )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert [c["conversation_id"] for c in body["conversations"]] == [str(mine_cid)]
+    assert body["conversations"][0]["title"] == "mine"
+
+    other_body = other_response.json()
+    assert len(other_body["conversations"]) == 1
+    assert other_body["conversations"][0]["title"] == "not mine"
+
+
+async def test_get_messages_for_another_tenants_conversation_returns_404(monkeypatch, _seeded):
+    app = create_app()
+    token = _token_for(_seeded)
+    async with db_session() as session:
+        repo = TenantScopedRepository(tenant_id=_seeded["other_tenant"], session=session)
+        other_visitor_id = uuid.uuid4()
+        session.add(
+            SiteKey(
+                id=uuid.uuid4(),
+                tenant_id=_seeded["other_tenant"],
+                key="pk_live_messages_other",
+                environment="production",
+                status="live",
+                allowed_origins=[ORIGIN],
+            )
+        )
+        await session.flush()
+        other_site_key_id = (
+            await session.execute(
+                SiteKey.__table__.select().where(SiteKey.tenant_id == _seeded["other_tenant"])
+            )
+        ).first().id
+        session.add(
+            Visitor(
+                vid=other_visitor_id,
+                tenant_id=_seeded["other_tenant"],
+                site_key_id=other_site_key_id,
+                secret_hash=hash_visitor_secret(generate_visitor_secret()),
+            )
+        )
+        await session.flush()
+        conversation = await repo.create_conversation(vid=other_visitor_id)
+        await session.commit()
+        other_cid = conversation.cid
+
+    async with await http_client(app) as client:
+        response = await client.get(
+            f"/api/v1/conversations/{other_cid}/messages",
+            headers={"Authorization": f"Bearer {token}", "Origin": ORIGIN},
+        )
+    assert response.status_code == 404
+
+
+async def test_get_messages_returns_the_real_completed_turn(monkeypatch, _seeded):
+    chunks = build_fake_answer_arg_chunks(
+        can_answer=True, used_chunk_ids=["c1"], answer="The real answer."
+    )
+    app = await _build_app(
+        monkeypatch,
+        chat_model=FakeAnswerToolChatModel(arg_chunks=chunks),
+        retrieve_chunks=_answer_chunks(),
+    )
+    token = _token_for(_seeded)
+    headers = {"Authorization": f"Bearer {token}", "Origin": ORIGIN}
+
+    async with await http_client(app) as client:
+        async with client.stream(
+            "POST",
+            "/api/v1/chat",
+            json={"message": "what is the answer", "client_message_id": str(uuid.uuid4())},
+            headers=headers,
+        ) as response:
+            await response.aread()
+
+        async with db_session() as session:
+            rows = (await session.execute(Conversation.__table__.select())).fetchall()
+        assert len(rows) == 1
+        conversation_id = rows[0].cid
+
+        messages_response = await client.get(
+            f"/api/v1/conversations/{conversation_id}/messages", headers=headers
+        )
+
+    assert messages_response.status_code == 200
+    messages = messages_response.json()["messages"]
+    assert [m["role"] for m in messages] == ["visitor", "assistant"]
+    assert messages[0]["text"] == "what is the answer"
+    assert messages[1]["text"] == "The real answer."
+
+
+async def test_get_messages_drops_a_trailing_incomplete_turn(monkeypatch, _seeded):
+    # A turn that crashed/timed out leaves a HumanMessage with no
+    # following AIMessage in the checkpoint -- "completed turns only"
+    # (docs/SPEC.md §10) means this must not be shown at all.
+    class _SlowChatModel(FakeAnswerToolChatModel):
+        async def _astream(self, messages, stop=None, run_manager=None, **kwargs):
+            await asyncio.sleep(10)
+            if False:
+                yield  # pragma: no cover -- keeps this an async generator
+
+    set_valid_env(monkeypatch, VALID_ENV, CHAT_REQUEST_TIMEOUT_SECONDS="0.05")
+    get_settings.cache_clear()
+    app = await _build_app(
+        monkeypatch, chat_model=_SlowChatModel(arg_chunks=[]), retrieve_chunks=_answer_chunks()
+    )
+    token = _token_for(_seeded)
+    headers = {"Authorization": f"Bearer {token}", "Origin": ORIGIN}
+
+    async with await http_client(app) as client:
+        async with client.stream(
+            "POST",
+            "/api/v1/chat",
+            json={"message": "an abandoned question", "client_message_id": str(uuid.uuid4())},
+            headers=headers,
+        ) as response:
+            await response.aread()  # times out -- no AIMessage is ever appended
+
+        async with db_session() as session:
+            rows = (await session.execute(Conversation.__table__.select())).fetchall()
+        assert len(rows) == 1
+        conversation_id = rows[0].cid
+
+        messages_response = await client.get(
+            f"/api/v1/conversations/{conversation_id}/messages", headers=headers
+        )
+
+    assert messages_response.status_code == 200
+    assert messages_response.json()["messages"] == []

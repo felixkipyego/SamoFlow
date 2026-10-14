@@ -22,6 +22,7 @@
 #     prevent).
 import dataclasses
 import uuid
+from datetime import UTC, datetime, timedelta
 
 import pytest
 import sqlalchemy as sa
@@ -193,6 +194,141 @@ async def test_get_conversation_by_id_returns_this_tenants_own_row(_seeded_tenan
 
     assert result is not None
     assert result.cid == ids["conversation_a"]
+
+
+async def test_get_conversation_by_id_with_vid_rejects_another_visitors_real_id(_seeded_tenants):
+    # Task 4.2: the real fix for the Step 4.1-era §9 marker -- a SAME-
+    # TENANT conversation belonging to a DIFFERENT visitor must still
+    # come back None when `vid` is given, not just a different tenant's.
+    ids = _seeded_tenants
+    other_visitor_id = uuid.uuid4()
+    async with db_session() as session:
+        session.add(
+            Visitor(
+                vid=other_visitor_id,
+                tenant_id=ids["tenant_a"],
+                site_key_id=ids["site_key_a"],
+                secret_hash=hash_visitor_secret(generate_visitor_secret()),
+            )
+        )
+        await session.commit()
+        repo = TenantScopedRepository(tenant_id=ids["tenant_a"], session=session)
+        result = await repo.get_conversation_by_id(ids["conversation_a"], vid=other_visitor_id)
+
+    assert result is None
+
+
+async def test_get_conversation_by_id_with_vid_returns_the_real_owners_own_row(_seeded_tenants):
+    ids = _seeded_tenants
+    async with db_session() as session:
+        repo = TenantScopedRepository(tenant_id=ids["tenant_a"], session=session)
+        result = await repo.get_conversation_by_id(ids["conversation_a"], vid=ids["visitor_a"])
+
+    assert result is not None
+    assert result.cid == ids["conversation_a"]
+
+
+async def test_get_conversation_by_id_with_no_vid_still_behaves_exactly_as_before(_seeded_tenants):
+    # Backward compatibility, confirmed directly: every EXISTING caller
+    # that never passes `vid` must see byte-identical behavior.
+    ids = _seeded_tenants
+    async with db_session() as session:
+        repo = TenantScopedRepository(tenant_id=ids["tenant_a"], session=session)
+        result = await repo.get_conversation_by_id(ids["conversation_a"])
+
+    assert result is not None
+    assert result.cid == ids["conversation_a"]
+
+
+async def test_list_conversations_returns_only_this_visitors_own_rows(_seeded_tenants):
+    ids = _seeded_tenants
+    other_visitor_id = uuid.uuid4()
+    other_conversation_id = uuid.uuid4()
+    async with db_session() as session:
+        session.add(
+            Visitor(
+                vid=other_visitor_id,
+                tenant_id=ids["tenant_a"],
+                site_key_id=ids["site_key_a"],
+                secret_hash=hash_visitor_secret(generate_visitor_secret()),
+            )
+        )
+        await session.flush()
+        session.add(
+            Conversation(
+                cid=other_conversation_id, tenant_id=ids["tenant_a"], vid=other_visitor_id
+            )
+        )
+        await session.commit()
+        repo = TenantScopedRepository(tenant_id=ids["tenant_a"], session=session)
+        results = await repo.list_conversations(ids["visitor_a"])
+
+    assert [c.cid for c in results] == [ids["conversation_a"]]
+
+
+async def test_list_conversations_orders_most_recently_active_first(_seeded_tenants):
+    ids = _seeded_tenants
+    newer_id = uuid.uuid4()
+    async with db_session() as session:
+        session.add(
+            Conversation(
+                cid=newer_id,
+                tenant_id=ids["tenant_a"],
+                vid=ids["visitor_a"],
+                last_message_at=datetime.now(UTC) + timedelta(days=1),
+            )
+        )
+        await session.commit()
+        repo = TenantScopedRepository(tenant_id=ids["tenant_a"], session=session)
+        results = await repo.list_conversations(ids["visitor_a"])
+
+    assert [c.cid for c in results] == [newer_id, ids["conversation_a"]]
+
+
+async def test_list_expired_conversations_is_tenant_scoped_and_cutoff_based(_seeded_tenants):
+    ids = _seeded_tenants
+    old_id = uuid.uuid4()
+    cutoff = datetime.now(UTC) - timedelta(days=30)
+    async with db_session() as session:
+        session.add(
+            Conversation(
+                cid=old_id,
+                tenant_id=ids["tenant_a"],
+                vid=ids["visitor_a"],
+                last_message_at=cutoff - timedelta(days=1),
+            )
+        )
+        await session.commit()
+        repo = TenantScopedRepository(tenant_id=ids["tenant_a"], session=session)
+        expired = await repo.list_expired_conversations(cutoff)
+
+    expired_ids = {c.cid for c in expired}
+    assert old_id in expired_ids
+    assert ids["conversation_a"] not in expired_ids  # fresh, not expired
+    assert ids["conversation_b"] not in expired_ids  # a different tenant entirely
+
+
+async def test_delete_conversation_only_deletes_this_tenants_own_row(_seeded_tenants):
+    ids = _seeded_tenants
+    async with db_session() as session:
+        repo_b = TenantScopedRepository(tenant_id=ids["tenant_b"], session=session)
+        await repo_b.delete_conversation(ids["conversation_a"])  # wrong tenant -- a no-op
+        await session.commit()
+
+    async with db_session() as session:
+        repo_a = TenantScopedRepository(tenant_id=ids["tenant_a"], session=session)
+        still_there = await repo_a.get_conversation_by_id(ids["conversation_a"])
+    assert still_there is not None
+
+    async with db_session() as session:
+        repo_a = TenantScopedRepository(tenant_id=ids["tenant_a"], session=session)
+        await repo_a.delete_conversation(ids["conversation_a"])
+        await session.commit()
+
+    async with db_session() as session:
+        repo_a = TenantScopedRepository(tenant_id=ids["tenant_a"], session=session)
+        gone = await repo_a.get_conversation_by_id(ids["conversation_a"])
+    assert gone is None
 
 
 async def test_create_tenant_creates_a_real_row(_seeded_tenants):

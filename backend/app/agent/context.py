@@ -53,6 +53,26 @@ from collections.abc import Mapping
 from typing import Any
 
 
+def build_thread_id(tenant_id: uuid.UUID, vid: uuid.UUID, conversation_id: uuid.UUID) -> str:
+    """Task 4.2: the ONE place `thread_id`'s own exact string format
+    (docs/SPEC.md §4.5) is defined. `_build_thread_config()` (app/agent/
+    entrypoint.py) calls this to build the real LangGraph config; the
+    nightly retention-sweep job handler (`handle_retention_sweep()`,
+    app/ingest/job_handlers.py) calls the SAME function to address a
+    checkpoint thread for deletion (`AsyncPostgresSaver.adelete_thread()`)
+    -- a second real caller, extracted here rather than hand-duplicating
+    the exact `f"{a}:{b}:{c}"` format a second time. Does NOT repeat
+    `_build_thread_config()`'s own delimiter-injection `isinstance`
+    checks: both of this function's own callers already hold real
+    `uuid.UUID` values read directly from the database, never from an
+    untrusted request body the way `_build_thread_config()`'s own
+    `identity`/`conversation_id` parameters structurally can (that
+    module's own guarded construction path is where that check belongs,
+    and still applies there unchanged).
+    """
+    return f"{tenant_id}:{vid}:{conversation_id}"
+
+
 def tenant_id_from_config(config: Mapping[str, Any]) -> uuid.UUID:
     """The ONLY way a graph node may read `tenant_id`. Validates presence
     and type, raising a clear `ValueError` otherwise -- never returns a

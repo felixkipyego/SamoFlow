@@ -545,6 +545,30 @@ class Settings(BaseSettings):
     # estimate in this project, most plausibly once real operational data
     # shows how many orphaned points actually accumulate per day.
     reconcile_interval_seconds: float = Field(default=86400.0, gt=0)
+    # Task 4.2: how often each tenant's own self-re-enqueuing
+    # `retention_sweep` job fires (docs/SPEC.md §13: "a nightly sweep
+    # deletes expired requests" -- the identical "age out past the
+    # tenant's own retention setting" cadence applies to chats too, per
+    # §3's own "Chat retention... default 30 days" decision) -- mirrors
+    # `reconcile_interval_seconds` directly above exactly, same shape,
+    # same reasoning: 86400s (nightly, literally), retuned later with
+    # real numbers.
+    retention_sweep_interval_seconds: float = Field(default=86400.0, gt=0)
+    # Task 4.2: the per-tenant chat-retention window (docs/SPEC.md §3:
+    # "Chat retention: per website, set in the dashboard, default 30
+    # days"; §13: "Retention ranges: Chats: 1 to 90 days (default 30)").
+    # Real per-tenant retention lives in `tenants.config` (a dashboard-
+    # editable JSONB field, Step 6.2's own future job to add real write
+    # validation for) -- this Settings field is ONLY the PLATFORM-WIDE
+    # DEFAULT used when a tenant's own config has no `retention_days` key
+    # set yet (every tenant today, since no dashboard writes it), mirroring
+    # the EXACT same "platform default in Settings, future per-tenant
+    # override in tenants.config" shape `relevance_threshold` already
+    # established (docs/SPEC.md §6.3). Clamped to the documented [1, 90]
+    # range at READ time (`handle_retention_sweep()`, app/ingest/
+    # job_handlers.py), not validated here -- a value READ from JSONB has
+    # no pydantic Field to enforce it the way this Settings default does.
+    default_chat_retention_days: int = Field(default=30, ge=1, le=90)
     # Task 3.1.c: retrieve()'s own final result count -- the `k` in
     # `retrieve(client_id, query, k)` (docs/SPEC.md §6.3), made
     # Settings-configurable rather than hardcoded so it can be retuned

@@ -130,6 +130,14 @@ VALID_JOB_TYPES: frozenset[str] = frozenset(
         "ingest_db",
         "scheduler_tick",
         "reconcile",
+        # Task 4.2: "retention_sweep" added -- the identical shape as
+        # "scheduler_tick"/"reconcile" above (no source_id, no real
+        # sources.config, payload stays {}), a per-tenant self-re-
+        # enqueuing job mirroring both's own mechanism exactly. See
+        # app/ingest/scheduler.py's own `ensure_retention_sweep_ticks_
+        # seeded()` and app/ingest/job_handlers.py's own
+        # `handle_retention_sweep()` for the real design/handler.
+        "retention_sweep",
     }
 )
 
