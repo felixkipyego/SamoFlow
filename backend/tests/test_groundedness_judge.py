@@ -142,6 +142,35 @@ def test_write_labelling_csv_never_leaks_origin_or_judge_label(tmp_path):
     assert "row_id,question,context,answer,label" in content
 
 
+def test_write_labelling_csv_refuses_to_overwrite_a_filled_in_label(tmp_path):
+    # Task 3.7.e, item 1d: the live guarantee -- Felix is labelling the
+    # CURRENT file; a second write to that exact path must never destroy
+    # his work, even though normal operation (a new timestamped filename
+    # per run) never actually reaches this path in practice.
+    path = tmp_path / "labelling.csv"
+    write_labelling_csv(_rows(), path)
+    content = path.read_text(encoding="utf-8").replace("r1,q1,ctx1,a1,", "r1,q1,ctx1,a1,grounded")
+    path.write_text(content, encoding="utf-8")
+
+    with pytest.raises(FileExistsError, match="already contains at least one filled-in label"):
+        write_labelling_csv(_rows(), path)
+
+    # The file on disk is untouched -- the refusal happens BEFORE any
+    # write, not a partial overwrite.
+    assert "r1,q1,ctx1,a1,grounded" in path.read_text(encoding="utf-8")
+
+
+def test_write_labelling_csv_allows_overwriting_an_all_blank_file(tmp_path):
+    # A file that was exported but never touched by Felix (every `label`
+    # still blank) is NOT protected -- re-running against the same path
+    # in that state is harmless, matching the guard's own documented
+    # scope (filled-in labels only, not existence alone).
+    path = tmp_path / "labelling.csv"
+    write_labelling_csv(_rows(), path)
+    write_labelling_csv(_rows(), path)  # must not raise
+    assert "row_id,question,context,answer,label" in path.read_text(encoding="utf-8")
+
+
 def test_write_key_file_round_trips_origin_and_judge_label(tmp_path):
     path = tmp_path / "key.json"
     write_key_file(_rows(), path)
@@ -231,3 +260,55 @@ def test_import_raises_if_no_corrupted_rows_exist(tmp_path):
     _label_csv(labelling_path, {"r1": "grounded"})
     with pytest.raises(ValueError, match="no corrupted"):
         import_calibration_labels(labelling_path, key_path)
+
+
+# --- CLI entry point (`make eval-calibrate`, item 3) ------------------------
+
+
+def test_find_latest_labelling_csv_picks_the_newest_timestamp(tmp_path):
+    from scripts.groundedness_judge import find_latest_labelling_csv
+
+    (tmp_path / "calibration_20260101-090000.csv").write_text("x", encoding="utf-8")
+    newest = tmp_path / "calibration_20260102-090000.csv"
+    newest.write_text("x", encoding="utf-8")
+    assert find_latest_labelling_csv(tmp_path) == newest
+
+
+def test_find_latest_labelling_csv_raises_a_clear_error_when_none_exist(tmp_path):
+    from scripts.groundedness_judge import find_latest_labelling_csv
+
+    with pytest.raises(SystemExit, match="make eval-answers"):
+        find_latest_labelling_csv(tmp_path)
+
+
+def test_eval_calibrate_main_writes_a_committed_summary_and_prints_a_delta_table(
+    tmp_path, monkeypatch, capsys
+):
+    from scripts import groundedness_judge as G
+
+    labelling_path = tmp_path / "calibration_20260101-090000.csv"
+    key_path = tmp_path / "calibration_20260101-090000.key.json"
+    rows = _rows()
+    write_labelling_csv(rows, labelling_path)
+    write_key_file(rows, key_path)
+    _label_csv(labelling_path, {"r1": "grounded", "r2": "not_grounded", "r3": "not_grounded"})
+
+    summary_path = tmp_path / "summary_calibration.json"
+    monkeypatch.setattr(G, "DEFAULT_SUMMARY_PATH", summary_path)
+
+    G.main([str(labelling_path)])
+    first_run_output = capsys.readouterr().out
+    assert "(first run)" in first_run_output
+
+    written = json.loads(summary_path.read_text(encoding="utf-8"))
+    assert written["total_rows"] == 3
+    assert written["labelled_rows"] == 3
+    assert written["agreement_rate"] == pytest.approx(2 / 3)
+
+    # A second run against the SAME (unchanged) data prints a delta
+    # against the summary the first run just committed, not "(first
+    # run)" again -- the numbers are identical, so every delta is +0.
+    G.main([str(labelling_path)])
+    second_run_output = capsys.readouterr().out
+    assert "(first run)" not in second_run_output
+    assert "agreement_rate" in second_run_output

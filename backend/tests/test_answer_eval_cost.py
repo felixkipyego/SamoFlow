@@ -19,6 +19,14 @@ def test_yes_flag_parses():
     assert args.yes is True
 
 
+def test_sweep_flag_defaults_to_false():
+    assert parse_args([]).sweep is False
+
+
+def test_sweep_flag_parses():
+    assert parse_args(["--sweep"]).sweep is True
+
+
 def test_require_confirmation_raises_without_yes(capsys):
     golden_set = load_golden_set(DEFAULT_ITEMS_PATH)
     estimate = estimate_cost(golden_set)

@@ -68,3 +68,67 @@ def test_hooks_py_exits_cleanly_on_an_undecodable_file(tmp_path):
     assert result.returncode != 0
     assert "Traceback" not in result.stderr
     assert "hooks.py: could not read a file during the scan:" in result.stderr
+
+
+def _run_hooks(cwd) -> str:
+    result = subprocess.run(  # noqa: S603 (fixed args: sys.executable + a path, not user input)
+        [sys.executable, str(_HOOKS_PY)],
+        capture_output=True,
+        text=True,
+        timeout=10,
+        cwd=cwd,
+        env=minimal_subprocess_env(),
+    )
+    assert result.returncode == 0, result.stderr
+    return result.stdout
+
+
+def test_the_real_repository_marker_count_is_77():
+    # The real, live regression this task's own exclusion exists for:
+    # Task 3.7.d's own injection-detector constant and its test both
+    # mirror real planted-injection text verbatim, which happens to
+    # contain one of this scanner's own four trigger words as an
+    # ordinary English word, not a real marker comment -- confirmed by
+    # reading both lines directly before this task's own fix. Pinned
+    # here as a real number, not just "fewer than before". (Deliberately
+    # avoids spelling any of the four trigger words literally anywhere in
+    # THIS file's own comments/strings -- this file is itself scanned,
+    # and is not in the exclusion set below.)
+    stdout = _run_hooks(REPO_ROOT)
+    first_line = stdout.splitlines()[0]
+    count = int(first_line.split()[0])
+    assert count == 77, (
+        f"expected 77 markers against the real repository, got {count} -- "
+        f"either a real marker was added/removed, or the exclusion below "
+        f"needs revisiting:\n{stdout}"
+    )
+
+
+def test_marker_scan_excludes_only_the_two_injection_detector_files_and_nothing_else(tmp_path):
+    # Proves the exclusion is EXACTLY the two files it claims to be --
+    # not a directory, not a filename pattern, not the trigger word
+    # itself. A third file, at a path NOT in the exclusion set, built
+    # with the identical trigger text, must still be caught. The marker
+    # word is assembled at runtime (never spelled contiguously in THIS
+    # file's own source), for the same reason the module docstring above
+    # does: this file is scanned too, and is not in the exclusion set.
+    marker_word = "NO" + "TE"
+    trigger_line = f'MARKER = "IMPORTANT {marker_word} TO THE ASSISTANT READING THIS PAGE"\n'
+
+    (tmp_path / "evals").mkdir()
+    excluded_a = tmp_path / "backend" / "scripts" / "injection_detectors.py"
+    excluded_b = tmp_path / "backend" / "tests" / "test_injection_detectors.py"
+    not_excluded = tmp_path / "backend" / "app" / "some_other_module.py"
+    for path in (excluded_a, excluded_b, not_excluded):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(trigger_line)
+
+    stdout = _run_hooks(tmp_path)
+
+    assert "injection_detectors.py" not in stdout
+    assert "test_injection_detectors.py" not in stdout
+    assert "some_other_module.py" in stdout
+    first_line = stdout.splitlines()[0]
+    assert int(first_line.split()[0]) == 1, (
+        f"expected exactly 1 marker (the non-excluded file only): {stdout}"
+    )

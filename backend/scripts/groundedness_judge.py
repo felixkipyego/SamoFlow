@@ -30,6 +30,7 @@
 import csv
 import json
 import re
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -193,10 +194,29 @@ _LABELLING_FIELDNAMES = ("row_id", "question", "context", "answer", "label")
 _KEY_FIELDNAMES = ("row_id", "origin", "judge_label")
 
 
+def _existing_csv_has_a_filled_in_label(path: Path) -> bool:
+    with path.open(newline="", encoding="utf-8") as handle:
+        return any(row["label"].strip() for row in csv.DictReader(handle))
+
+
 def write_labelling_csv(rows: list[CalibrationRow], path: Path) -> None:
     """The file Felix actually sees -- no `origin`, no `judge_label`,
     `label` always present but EMPTY (his own column to fill in).
+
+    Task 3.7.e, item 1d: each real run already writes a NEW, timestamped
+    path (manual_run_answer_eval.py's own `run_stamp`), so this collision
+    is not expected in ordinary use -- but refuses outright, rather than
+    silently overwriting, if `path` already exists AND already has at
+    least one real (non-blank) label filled in. A blank-labels file (one
+    exported but not yet touched by Felix) is not protected -- re-running
+    against the exact same timestamp second is harmless in that case.
     """
+    if path.exists() and _existing_csv_has_a_filled_in_label(path):
+        raise FileExistsError(
+            f"{path} already contains at least one filled-in label -- refusing to "
+            "overwrite Felix's own labelling work. Each run writes a new timestamped "
+            "file; re-run instead of reusing an old path."
+        )
     with path.open("w", newline="", encoding="utf-8") as handle:
         writer = csv.DictWriter(handle, fieldnames=_LABELLING_FIELDNAMES)
         writer.writeheader()
@@ -289,3 +309,64 @@ def import_calibration_labels(labelling_path: Path, key_path: Path) -> Calibrati
         confusion_matrix=confusion,
         corrupted_recall=corrupted_judge_correct / corrupted_total,
     )
+
+
+# --- CLI entry point (`make eval-calibrate`, Task 3.7.e item 3) -------------
+_RESULTS_DIR = Path(__file__).resolve().parents[2] / "evals" / "golden_set" / "results"
+DEFAULT_SUMMARY_PATH = Path(__file__).resolve().parents[2] / "evals" / "golden_set" / (
+    "summary_calibration.json"
+)
+
+
+def find_latest_labelling_csv(results_dir: Path) -> Path:
+    """The newest `calibration_*.csv` in `results_dir` -- filenames sort
+    lexicographically in the same order as chronologically, since the
+    timestamp format (`%Y%m%d-%H%M%S`, manual_run_answer_eval.py's own
+    `run_stamp`) is itself lexicographically ordered. Raises a clear,
+    actionable `SystemExit` rather than an obscure IndexError when Felix
+    has not run `make eval-answers` yet.
+    """
+    candidates = sorted(results_dir.glob("calibration_*.csv"))
+    if not candidates:
+        raise SystemExit(
+            f"No calibration_*.csv file found in {results_dir} -- run `make eval-answers` "
+            "first, then have Felix fill in its 'label' column before running this."
+        )
+    return candidates[-1]
+
+
+def main(argv: list[str] | None = None) -> None:
+    # Pure local file I/O -- no Settings, no Qdrant, no real LLM call;
+    # unlike the other two entry points, this one needs no env-pointing
+    # dance at all.
+    from app.evals.eval_summary import format_delta_table, load_previous_summary, write_summary
+
+    args = sys.argv[1:] if argv is None else argv
+    labelling_path = Path(args[0]) if args else find_latest_labelling_csv(_RESULTS_DIR)
+    key_path = labelling_path.parent / f"{labelling_path.stem}.key.json"
+
+    result = import_calibration_labels(labelling_path, key_path)
+    summary = {
+        "total_rows": result.total_rows,
+        "labelled_rows": result.labelled_rows,
+        "agreement_rate": result.agreement_rate,
+        "confusion_matrix": result.confusion_matrix,
+        "corrupted_recall": result.corrupted_recall,
+    }
+
+    print(f"Calibration file: {labelling_path}")
+    print(f"Labelled {result.labelled_rows} of {result.total_rows} rows.")
+    print(f"Judge-vs-Felix agreement rate: {result.agreement_rate:.3f}")
+    print("Confusion matrix (Felix's label -> {judge's label: count}):")
+    print(json.dumps(result.confusion_matrix, indent=2))
+    print(f"Judge recall on corrupted-origin rows: {result.corrupted_recall:.3f}")
+
+    previous = load_previous_summary(DEFAULT_SUMMARY_PATH)
+    print("\n=== Delta vs. previously committed summary ===")
+    print(format_delta_table(previous, summary))
+    write_summary(DEFAULT_SUMMARY_PATH, summary)
+    print(f"Committed summary written to {DEFAULT_SUMMARY_PATH} -- commit it to track this run.")
+
+
+if __name__ == "__main__":
+    main()

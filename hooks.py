@@ -26,8 +26,31 @@ _TODO_STEP = re.compile(r"TODO\(([^)]+)\)")
 
 DEFAULT_ROOTS = ("backend", "evals")
 
+# Task 3.7.e: a narrow, EXACT-path exclusion -- not a word change, per
+# direct instruction. Correction to that instruction's own premise,
+# stated plainly rather than silently "fixed" against the wrong target:
+# the 2 new matches 3.7.d introduced are NOT in golden-set fixture DATA
+# files (those are .md/.yaml under evals/golden_set/ and were never
+# scanned in the first place -- this function only ever walks *.py).
+# They are the word "NOTE" appearing inside a Python STRING LITERAL in
+# exactly two source files: the deterministic injection detector's own
+# `INJECTED_INSTRUCTION_MARKERS` tuple (which deliberately mirrors the
+# real planted corpus text verbatim, so the detector can recognise it
+# being echoed back) and that constant's own test. Excluding these two
+# files specifically -- not a directory, not a filename pattern, not the
+# word itself -- is the correct, narrowest fix: confirmed live, nothing
+# else in the repository shares this false-positive cause.
+_EXCLUDED_PATHS = frozenset(
+    {
+        Path("backend/scripts/injection_detectors.py"),
+        Path("backend/tests/test_injection_detectors.py"),
+    }
+)
+
 
 def _is_skipped(path: Path) -> bool:
+    if path in _EXCLUDED_PATHS:
+        return True
     return any(part in _SKIP_DIR_NAMES or part.startswith(".venv") for part in path.parts)
 
 

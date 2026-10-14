@@ -19,6 +19,12 @@
 #   export OPENAI_API_KEY=sk-...                      # a REAL key
 #   python scripts/manual_run_answer_eval.py --yes
 #
+# Crash recovery (Task 3.7.e, item 1b): if a run was killed mid-way (never
+# reaching its own `finally` cleanup below), run with --sweep instead --
+# deletes every leftover eval-tenant Qdrant point and checkpointer thread,
+# reports what it removed, makes no real LLM calls, needs no --yes:
+#   python scripts/manual_run_answer_eval.py --sweep
+#
 # Every non-greeting item goes through the real guarded entry point
 # (`run_turn()`, app/agent/entrypoint.py) against a real checkpointer and
 # a real Qdrant, seeded from the SAME frozen synthetic corpus 3.7.c
@@ -77,6 +83,7 @@ def _point_env_at_test_services() -> None:
 
 _point_env_at_test_services()  # MUST run before any `app.*` import below
 
+import psycopg  # noqa: E402
 from langchain_core.messages import AIMessage  # noqa: E402
 from qdrant_client import AsyncQdrantClient  # noqa: E402
 
@@ -85,7 +92,7 @@ from app.agent import checkpointer  # noqa: E402
 from app.agent.entrypoint import read_state, run_turn  # noqa: E402
 from app.agent.graph import Citation, RetrievedChunk, build_graph  # noqa: E402
 from app.auth.dependencies import VerifiedIdentity  # noqa: E402
-from app.config import get_settings  # noqa: E402
+from app.config import Settings, get_settings  # noqa: E402
 from app.evals.answer_eval_metrics import (  # noqa: E402
     TurnOutcome,
     can_answer_confusion_matrix,
@@ -94,6 +101,11 @@ from app.evals.answer_eval_metrics import (  # noqa: E402
     infer_actual_route,
     route_confusion_matrix,
     zero_citation_violations,
+)
+from app.evals.eval_summary import (  # noqa: E402
+    format_delta_table,
+    load_previous_summary,
+    write_summary,
 )
 from app.evals.golden_set import (  # noqa: E402
     DEFAULT_ITEMS_PATH,
@@ -112,11 +124,66 @@ from scripts.groundedness_judge import (  # noqa: E402
     write_labelling_csv,
 )
 from scripts.injection_detectors import CANARIES, detect_injection_leak  # noqa: E402
-from scripts.retrieval_eval import load_and_check_frozen_corpus, seed_frozen_corpus  # noqa: E402
+from scripts.retrieval_eval import (  # noqa: E402
+    eval_marker_filter,
+    load_and_check_frozen_corpus,
+    seed_frozen_corpus,
+)
 
 CALIBRATION_TOTAL = 30
 CALIBRATION_CORRUPTED = 8
 _RESULTS_DIR = Path(__file__).resolve().parents[2] / "evals" / "golden_set" / "results"
+# Item 3 (Task 3.7.e): the one COMMITTED summary path this entry point
+# owns -- see the `summary`/`previous_summary` block in main() below.
+DEFAULT_SUMMARY_PATH = _RESULTS_DIR.parent / "summary_answers.json"
+# Task 3.7.e: a small, gitignored-by-directory (evals/golden_set/results/
+# is wholesale gitignored, see .gitignore) tracking file -- the ONLY
+# durable record of a tenant_id a normal run is still using, written at
+# the START of main() below and cleared on CLEAN exit (inside `finally`,
+# after cleanup actually succeeds). A crash (SIGKILL, OOM, power loss --
+# anything that skips `finally` entirely) leaves the tenant_id behind
+# here for `--sweep` to recover checkpointer threads by. The Qdrant side
+# of a crash is recovered differently (eval_marker_filter(), independent
+# of this file's own survival) -- see run_sweep()'s own docstring.
+_TRACKING_FILE = _RESULTS_DIR / ".active_eval_tenants.json"
+
+
+def _read_tracked_tenants() -> list[str]:
+    if not _TRACKING_FILE.exists():
+        return []
+    return json.loads(_TRACKING_FILE.read_text(encoding="utf-8"))
+
+
+def _add_tracked_tenant(tenant_id: uuid.UUID) -> None:
+    _RESULTS_DIR.mkdir(parents=True, exist_ok=True)
+    tenants = _read_tracked_tenants()
+    tenants.append(str(tenant_id))
+    _TRACKING_FILE.write_text(json.dumps(tenants), encoding="utf-8")
+
+
+def _remove_tracked_tenant(tenant_id: uuid.UUID) -> None:
+    remaining = [t for t in _read_tracked_tenants() if t != str(tenant_id)]
+    if remaining:
+        _TRACKING_FILE.write_text(json.dumps(remaining), encoding="utf-8")
+    elif _TRACKING_FILE.exists():
+        _TRACKING_FILE.unlink()
+
+
+def _require_dev_or_test_environment(settings: Settings) -> None:
+    # Item 1c, per direct instruction: "Use the project's existing
+    # environment setting if there is one" -- Settings.app_env
+    # (app/config.py) IS that existing setting (Literal["development",
+    # "test", "production"], confirmed by reading it directly), so this
+    # reuses it rather than inventing a second, parallel environment
+    # concept. This script seeds/deletes real tenant data in the SHARED
+    # production Qdrant collection and makes real paid LLM calls -- a
+    # production APP_ENV must refuse outright, not just warn.
+    if settings.app_env not in {"development", "test"}:
+        raise SystemExit(
+            f"APP_ENV={settings.app_env!r} -- this script seeds and deletes real tenant "
+            "data in the shared Qdrant collection and makes real, paid LLM calls. It "
+            "refuses to run unless Settings.app_env is 'development' or 'test'."
+        )
 
 
 # --- per-item real run ------------------------------------------------------
@@ -289,21 +356,103 @@ def select_calibration_rows(
     return rows
 
 
+# --- --sweep: crash recovery --------------------------------------------------
+
+
+async def run_sweep() -> None:
+    """Recovers leftover eval data from a run that was killed mid-way
+    (SIGKILL, OOM, power loss -- anything that skips the `finally` block
+    in `main()` below entirely, so the normal cleanup never ran). Two
+    independent recovery paths, on purpose:
+
+      - Qdrant points: ANY point carrying EVAL_MARKER_FIELD, across
+        every tenant_id, found via `eval_marker_filter()`
+        (scripts/retrieval_eval.py) -- robust even if the tracking file
+        below was ALSO lost (e.g. the whole machine died, not just this
+        process), since it needs no durable state of its own at all.
+      - Checkpointer threads: LangGraph's own checkpoint rows have no
+        payload-marker equivalent, so these are recovered from
+        `_TRACKING_FILE` instead -- the durable record of every
+        tenant_id a run had started but not yet cleanly finished. Each
+        tracked tenant_id's own thread_ids are recovered with a raw
+        `thread_id LIKE '<tenant_id>:%'` query (thread_ids are always
+        built as f"{tenant_id}:{vid}:{conversation_id}" in
+        `run_answer_eval()` above), the same raw-psycopg-against-
+        checkpoint-tables precedent `tests/conftest.py`'s own
+        `reset_checkpoint_env()` already established.
+
+    Reports counts for both and makes no real LLM calls.
+    """
+    settings = get_settings()
+    _require_dev_or_test_environment(settings)
+
+    qdrant_client: AsyncQdrantClient = qdrant.build_qdrant_client(
+        settings.qdrant_url, settings.qdrant_api_key_str()
+    )
+    try:
+        marker_filter = eval_marker_filter()
+        count_result = await qdrant_client.count(
+            collection_name=qdrant.COLLECTION_NAME, count_filter=marker_filter, exact=True
+        )
+        removed_points = count_result.count
+        if removed_points:
+            await qdrant_client.delete(
+                collection_name=qdrant.COLLECTION_NAME, points_selector=marker_filter
+            )
+    finally:
+        await qdrant_client.close()
+
+    removed_threads = 0
+    tracked_tenants = _read_tracked_tenants()
+    if tracked_tenants:
+        await checkpointer.run_checkpointer_setup()
+        await checkpointer.open_checkpointer_pool()
+        cp = checkpointer.get_checkpointer()
+        try:
+            conninfo = checkpointer.checkpointer_conninfo()
+            async with await psycopg.AsyncConnection.connect(conninfo, autocommit=True) as conn:
+                for tenant_id_str in tracked_tenants:
+                    cursor = await conn.execute(
+                        "SELECT DISTINCT thread_id FROM checkpoints WHERE thread_id LIKE %s",
+                        (f"{tenant_id_str}:%",),
+                    )
+                    rows = await cursor.fetchall()
+                    for (thread_id,) in rows:
+                        await cp.adelete_thread(thread_id)
+                        removed_threads += 1
+        finally:
+            await checkpointer.close_checkpointer_pool()
+        if _TRACKING_FILE.exists():
+            _TRACKING_FILE.unlink()
+
+    print(
+        f"--sweep: removed {removed_points} eval-marked Qdrant point(s) and "
+        f"{removed_threads} checkpointer thread(s) tracked against "
+        f"{len(tracked_tenants)} crashed-run tenant(s)."
+    )
+
+
 # --- main orchestration -------------------------------------------------------
 
 
 async def main() -> None:
     args = parse_args(sys.argv[1:])
+    if args.sweep:
+        await run_sweep()
+        return
+
     golden_set = load_golden_set(DEFAULT_ITEMS_PATH)
     estimate = estimate_cost(golden_set)
     require_confirmation(estimate, args.yes)
 
     settings = get_settings()
+    _require_dev_or_test_environment(settings)
     corpus = load_and_check_frozen_corpus(DEFAULT_SYNTHETIC_CORPUS_PATH)
     qdrant_client: AsyncQdrantClient = qdrant.build_qdrant_client(
         settings.qdrant_url, settings.qdrant_api_key_str()
     )
     tenant_id = uuid.uuid4()
+    _add_tracked_tenant(tenant_id)
 
     await checkpointer.run_checkpointer_setup()
     await checkpointer.open_checkpointer_pool()
@@ -379,11 +528,13 @@ async def main() -> None:
         )
 
         print("\n=== Citation hit rate per category ===")
+        citation_hit_rate_by_category: dict[str, float] = {}
         for category, cat_outcomes in group_by_category(outcomes).items():
             applicable = [o for o in cat_outcomes if o.actual_can_answer]
             if not applicable:
                 print(f"  {category}: n/a (no can_answer=true turns)")
                 continue
+            citation_hit_rate_by_category[category] = citation_hit_rate(applicable)
             print(f"  {category}: {citation_hit_rate(applicable):.3f} (n={len(applicable)})")
 
         print("\n=== Zero-citation rule violations ===")
@@ -404,23 +555,37 @@ async def main() -> None:
         print(f"  Calibration export: {labelling_path}")
         print(f"  Calibration key (do not share with the labeller): {key_path}")
 
+        summary = {
+            "route_confusion": route_confusion_matrix(outcomes),
+            "can_answer_confusion": {
+                "tp": confusion.true_positive, "fp": confusion.false_positive,
+                "tn": confusion.true_negative, "fn": confusion.false_negative,
+                "accuracy": confusion.accuracy,
+            },
+            "citation_hit_rate": citation_hit_rate_by_category,
+            "zero_citation_violation_count": len(violations),
+            "injection_passed": injection_passed,
+            "groundedness_uncalibrated_grounded_share": grounded_share,
+        }
+
         results_path = _RESULTS_DIR / f"run_{run_stamp}.json"
-        results_path.write_text(
-            json.dumps(
-                {
-                    "route_confusion": route_confusion_matrix(outcomes),
-                    "can_answer_confusion": {
-                        "tp": confusion.true_positive, "fp": confusion.false_positive,
-                        "tn": confusion.true_negative, "fn": confusion.false_negative,
-                    },
-                    "injection_passed": injection_passed,
-                    "groundedness_uncalibrated_grounded_share": grounded_share,
-                },
-                indent=2,
-            ),
-            encoding="utf-8",
-        )
+        results_path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
         print(f"\nFull results written to {results_path}")
+
+        # Item 3 (Task 3.7.e): the one COMMITTED (never gitignored) copy of
+        # this same metrics-only summary -- always this exact path, so a
+        # `git diff` on it shows the run-over-run change, and a delta
+        # table against whatever was previously committed there prints
+        # immediately, matching the eval rule's own "paste both delta
+        # tables" requirement.
+        previous_summary = load_previous_summary(DEFAULT_SUMMARY_PATH)
+        print("\n=== Delta vs. previously committed summary ===")
+        print(format_delta_table(previous_summary, summary))
+        write_summary(DEFAULT_SUMMARY_PATH, summary)
+        print(
+            f"Committed summary written to {DEFAULT_SUMMARY_PATH} -- "
+            "commit it to track this run."
+        )
 
         if injection_failures:
             print(
@@ -436,6 +601,10 @@ async def main() -> None:
             await cp.adelete_thread(thread_id)
         await qdrant_client.close()
         await checkpointer.close_checkpointer_pool()
+        # Only cleared once cleanup above has actually run -- a crash
+        # BEFORE this point leaves the tenant_id tracked, exactly so
+        # `--sweep` can find it later (see run_sweep()'s own docstring).
+        _remove_tracked_tenant(tenant_id)
 
 
 if __name__ == "__main__":

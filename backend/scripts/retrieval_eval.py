@@ -50,6 +50,7 @@
 # BM25 math with no network call and no API key, confirmed deterministic
 # per text (app/ingest/embedding.py's own docstring); freezing it would
 # add a second cache for zero benefit.
+import asyncio
 import hashlib
 import json
 import uuid
@@ -62,15 +63,19 @@ from pathlib import Path
 from langchain_core.messages import HumanMessage
 from pydantic import BaseModel, ConfigDict
 from qdrant_client import AsyncQdrantClient
+from qdrant_client.models import FieldCondition, Filter, MatchValue
 
 from app import qdrant
 from app.agent.graph import _prepare_node
 from app.evals.golden_set import (
+    DEFAULT_ITEMS_PATH,
+    DEFAULT_SYNTHETIC_CORPUS_PATH,
     GOLDEN_SET_DIR,
     FrozenCorpus,
     GoldenSet,
     GoldenSetItem,
     assert_embedding_config_is_current,
+    load_golden_set,
     resolve_item_sources,
 )
 from app.evals.golden_set import (
@@ -279,6 +284,32 @@ def frozen_dense_embedder(vector_by_text: dict[str, list[float]]) -> Iterator[No
         embedding_module._get_client = original
 
 
+# Task 3.7.e: a small, deliberate addition to this 3.7.c function (flagged
+# per rule 2, not a silent change) -- every point this function writes now
+# also carries a payload field identifying it as eval-seeded data, so a
+# `--sweep` cleanup pass (manual_run_answer_eval.py) can find and remove
+# leftover points from a crashed run via a plain Qdrant filter, regardless
+# of which tenant_id produced them. Harmless for 3.7.c's own caller (its
+# own collection is dropped wholesale, never scanned by payload) and for
+# every other reader (`chunk_from_scored_point()` reads specific keys by
+# name, confirmed by reading it directly -- an extra, unindexed payload
+# key is never a schema concern for Qdrant or for this codebase).
+EVAL_MARKER_FIELD = "_samoflow_eval_marker"
+EVAL_MARKER_VALUE = "answer-eval"
+
+
+def eval_marker_filter() -> Filter:
+    """The one Filter a `--sweep` cleanup pass needs: every point ANY
+    eval run has ever seeded, across every tenant_id a crashed run may
+    have used -- unlike `qdrant.tenant_filter()`, deliberately not
+    scoped to one tenant, since sweeping exists precisely because a
+    crashed run's own tenant_id was never recorded anywhere durable.
+    """
+    return Filter(
+        must=[FieldCondition(key=EVAL_MARKER_FIELD, match=MatchValue(value=EVAL_MARKER_VALUE))]
+    )
+
+
 async def seed_frozen_corpus(
     client: AsyncQdrantClient, collection_name: str, tenant_id: uuid.UUID, corpus: FrozenCorpus
 ) -> dict[str, uuid.UUID]:
@@ -310,6 +341,7 @@ async def seed_frozen_corpus(
             embedding_version=corpus.embedding_version,
             text=chunk.text,
         )
+        payload[EVAL_MARKER_FIELD] = EVAL_MARKER_VALUE
         point_id = build_point_id(document_id, chunk.chunk_index, corpus.embedding_version)
         sparse = SparseVectorData(indices=chunk.sparse_indices, values=chunk.sparse_values)
         points.append(build_point(point_id, payload, chunk.dense_vector, sparse))
@@ -533,3 +565,51 @@ def assert_no_regression(report: dict, baseline: dict, category_sizes: dict[str,
             )
     if failures:
         raise AssertionError("retrieval metric regression(s) detected:\n" + "\n".join(failures))
+
+
+# --- CLI entry point (`make eval`, Task 3.7.e item 3) ------------------------
+# The free, deterministic half of the eval rule -- no LLM call anywhere in
+# this path (frozen dense query vectors, local/free sparse embedding),
+# real Qdrant only (test-qdrant). Writes/overwrites the one COMMITTED
+# summary file this entry point owns and prints a delta table against
+# whatever was previously committed there, per direct instruction ("so
+# changes show up in git and in reports").
+DEFAULT_SUMMARY_PATH = GOLDEN_SET_DIR / "summary_retrieval.json"
+
+
+async def _run_and_summarize(client: AsyncQdrantClient) -> dict:
+    golden_set = load_golden_set(DEFAULT_ITEMS_PATH)
+    corpus = load_and_check_frozen_corpus(DEFAULT_SYNTHETIC_CORPUS_PATH)
+    query_vectors = load_and_check_frozen_query_vectors(DEFAULT_QUERY_VECTORS_PATH)
+    results = await run_retrieval_eval(golden_set, corpus, query_vectors, client)
+    return summarize_results(results)
+
+
+def main() -> None:
+    # Local imports, matching manual_run_answer_eval.py's own established
+    # convention: point_test_env_at_env_vars() must run before Settings
+    # is ever constructed, and this module's own top-level imports (used
+    # by the pytest-driven live test) must stay importable with no env at
+    # all -- so the env-pointing dance stays inside main(), never at
+    # module scope.
+    from scripts._shared import point_test_env_at_env_vars
+
+    point_test_env_at_env_vars()
+    from app.config import get_settings
+    from app.evals.eval_summary import format_delta_table, load_previous_summary, write_summary
+
+    settings = get_settings()
+    client = qdrant.build_qdrant_client(settings.qdrant_url, settings.qdrant_api_key_str())
+    try:
+        summary = asyncio.run(_run_and_summarize(client))
+    finally:
+        asyncio.run(client.close())
+
+    previous = load_previous_summary(DEFAULT_SUMMARY_PATH)
+    print(format_delta_table(previous, summary))
+    write_summary(DEFAULT_SUMMARY_PATH, summary)
+    print(f"\nSummary written to {DEFAULT_SUMMARY_PATH} -- commit it to track this run.")
+
+
+if __name__ == "__main__":
+    main()

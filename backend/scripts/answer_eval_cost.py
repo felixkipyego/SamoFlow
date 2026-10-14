@@ -84,6 +84,20 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         help="Required to actually make real API calls -- otherwise prints the cost "
         "estimate and exits.",
     )
+    # Task 3.7.e, item 1b: a separate, no-real-LLM-calls cleanup mode --
+    # deletes every eval-marked Qdrant point (any tenant) and every
+    # checkpointer thread left behind by a crashed run, then exits. Lives
+    # on this SAME parser (not a second argparse instance) so `--sweep`
+    # and `--yes` are mutually visible to argparse's own help text; the
+    # caller (manual_run_answer_eval.main()) checks `args.sweep` BEFORE
+    # estimating cost/requiring confirmation, since a cleanup pass makes
+    # no LLM calls at all and needs neither.
+    parser.add_argument(
+        "--sweep",
+        action="store_true",
+        help="Delete all leftover eval-tenant Qdrant points and checkpointer threads from "
+        "crashed runs, report what was removed, and exit -- makes no real LLM calls.",
+    )
     return parser.parse_args(argv)
 
 

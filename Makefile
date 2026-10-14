@@ -37,7 +37,7 @@ UV_COMPILE = uv pip compile backend/pyproject.toml --universal --python-version 
 
 .DEFAULT_GOAL := help
 
-.PHONY: help env up down down-volumes migrate test test-db test-db-down test-qdrant test-qdrant-down test-all lint evals install lock lock-upgrade lock-check audit hooks
+.PHONY: help env up down down-volumes migrate test test-db test-db-down test-qdrant test-qdrant-down test-all lint evals eval eval-answers eval-calibrate install lock lock-upgrade lock-check audit hooks
 
 help:
 	@echo "make env          create .env from .env.example if it does not exist yet"
@@ -53,6 +53,9 @@ help:
 	@echo "make test-all     run the full suite against test-db and test-qdrant, always cleaning up"
 	@echo "make lint         ruff check backend, evals and hooks.py"
 	@echo "make evals        run the eval placeholder"
+	@echo "make eval         free, deterministic retrieval-only eval (real test-qdrant, no LLM calls)"
+	@echo "make eval-answers real end-to-end answer eval -- real LLM calls, costs money, needs --yes"
+	@echo "make eval-calibrate import Felix's labels, print judge agreement/confusion/corrupted recall"
 	@echo "make install      install hashed runtime+dev deps, then the backend package"
 	@echo "make lock         regenerate both lockfiles (no upgrade)"
 	@echo "make lock-upgrade regenerate both lockfiles, allowing newer versions"
@@ -141,6 +144,44 @@ lint:
 
 evals:
 	python evals/run.py
+
+# Task 3.7.e: the free, deterministic half of the eval rule -- no LLM call
+# anywhere (frozen dense query vectors, local/free sparse embedding), real
+# Qdrant only. Writes/overwrites the one committed `evals/golden_set/
+# summary_retrieval.json` and prints a delta table against whatever was
+# previously committed there; cleanup always runs, exit code preserved,
+# matching test-all's own established pattern.
+eval: test-qdrant
+	@(set -a; . ./.env; set +a; \
+	  cd backend && TEST_QDRANT_URL=http://127.0.0.1:56333 TEST_QDRANT_API_KEY=test-qdrant-key TEST_QDRANT_READ_ONLY_API_KEY=test-qdrant-readonly-key python scripts/retrieval_eval.py); \
+	rc=$$?; \
+	$(MAKE) test-qdrant-down; \
+	exit $$rc
+
+# Task 3.7.e: the real end-to-end answer eval -- real LLM calls (chat
+# model + groundedness judge), costs real money. Prints a cost estimate
+# and exits unless re-run with ARGS=--yes (e.g. `make eval-answers
+# ARGS=--yes`); `make eval-answers ARGS=--sweep` instead deletes leftover
+# eval data from a crashed run and makes no LLM calls at all. Needs the
+# real OPENAI_API_KEY already in .env (sourced here, the same file
+# `make up`/`make migrate` already depend on) -- TEST_QDRANT_*/
+# TEST_DATABASE_URL point at the disposable test services, never real
+# production Qdrant/Postgres.
+eval-answers: test-db test-qdrant
+	@(set -a; . ./.env; set +a; \
+	  cd backend && TEST_DATABASE_URL=postgresql+psycopg://widgetplatform:change-me@127.0.0.1:55432/widgetplatform_test TEST_QDRANT_URL=http://127.0.0.1:56333 TEST_QDRANT_API_KEY=test-qdrant-key TEST_QDRANT_READ_ONLY_API_KEY=test-qdrant-readonly-key python scripts/manual_run_answer_eval.py $(ARGS)); \
+	rc=$$?; \
+	$(MAKE) test-db-down; \
+	$(MAKE) test-qdrant-down; \
+	exit $$rc
+
+# Task 3.7.e: imports Felix's filled-in labelling CSV (the newest
+# calibration_*.csv in evals/golden_set/results/ by default, or
+# ARGS=<path> for a specific one) and prints judge-vs-Felix agreement,
+# the full confusion matrix, and the judge's own recall on the corrupted
+# items. Pure local file I/O -- no real service, no real LLM call.
+eval-calibrate:
+	cd backend && python scripts/groundedness_judge.py $(ARGS)
 
 # Installs from the hash-pinned dev lockfile (never resolves versions itself,
 # see Task 1.1.o.b), then the backend package with no dependency resolution
