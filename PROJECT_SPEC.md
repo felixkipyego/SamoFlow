@@ -70,7 +70,7 @@ A production-ready, multi-tenant, embeddable AI widget platform: one website is 
 | 3.5 | Follow-up rewrite | Done | Completed 2026-10-13; all subtasks 3.5.a–3.5.e done, built as joining not a model rewrite (recorded deviation from §6.3); see the Step 3.5 task list below |
 | 3.6 | Tool wrapper and MCP knowledge search [SECURITY] | Deferred | Deferred out of Phase 3 (2026-10-13), bundled with §19's "tenant-supplied tool servers" — see decision log; §16's "client_id has no effect" line closed structurally without building this step |
 | 3.7 | Golden set and eval runner | Done | Completed 2026-10-14; all subtasks 3.7.a–3.7.i done; see the Step 3.7 task list below. The `company_site` corpus half (3.7.b) is still not started — still awaiting the real company-site URL, a real, named gap (§9), not silently dropped |
-| 3.8 | Phase 3 acceptance | Not started | – |
+| 3.8 | Phase 3 acceptance | Done | Completed 2026-10-14; all subtasks 3.8.a–3.8.b done; see closure summary below the Step 3.8 task list, and the separate Phase 3 closure section right after it |
 | 4.1 | Chat endpoint (SSE) [SECURITY] | Not started | – |
 | 4.2 | Conversations endpoints and retention sweep | Not started | – |
 | 4.3 | Usage, quotas and alert emails | Not started | – |
@@ -5950,6 +5950,68 @@ Verified: `make lint` (full repo) clean. Offline suite: 991 passed (up from 986 
 3. **Pushed back on / would have done differently**: none on the prompt itself — "correct the filter, then measure" is exactly what surfaced a real win (gpt-6-luna) the ORIGINAL, over-narrow filter would have hidden entirely. What I'd flag back: the task's own cost-derivation request (Item 1a) necessarily uses the golden set's own category mix as a stand-in for real traffic — stated as an approximation, not resolved, since no real traffic data exists yet to do better.
 4. **Highest production risk in this change**: the model swap is a real, live behavior change to every real answer call starting now, not a research artifact — `gpt-6-luna`'s own real-world latency/availability under genuine production concurrency (not this task's own light, sequential research traffic) remains unmeasured, same risk class Task 3.7.g/h already named for every prior primary-model change; Phase 7's own k6 load testing is the real check, now doubly relevant since the primary has changed twice in three tasks.
 
+### Step 3.8 task list (approved)
+
+| Task | Description | Status |
+|---|---|---|
+| 3.8.a | Live acceptance gate: check docs/SPEC.md §18's own Phase 3 accept line clause by clause against real evidence (test names, eval numbers, commits); reconcile every Phase-3-owned §9 marker (close or re-own, with a reason) | Done |
+| 3.8.b | Close-out: mark Step 3.8 and Phase 3 Done in the main components table and this task list; Phase 3 closure summary one level up from Step 3.8's own step-level closure | Done |
+
+### Step 3.8 closure summary (2026-10-14)
+
+Built: a fresh, independent acceptance gate for docs/SPEC.md §18's own Phase 3 accept line, and a full reconciliation of every Phase-3-owned §9 Open marker. No application code changed by this step — a documentation/audit-only task, verified at that tier (`make lint`, `make hooks`), per direct instruction that Part B is the documentation-tier item of this batch.
+
+**docs/SPEC.md §18's own Phase 3 accept line, quoted exactly:**
+> "identity and injection suites pass; unanswerable questions hit the fallback without an AI call; retrieval quality is measured on the golden set."
+
+**Clause 1 — "identity ... suite[s] pass".** Scoped to what Phase 3 actually built: no HTTP chat endpoint exists yet (that's Step 4.1), so §16's "Identity and threads" bullets about the session endpoint, `conversation_id` 404s and suspended-tenant cache TTL belong to Phase 1 (already accepted at 1.6, commit `53b286f`-adjacent era) or Phase 4, not here. Within Phase 3's own scope:
+- Cross-tenant chunk leak through `retrieve()`'s dense, sparse AND fused hybrid paths — **MET**: `tests/test_retrieval_isolation.py::test_dense_only_leak_attempt_is_blocked_through_retrieve`, `test_sparse_only_leak_attempt_is_blocked_through_retrieve`, `test_hybrid_fusion_leak_attempt_is_blocked_through_retrieve`, `test_retrieve_for_the_other_tenant_also_returns_only_their_own_results`, `test_retrieve_never_returns_a_hidden_points_even_for_its_own_tenant` (Step 3.1, commit `d380d9a`).
+- "A model-generated tool call containing `client_id` has no effect" — **MET**: `tests/test_agent_graph_answer.py::test_injected_client_id_and_tenant_id_in_the_tool_call_has_no_effect`, `test_injected_identity_keys_do_not_change_the_real_threads_own_config` (Step 3.4, commit `dc2ac46`-era).
+- Thread/conversation scoping by a server-composed `thread_id`, never client-supplied — **MET structurally**: `run_turn()`/`read_state()` build `tenant_id`/thread config only from the verified token (confirmed by reading `app/agent/graph.py` directly — no call site accepts a client-supplied thread/config value), proven end-to-end at Step 3.3 (`tests/test_agent_graph.py`, commit `08cfc9b`, "tenant identity only from server-set config, end-to-end isolation proof through run_turn/read_state"); no tool with side effects exists yet to make this exploitable from model output either (§6/§8 constraint, Step 3.6 deferred).
+- **Verdict: MET**, for the slice of "identity" this phase actually owns.
+
+**Clause 2 — "injection suite[s] pass".** **MET**: `tests/test_injection_detectors.py` (15 tests — canary-token leak, foreign-URL leak, role-change-signature leak, markdown-image escaping, 5 adversarial split/encoding/disguise cases) plus the golden set's own `injection` category (15 items) run through the real graph via `make eval-answers`, **15/15 held on every repeat across Tasks 3.7.d, 3.7.g, 3.7.h and 3.7.i** (zero tolerance; re-confirmed this same session at 3.7.i's own post-ship run, commit `f4fd869`). `tests/test_chat_model_guard.py`'s AST guard (real model construction confined to one file) is a structural backstop in the same family, unchanged.
+
+**Clause 3 — "unanswerable questions hit the fallback without an AI call".** **MET**: `tests/test_agent_graph_gate.py::test_below_threshold_reaches_fallback_with_zero_model_calls` names the exact behavior (a monkeypatched chat-model call that would raise if invoked at all); `test_gate_zero_chunks_routes_to_fallback_shape`/`test_gate_below_threshold_routes_to_fallback_shape` cover the two real ways a turn fails the gate (Step 3.4.d, commit `729bfca`). The golden set's own `off_topic`/`related_unanswerable` categories exercise the same path end-to-end through `make eval-answers` from Task 3.7.d onward.
+
+**Clause 4 — "retrieval quality is measured on the golden set".** **MET**: `make eval` runs recall@k/MRR/multi-source all-docs recall against the frozen 106-item golden set with frozen query vectors and an embedding-staleness guard (Step 3.7.c, commit `86255c3`); a committed baseline with a regression floor (`evals/golden_set/summary_retrieval.json`) gates every subsequent task, re-confirmed as a clean no-op this same session (3.7.i: "retrieval untouched by any chat-model change").
+
+**Acceptance, stated plainly: docs/SPEC.md §18's Phase 3 accept line is met in full**, scoped to what Phase 3 itself built — no clause required inventing evidence or rounding up a partial result.
+
+**§9 marker reconciliation — every Phase-3-owned marker closed or re-owned, with a reason (full text lives at each marker's own location in §9, not repeated here):**
+- RESOLVED: Step 3.4 Q2 marker (greeting/unsafe classification) — closed by 3.4.f (greeting/thanks) plus the 3.4.g/Step 6.4 deferral (unsafe/abusive), already decided, not newly decided here.
+- RESOLVED: Step 3.4 Q7 marker (provider/package choice) — closed by 3.4.a/3.4.b (`langchain-openai`, Anthropic secondary, two-key switch).
+- RE-OWNED to Phase 7: Step 3.7 Q8 marker (concurrent dual retrieval / follow_up-only first-token latency) — no task ever isolated follow_up-ONLY first-token latency specifically, only the aggregate figure exists; honestly re-owned rather than claimed resolved on evidence that doesn't exist.
+- Already carried inline, no action needed: the Step 3.4 bounded-timeouts marker (already marked PARTIALLY RESOLVED/re-owned in place) and the original temperature-variance marker (already superseded/struck through).
+- RESOLVED/CONSOLIDATED at 3.7.i (this same session): the 3.7.h chat-model-fallback-configuration marker, folded into the new Phase-7-owned fallback marker; the 3.7.h temperature-rejection marker, closed by the generic `temperature_kwargs`/`reasoning_kwargs` mechanism built the same task.
+- RESOLVED at 3.7.i: the gpt-4o/gpt-4o-mini Jan-14-2027-shutdown marker — the migration to `gpt-6-luna` already happened.
+- Standing, NOT Phase-3-owned, left untouched by design: the gpt-6.1-sol latency-near-miss marker (owner: whoever next revisits §17's budget or Phase 7's load-test, re-confirmed not resolved at 3.7.i); the Task 3.7.b `company_site` corpus-half gap (owner: whenever a real company-site URL exists); the two new 3.7.i markers (owner Task 4.3, owner Phase 7) — these are forward-owned obligations, not unclosed Phase-3 work.
+
+No clause failed; stop conditions (b)/(e) do not apply.
+
+### Phase 3 closure (2026-10-14)
+
+PROJECT_SPEC.md's own Components and status table (§4) has no phase-level
+row or status field — only per-step rows, matching the Phase 1 and Phase 2
+closures' own precedent exactly. This section itself is the record that
+Phase 3 is complete.
+
+**What each component delivered** (one line each, a rollup — not a
+re-derivation of any step's own closure summary above):
+- **3.1 Hybrid retrieval [SECURITY]**: dense+sparse RRF-fused `retrieve()`; tenant-scoped filtering proven unbreakable through every sub-query path (dense/sparse/fusion); `HIDDEN_FIELD` exclusion; read-only Qdrant client; the reranker hook, staged off by default.
+- **3.2 Checkpointer and guarded entry point [SECURITY]**: `AsyncPostgresSaver` pool lifecycle (`get_checkpointer()`/open/close, idempotent `setup()`); `run_turn()`/`resume_turn()`/`read_state()` as the one guarded entry point, building `thread_id`/`tenant_id` server-side from the verified token only.
+- **3.3 Graph skeleton and router**: `AgentState` with project-owned `RetrievedChunk`; the `route()` rule precedence (quota exhausted > greeting/thanks/unsafe > escalation intent > default); fallback/guardrail/coordinator/no-answer/dependency-failure nodes, each naming its own destination and owning step.
+- **3.4 Answer node, citations and fallback**: the answer node (streamed tool-call output, can_answer-first gating, no-retry fallback chain with bounded timeouts); citations from validated chunk intersection; a backslash-escaping sanitiser (closing prior bypasses, adversarial-pass rule established); the gate (`_gate_passes()`, single batched Qdrant round-trip) separating answerable from fallback; greeting/thanks handling from YAML config; injected-identity-key and injected-`client_id` tool-call no-ops.
+- **3.5 Follow-up rewrite**: query joining (not a model rewrite — a recorded deviation from §6.3) with its own isolation proof (a prepared query exactly matching another tenant's content still isolates) and its own latency record (p50 1481ms/p95 2240ms, meets §17).
+- **3.6 Tool wrapper and MCP knowledge search [SECURITY]**: Deferred out of Phase 3 (2026-10-13), bundled with §19's "tenant-supplied tool servers" — §16's "client_id has no effect" bullet closed structurally instead, since no tool with side effects exists to exploit.
+- **3.7 Golden set and eval runner**: the 106-item golden set (7 categories) over a frozen, messy synthetic corpus; `make eval` (retrieval: recall@k/MRR, committed baseline+floor) and `make eval-answers` (routing/can_answer/citations/groundedness, deterministic canary-based injection detection, a calibratable Phoenix groundedness judge); the final model choice, `gpt-6-luna` as both primary and judge, ~22x cheaper than the original `gpt-4o` baseline with better measured quality (3.7.h/3.7.i).
+- **3.8 Phase 3 acceptance**: see its own closure summary immediately above, including the real §9-marker reconciliation closed in the same task.
+
+**docs/SPEC.md §18's own Phase 3 accept line**, quoted exactly:
+> "identity and injection suites pass; unanswerable questions hit the fallback without an AI call; retrieval quality is measured on the golden set."
+
+**This line is now satisfied.** Evidence for all three named clauses (read as four checkable sub-clauses: "identity suite", "injection suite", "fallback without an AI call", "retrieval measured on the golden set") is cited in full in the Step 3.8 closure summary immediately above, not repeated here — test names, eval numbers and the committed baseline/floor files are the record, not an assertion.
+
 ### Estimates to measure
 
 - The default limits in §9 and the budgets in §17 are starting points.
@@ -5973,9 +6035,9 @@ Verified: `make lint` (full repo) clean. Offline suite: 991 passed (up from 986 
 
 ## 7. Current task and next task
 
-Current: Step 3.7.i (candidate filter corrected to "cheaper than gpt-4o, current generation, no shutdown before May 2027"; `gpt-6-luna` (low/medium) and `gpt-6.1-sol` (low) researched full-set N=3 against the reused `gpt-4o` reference; `gpt-6-luna` at `reasoning_effort="low"` is the only candidate passing every ship-rule criterion and SHIPPED — ~22x cheaper than `gpt-4o` ($7.01→$0.3147/1000 turns) with FN improved 5→2; temperature/reasoning_effort made model-aware and generic in `chat_model.py`/`config.py`; judge model switched `gpt-4o-mini`→`gpt-6-luna` on a real head-to-head 29/30 agreement check; Felix's tenant-pricing and fallback-deferral decisions recorded with new §9 markers) is Done (2026-10-14). Step 3.7.a-h are also Done. Step 3.6 is Deferred out of Phase 3 (2026-10-13, bundled with §19's "tenant-supplied tool servers"); Step 3.5 is Done (3.5.a through 3.5.e).
-Next: Step 3.8 (Phase 3 acceptance) — confirmed against docs/SPEC.md §18's own Phase 3 step list (3.1 Hybrid retrieval; 3.2 Checkpointer; 3.3 Graph skeleton; 3.4 Answer node, citations and fallback; 3.5 Follow-up rewrite; 3.6 Tool wrapper and MCP knowledge search [SECURITY] (Deferred); 3.7 Golden set and eval runner (Done); 3.8 Phase 3 acceptance).
-Do not modify (completed tasks): 1.1.a, 1.1.b, 1.1.c, 1.1.d, 1.1.e, 1.1.f, 1.1.g, 1.1.h, 1.1.i, 1.1.j, 1.1.k, 1.1.l, 1.1.m, 1.1.n, 1.1.o.a, 1.1.o.b, 1.1.o.c, 1.1.o.d, 1.1.o.e, 1.1.o.f, 1.1.o.g, 1.1.o.h, 1.1b, 1.1c, 1.2.a, 1.2.b, 1.2.c, 1.2.d, 1.2.e, 1.2.f, 1.3.a1, 1.3.a2, 1.3.b, 1.3.c, 1.3.d, 1.3.e, 1.3.f, 1.4.a, 1.4.b, 1.4.c, 1.4.d, 1.4.e, 1.4.f, 1.4.g, 1.4.h, 1.4.i, 1.4.j, 1.4.k, 1.4.l, 1.5.a, 1.5.b, 1.5.c, 1.5.d, 1.5.e, 1.5.f, 1.6.a, 1.6.b, 1.6.c, 1.6.d, 1.6.e, 2.1.a, 2.1.b, 2.1.c, 2.1.d, 2.1.e, 2.1.f, 2.1.g, 2.1.h, 2.2.a, 2.2.b, 2.2.c, 2.2.d, 2.2.e, 2.2.f, 2.2.g, 2.2.h, 2.2.i, 2.3.a, 2.3.b, 2.3.c, 2.3.d, 2.3.e, 2.4.a, 2.4.b, 2.4.c, 2.4.d, 2.4.e, 2.4.f, 2.4.g, 2.5.a, 2.5.b, 2.5.c, 2.5.d, 2.5.e, 2.5.f, 2.6.a, 2.6.b, 2.6.c, 2.6.d, 2.6.e, 2.6.f, 2.7.a, 2.7.b, 2.7.c, 2.7.d, 2.7.e, 2.7.f, 2.8.a, 2.8.b, 2.8.c, 2.8.d, 2.8.e, 2.8.f, 2.9.a, 2.9.b, 2.9.c, 2.9.d, 2.9.e, 2.9.f, 2.9.g, 2.10.a, 2.10.b, 2.10.c, 3.1.a, 3.1.b, 3.1.c, 3.1.d, 3.1.e, 3.1.f, 3.2.a, 3.2.b, 3.2.c, 3.2.d, 3.3.a, 3.3.b, 3.3.c, 3.3.d, 3.4.a, 3.4.b, 3.4.c, 3.4.d, 3.4.e, 3.4.f, 3.4.g, 3.5.a, 3.5.b, 3.5.c, 3.5.d, 3.5.e, 3.7.a, 3.7.b, 3.7.c, 3.7.d, 3.7.e, 3.7.f, 3.7.g, 3.7.h, 3.7.i.
+Current: Step 3.8 (Phase 3 acceptance — docs/SPEC.md §18's Phase 3 accept line checked clause by clause against real test names/eval numbers/commits, all four sub-clauses MET; every Phase-3-owned §9 marker closed or re-owned with a reason; Phase 3 closure summary written) is Done (2026-10-14). Step 3.7.i (final model choice: `gpt-6-luna` shipped as primary AND judge, ~22x cheaper than `gpt-4o` with better measured quality; temperature/reasoning_effort made model-aware and generic; Felix's tenant-pricing and fallback-deferral decisions recorded) is also Done (2026-10-14), as are Step 3.7.a-h. Step 3.6 is Deferred out of Phase 3 (2026-10-13, bundled with §19's "tenant-supplied tool servers"); Step 3.5 is Done (3.5.a through 3.5.e). **Phase 3 is complete** — see the Phase 3 closure section below the Step 3.8 task list.
+Next: Step 4.1 (Chat endpoint (SSE) [SECURITY]) — the first step of Phase 4, per docs/SPEC.md §18's own Phase 4 step list (4.1 Chat endpoint (SSE) [SECURITY]; 4.2 Conversations endpoints and retention sweep; 4.3 Usage, quotas and alert emails; 4.4 Escalation [SECURITY]; 4.5 Phoenix tracing; 4.6 Phase 4 acceptance) — blocked on the Phase 4 kickoff decisions Felix is asked to answer (see the Phase 4 kickoff list recorded this same session).
+Do not modify (completed tasks): 1.1.a, 1.1.b, 1.1.c, 1.1.d, 1.1.e, 1.1.f, 1.1.g, 1.1.h, 1.1.i, 1.1.j, 1.1.k, 1.1.l, 1.1.m, 1.1.n, 1.1.o.a, 1.1.o.b, 1.1.o.c, 1.1.o.d, 1.1.o.e, 1.1.o.f, 1.1.o.g, 1.1.o.h, 1.1b, 1.1c, 1.2.a, 1.2.b, 1.2.c, 1.2.d, 1.2.e, 1.2.f, 1.3.a1, 1.3.a2, 1.3.b, 1.3.c, 1.3.d, 1.3.e, 1.3.f, 1.4.a, 1.4.b, 1.4.c, 1.4.d, 1.4.e, 1.4.f, 1.4.g, 1.4.h, 1.4.i, 1.4.j, 1.4.k, 1.4.l, 1.5.a, 1.5.b, 1.5.c, 1.5.d, 1.5.e, 1.5.f, 1.6.a, 1.6.b, 1.6.c, 1.6.d, 1.6.e, 2.1.a, 2.1.b, 2.1.c, 2.1.d, 2.1.e, 2.1.f, 2.1.g, 2.1.h, 2.2.a, 2.2.b, 2.2.c, 2.2.d, 2.2.e, 2.2.f, 2.2.g, 2.2.h, 2.2.i, 2.3.a, 2.3.b, 2.3.c, 2.3.d, 2.3.e, 2.4.a, 2.4.b, 2.4.c, 2.4.d, 2.4.e, 2.4.f, 2.4.g, 2.5.a, 2.5.b, 2.5.c, 2.5.d, 2.5.e, 2.5.f, 2.6.a, 2.6.b, 2.6.c, 2.6.d, 2.6.e, 2.6.f, 2.7.a, 2.7.b, 2.7.c, 2.7.d, 2.7.e, 2.7.f, 2.8.a, 2.8.b, 2.8.c, 2.8.d, 2.8.e, 2.8.f, 2.9.a, 2.9.b, 2.9.c, 2.9.d, 2.9.e, 2.9.f, 2.9.g, 2.10.a, 2.10.b, 2.10.c, 3.1.a, 3.1.b, 3.1.c, 3.1.d, 3.1.e, 3.1.f, 3.2.a, 3.2.b, 3.2.c, 3.2.d, 3.3.a, 3.3.b, 3.3.c, 3.3.d, 3.4.a, 3.4.b, 3.4.c, 3.4.d, 3.4.e, 3.4.f, 3.4.g, 3.5.a, 3.5.b, 3.5.c, 3.5.d, 3.5.e, 3.7.a, 3.7.b, 3.7.c, 3.7.d, 3.7.e, 3.7.f, 3.7.g, 3.7.h, 3.7.i, 3.8.
 
 ### Step 1.1 task list (approved)
 
@@ -6397,7 +6459,7 @@ here.
 
 ## 8. Task counter since the last duplication check
 
-**n = 0** (Step 3.7.h ran the check, due at n=4 — 3.7.e=1, 3.7.f=2, 3.7.g=3, this task=4 — confirmed, and found a real 3rd-occurrence duplication: `call_variant()`/`_model()`/`percentile()` copy-pasted across two research scripts; extracted to `scripts/_can_answer_research.py` before writing a third copy. Reset to 0.).
+**n = 2** (Step 3.7.h ran the check and reset to n=0; Step 3.7.i is n=1, this task (3.8) is n=2 — confirmed, due at n=4, **not due**. 3.7.h's own check found a real 3rd-occurrence duplication: `call_variant()`/`_model()`/`percentile()` copy-pasted across two research scripts; extracted to `scripts/_can_answer_research.py` before writing a third copy. Reset to 0.).
 
 **Staleness fix, found while confirming this at Step 3.7.e's own start (direct instruction: "confirm"):** this section had not actually been updated at the end of Step 3.7.d, despite that task's own decision-log entry (§7, "Duplication check" paragraph) concluding "Counter reset to **n = 0** (see §8)" — §8 itself was left reading "n = 3, this task, Step 3.7.d" (the PRE-check state), a real inconsistency between what the decision log said happened and what this tracking section actually showed. Confirmed by direct re-reading, not assumed: Step 3.7.d's own duplication check (due at n=3, run first, before any new code) found no new 3rd-occurrence duplication and one investigated-and-fixed flake, and concluded with the reset — that reset is what this section now reflects. Step 3.7.e is the first task since it, so n=1 is correct and **not due** (rule 9's threshold is 4).
 
