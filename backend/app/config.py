@@ -195,7 +195,27 @@ class Settings(BaseSettings):
     # was available during that research; see PROJECT_SPEC.md's own new
     # §9 marker (Task 3.4.b) gating `ANTHROPIC_API_KEY` in production on a
     # manual streaming check passing first.
-    chat_model_primary: str = Field(default="gpt-4o-mini")
+    # RATIFIED at "gpt-4o" (was "gpt-4o-mini") by Felix at Task 3.7.g
+    # (2026-10-14), a Settings-only change -- real measurement, not
+    # assumed: a full-106-item golden-set run, N=3, found "gpt-4o-mini"
+    # (the next tier DOWN) genuinely answers 4 false positives and
+    # (at full scale, with the referent-joining bug this task also
+    # found and fixed) 8 false negatives that "gpt-4o" (the next tier
+    # UP, same provider/family) reduces to 1 and 5 respectively, with no
+    # category's own correct-answer count dropping, injection held
+    # 15/15 across every repeat, and first-token latency still well
+    # inside docs/SPEC.md §17's budget (p50=708ms, p95=968ms vs. the
+    # 1500/3000ms targets). Two prompt-only variants tested alongside
+    # this (explicit multi-chunk-synthesis permission, with and without
+    # this model change) both made the false-negative count WORSE, not
+    # better -- the model upgrade, not a prompt change, is what
+    # actually moved the real numbers. Real cost trade-off, named
+    # plainly, not hidden: ~16.7x more expensive per 1000 turns ($0.42
+    # -> $6.95, real token counts, published OpenAI pricing) -- see
+    # PROJECT_SPEC.md's own decision log for the full per-variant table
+    # and the 5 remaining false negatives/1 remaining false positive
+    # this does NOT fix (read, not guessed, in that same entry).
+    chat_model_primary: str = Field(default="gpt-4o")
     chat_model_secondary: str = Field(default="claude-haiku-4-5")
     # Task 3.4.b (PART 0 follow-up): a TWO-KEY switch, code-enforced, not
     # just documented -- `app/agent/chat_model.py`'s own `get_chat_model()`

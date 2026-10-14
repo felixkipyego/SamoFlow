@@ -13,6 +13,7 @@ from scripts.groundedness_judge import (
     corrupt_wrong_number,
     generate_corrupted_answer,
     import_calibration_labels,
+    prune_unlabelled_calibration_files,
     render_context,
     write_key_file,
     write_labelling_csv,
@@ -177,6 +178,78 @@ def test_write_key_file_round_trips_origin_and_judge_label(tmp_path):
     key = json.loads(path.read_text(encoding="utf-8"))
     assert key["r1"] == {"origin": "real", "judge_label": "grounded"}
     assert key["r2"]["origin"] == "corrupted:wrong_number"
+
+
+# --- prune_unlabelled_calibration_files (Task 3.7.g, item 4) ---------------
+
+
+def _write_calibration_pair(results_dir, stamp: str, *, labelled: bool) -> None:
+    csv_path = results_dir / f"calibration_{stamp}.csv"
+    key_path = results_dir / f"calibration_{stamp}.key.json"
+    write_labelling_csv(_rows(), csv_path)
+    if labelled:
+        text = csv_path.read_text(encoding="utf-8")
+        # Fill in the first row's own blank trailing label -- matches
+        # the real shape write_labelling_csv() itself produces (every
+        # row ends ",<empty>\n" or ",<empty>" at EOF).
+        text = text.replace("r1,q1,ctx1,a1,\n", "r1,q1,ctx1,a1,grounded\n", 1)
+        csv_path.write_text(text, encoding="utf-8")
+    write_key_file(_rows(), key_path)
+
+
+def test_prune_does_nothing_with_zero_or_one_file(tmp_path):
+    assert prune_unlabelled_calibration_files(tmp_path) == []
+    _write_calibration_pair(tmp_path, "20261001-000000", labelled=False)
+    assert prune_unlabelled_calibration_files(tmp_path) == []
+
+
+def test_prune_keeps_only_the_newest_unlabelled_file(tmp_path):
+    _write_calibration_pair(tmp_path, "20261001-000000", labelled=False)
+    _write_calibration_pair(tmp_path, "20261002-000000", labelled=False)
+    _write_calibration_pair(tmp_path, "20261003-000000", labelled=False)
+
+    deleted = prune_unlabelled_calibration_files(tmp_path)
+
+    remaining = sorted(p.name for p in tmp_path.glob("calibration_*"))
+    assert remaining == ["calibration_20261003-000000.csv", "calibration_20261003-000000.key.json"]
+    assert len(deleted) == 4  # 2 stale CSVs + their 2 key files
+
+
+def test_prune_never_touches_a_labelled_file_even_if_not_newest(tmp_path):
+    _write_calibration_pair(tmp_path, "20261001-000000", labelled=True)
+    _write_calibration_pair(tmp_path, "20261002-000000", labelled=False)
+    _write_calibration_pair(tmp_path, "20261003-000000", labelled=False)
+
+    prune_unlabelled_calibration_files(tmp_path)
+
+    remaining = sorted(p.name for p in tmp_path.glob("calibration_*"))
+    assert remaining == [
+        "calibration_20261001-000000.csv",  # labelled -- never deleted
+        "calibration_20261001-000000.key.json",
+        "calibration_20261003-000000.csv",  # newest unlabelled -- kept
+        "calibration_20261003-000000.key.json",
+    ]
+
+
+def test_prune_keeps_the_newest_even_if_it_is_itself_unlabelled_and_alone_with_a_labelled_one(
+    tmp_path,
+):
+    # The newest file overall is unlabelled -- it survives even though
+    # an OLDER labelled file also exists; both are protected, for
+    # different reasons (one by being newest, one by being labelled).
+    _write_calibration_pair(tmp_path, "20261001-000000", labelled=True)
+    _write_calibration_pair(tmp_path, "20261002-000000", labelled=False)
+
+    deleted = prune_unlabelled_calibration_files(tmp_path)
+
+    assert deleted == []
+    remaining = sorted(p.name for p in tmp_path.glob("calibration_*"))
+    assert remaining == [
+        "calibration_20261001-000000.csv",
+        "calibration_20261001-000000.key.json",
+        "calibration_20261002-000000.csv",
+        "calibration_20261002-000000.key.json",
+    ]
 
 
 def test_import_requires_felix_to_have_labelled_something(tmp_path):

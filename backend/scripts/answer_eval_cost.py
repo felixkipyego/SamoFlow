@@ -14,12 +14,18 @@ from app.evals.golden_set import GoldenSet
 
 INJECTION_REPEATS = 3
 
-# Rough, named, not precision-engineered: gpt-4o-mini's own published
-# per-call cost for a short RAG-sized prompt is a small fraction of a
-# cent; these are deliberately round, order-of-magnitude placeholders
-# stated as such, not a claim of billing accuracy.
+# Rough, named, not precision-engineered: deliberately round, order-of-
+# magnitude placeholders stated as such, not a claim of billing
+# accuracy. `_EST_USD_PER_CHAT_CALL` updated at Task 3.7.g (2026-10-14)
+# to track `Settings.chat_model_primary`'s own change ("gpt-4o-mini" ->
+# "gpt-4o") -- real measured average from that task's own full-golden-
+# set research run ($0.7371 / 264 real gpt-4o calls), not re-derived
+# from published per-token pricing a second time. The judge
+# (`scripts/groundedness_judge.py`) stays on "gpt-4o-mini" (unchanged,
+# cheap) -- it is a SEPARATE model choice from the production primary,
+# not re-matched to it automatically; see this task's own §9 marker.
 _EST_USD_PER_EMBED_CALL = 0.00002
-_EST_USD_PER_CHAT_CALL = 0.0006
+_EST_USD_PER_CHAT_CALL = 0.0028
 _EST_USD_PER_JUDGE_CALL = 0.0004
 
 

@@ -123,6 +123,7 @@ from scripts.groundedness_judge import (  # noqa: E402
     build_judge,
     generate_corrupted_answer,
     judge_turn,
+    prune_unlabelled_calibration_files,
     render_context,
     write_key_file,
     write_labelling_csv,
@@ -514,6 +515,13 @@ async def main() -> None:
             )
 
         _RESULTS_DIR.mkdir(parents=True, exist_ok=True)
+        # Task 3.7.g, item 4: prune stale UNLABELLED calibration files
+        # before writing this run's own new one, so they don't pile up
+        # forever -- never touches a file with a real filled-in label
+        # (Felix's own work).
+        pruned = prune_unlabelled_calibration_files(_RESULTS_DIR)
+        if pruned:
+            print(f"Pruned {len(pruned)} stale unlabelled calibration file(s): {pruned}")
         run_stamp = time.strftime("%Y%m%d-%H%M%S")
         labelling_path = _RESULTS_DIR / f"calibration_{run_stamp}.csv"
         key_path = _RESULTS_DIR / f"calibration_{run_stamp}.key.json"

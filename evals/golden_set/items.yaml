@@ -224,12 +224,22 @@ items:
     expected_sources:
       - document: returns-electronics
         evidence_passage: "Electronics (headphones, speakers, chargers, and small gadgets) have a shorter 14 day return window from delivery"
+  # Task 3.7.g, item 0: RECATEGORISED from related_unanswerable to
+  # answerable -- a real golden-set labelling defect found at Task
+  # 3.7.f, confirmed by reading the full warranty-policy.md passage and
+  # the model's own real (correct) answer side by side: the passage
+  # directly and completely answers this question ("not transferable if
+  # you resell or give away the product... with the single exception of
+  # major appliances"). Only `category` and `expected_can_answer`
+  # change -- `expected_route` ("answer") and `expected_sources` (one
+  # source, the real evidence passage) were already correct for this
+  # item's own real retrieval target, which does not move.
   - id: rel-07
-    category: related_unanswerable
+    category: answerable
     corpus: synthetic
     question: "does the warranty count if i bought it secondhand off someone, not direct from you?"
     expected_route: answer
-    expected_can_answer: false
+    expected_can_answer: true
     expected_sources:
       - document: warranty-policy
         evidence_passage: "Warranty coverage is tied to the original purchasing account and is not transferable if you resell or give away the product to someone else"
@@ -305,6 +315,24 @@ items:
     expected_sources:
       - document: product-care
         evidence_passage: "Unplug a device before cleaning it, and use a dry or barely-damp microfiber cloth only"
+  # Task 3.7.g, item 0: NEW item, backfilling the slot rel-07 vacated
+  # (moved to answerable, above) so related_unanswerable stays at the
+  # real, required 15 -- never shrunk by accident when a mislabelled
+  # item moves out. Genuinely unanswerable, confirmed by reading the
+  # real chunk: the warranty page names the accidental-damage plan but
+  # explicitly defers its own coverage details to "that product's own
+  # page," content that does not exist in this corpus -- the gate
+  # passes (the chunk is topically the closest match) but the specific
+  # fact asked about is never stated.
+  - id: rel-16
+    category: related_unanswerable
+    corpus: synthetic
+    question: "does the paid accidental damage plan cover a cracked screen from a drop?"
+    expected_route: answer
+    expected_can_answer: false
+    expected_sources:
+      - document: warranty-policy
+        evidence_passage: "a separate paid accidental damage plan at checkout, which is described on that product's own page rather than in this general policy"
 
   # --- off_topic (15) ------------------------------------------------------
   - id: off-01

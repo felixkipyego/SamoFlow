@@ -11,11 +11,18 @@
 # it lived under backend/app/ (that guard, like the Qdrant read-path
 # guard, only scans backend/app/ -- confirmed by reading it directly).
 #
-# Judge model: gpt-4o-mini -- cost-matched to this project's own
-# production primary (`Settings.chat_model_primary`, same model), cheap
-# enough to run across the whole golden set repeatedly, and precisely
-# the class of model whose judgments need the calibration this task
-# builds, not assumed trustworthy because it is a "bigger" model.
+# Judge model: gpt-4o-mini -- cheap enough to run across the whole
+# golden set repeatedly, and precisely the class of model whose
+# judgments need the calibration this task builds, not assumed
+# trustworthy because it is a "bigger" model. Originally justified as
+# "cost-matched to the production primary" (Task 3.7.d) -- Task 3.7.g
+# (2026-10-14) moved `Settings.chat_model_primary` to "gpt-4o", so that
+# specific justification is now stale; the judge was deliberately left
+# on "gpt-4o-mini" rather than silently following the primary's own
+# model choice, since re-matching it would also invalidate Felix's own
+# not-yet-collected calibration labels (judged against gpt-4o-mini's
+# own real output) for no measured benefit -- see PROJECT_SPEC.md's own
+# §9 marker for the real, now-separate decision this leaves open.
 #
 # Delimiting untrusted context the SAME way the real answer node does
 # (per direct instruction): `_build_messages()` (app/agent/graph.py) is
@@ -242,6 +249,45 @@ def write_key_file(rows: list[CalibrationRow], path: Path) -> None:
         row.row_id: {"origin": row.origin, "judge_label": row.judge_label} for row in rows
     }
     path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+
+
+def prune_unlabelled_calibration_files(results_dir: Path) -> list[Path]:
+    """Task 3.7.g, item 4: every real `make eval-answers` run writes a
+    NEW, timestamped `calibration_*.csv` (+ its own `.key.json`
+    sidecar) -- left unchecked, these pile up forever since nothing
+    ever deletes an old one. Deletes every `calibration_*.csv` (and its
+    matching `.key.json`, if present) EXCEPT the single newest one and
+    EXCEPT any that already has a filled-in `label` (Felix's own
+    labelling work, via `_existing_csv_has_a_filled_in_label()` -- the
+    SAME check `write_labelling_csv()` already uses, not a second,
+    separately-maintained definition of "labelled"). Returns the paths
+    actually deleted, for the caller to report -- never raises on an
+    empty/missing directory (nothing to prune is not an error).
+
+    Called BEFORE a new run's own `write_labelling_csv()`/`write_key_
+    file()` so the file this run is about to write becomes the one
+    "newest unlabelled" survivor, not a second one sitting alongside an
+    already-pruned set.
+    """
+    candidates = sorted(results_dir.glob("calibration_*.csv"))
+    if len(candidates) <= 1:
+        return []
+    unlabelled = [p for p in candidates if not _existing_csv_has_a_filled_in_label(p)]
+    # Keep the single newest candidate overall (labelled or not) out of
+    # the delete set -- if the newest IS labelled, every unlabelled one
+    # is still stale and gets removed; if the newest is itself
+    # unlabelled, it is excluded explicitly below so it survives too.
+    newest = candidates[-1]
+    to_delete = [p for p in unlabelled if p != newest]
+    deleted = []
+    for path in to_delete:
+        path.unlink()
+        deleted.append(path)
+        key_path = path.with_suffix("").with_suffix(".key.json")
+        if key_path.exists():
+            key_path.unlink()
+            deleted.append(key_path)
+    return deleted
 
 
 @dataclass(frozen=True)
