@@ -234,6 +234,25 @@ async def _reap_stuck_jobs() -> list:
     return reaped
 
 
+async def _seed_ticks(
+    ensure_fn: Callable[..., Awaitable[list]], interval_seconds: float
+) -> list:
+    # Duplication check after Step 4.2: the three callers below
+    # (_ensure_scheduler_ticks_seeded()/_ensure_reconcile_ticks_seeded()/
+    # _ensure_retention_sweep_ticks_seeded()) had been near-identical
+    # 4-line bodies -- open a session, call the one ensure_X_ticks_seeded()
+    # that differs, return -- flagged at Task 2.9.f as "wait for the next
+    # duplication check" and now extracted, a 3rd occurrence (Task 4.2's
+    # own retention sweep) having crossed this project's own threshold.
+    # Each caller stays a separately named top-level function, not
+    # collapsed into one data-driven loop here: test_worker.py monkeypatches
+    # them individually by name (`monkeypatch.setattr(worker_module,
+    # "_ensure_scheduler_ticks_seeded", ...)`), a seam this refactor must
+    # not disturb.
+    async with _session_factory()() as session:
+        return await ensure_fn(session, interval_seconds=interval_seconds)
+
+
 async def _ensure_scheduler_ticks_seeded() -> list:
     # Task 2.9.a: its own separate transaction, same reasoning as
     # _reap_stuck_jobs() directly above. Run once per run() iteration, the
@@ -243,11 +262,9 @@ async def _ensure_scheduler_ticks_seeded() -> list:
     # recovery path if a tenant's own self-re-enqueuing chain was ever
     # broken (see app/ingest/scheduler.py's own
     # ensure_scheduler_ticks_seeded() docstring for the full reasoning).
-    async with _session_factory()() as session:
-        seeded = await ensure_scheduler_ticks_seeded(
-            session, interval_seconds=get_settings().scheduler_tick_interval_seconds
-        )
-    return seeded
+    return await _seed_ticks(
+        ensure_scheduler_ticks_seeded, get_settings().scheduler_tick_interval_seconds
+    )
 
 
 async def _ensure_reconcile_ticks_seeded() -> list:
@@ -255,27 +272,21 @@ async def _ensure_reconcile_ticks_seeded() -> list:
     # sweep, same cadence and same reasoning as
     # _ensure_scheduler_ticks_seeded() directly above -- see
     # ensure_reconcile_ticks_seeded()'s own docstring (app/ingest/
-    # scheduler.py) for why this is a near-identical mirror, flagged for
-    # the next duplication check rather than merged with its sibling here.
-    async with _session_factory()() as session:
-        seeded = await ensure_reconcile_ticks_seeded(
-            session, interval_seconds=get_settings().reconcile_interval_seconds
-        )
-    return seeded
+    # scheduler.py) for the full reasoning.
+    return await _seed_ticks(
+        ensure_reconcile_ticks_seeded, get_settings().reconcile_interval_seconds
+    )
 
 
 async def _ensure_retention_sweep_ticks_seeded() -> list:
     # Task 4.2: the nightly chat-retention sweep's own bootstrap/self-
     # healing tick, same cadence and same reasoning as
-    # _ensure_reconcile_ticks_seeded() directly above -- a third,
-    # deliberate near-mirror (see ensure_retention_sweep_ticks_seeded()'s
-    # own docstring, app/ingest/scheduler.py, for why the REAL shared
-    # logic is a one-call addition there, not duplicated a third time).
-    async with _session_factory()() as session:
-        seeded = await ensure_retention_sweep_ticks_seeded(
-            session, interval_seconds=get_settings().retention_sweep_interval_seconds
-        )
-    return seeded
+    # _ensure_reconcile_ticks_seeded() directly above -- see
+    # ensure_retention_sweep_ticks_seeded()'s own docstring (app/ingest/
+    # scheduler.py) for the full reasoning.
+    return await _seed_ticks(
+        ensure_retention_sweep_ticks_seeded, get_settings().retention_sweep_interval_seconds
+    )
 
 
 async def _claim_and_process_one_job() -> bool:
@@ -326,6 +337,14 @@ async def _claim_and_process_one_job() -> bool:
 
     await _mark_done(job.id, None)
     return True
+
+
+def _log_if_seeded(job_type: str, seeded: list) -> None:
+    # Shared tail for the three bootstrap/self-healing sweeps in run()
+    # below -- see that call site's own comment for why this is the only
+    # part of the three that is actually shared.
+    if seeded:
+        logger.info("worker: seeded %s for %d tenant(s): %s", job_type, len(seeded), seeded)
 
 
 async def run(stop: asyncio.Event | None = None, max_iterations: int | None = None) -> None:
@@ -380,37 +399,21 @@ async def run(stop: asyncio.Event | None = None, max_iterations: int | None = No
             reaped = await _reap_stuck_jobs()
             if reaped:
                 logger.info("worker: reaped %d stuck job(s): %s", len(reaped), reaped)
-            # Task 2.9.a: the scheduler's own bootstrap/self-healing sweep,
-            # same cadence and same try/except as the two calls directly
-            # above -- a transient failure here must not crash the worker
-            # either.
-            seeded = await _ensure_scheduler_ticks_seeded()
-            if seeded:
-                logger.info(
-                    "worker: seeded scheduler_tick for %d tenant(s): %s", len(seeded), seeded
-                )
-            # Task 2.9.f: the nightly reconcile's own bootstrap/self-
-            # healing sweep, same cadence and same try/except as every
-            # other per-iteration call above -- a transient failure here
-            # must not crash the worker either.
-            reconcile_seeded = await _ensure_reconcile_ticks_seeded()
-            if reconcile_seeded:
-                logger.info(
-                    "worker: seeded reconcile for %d tenant(s): %s",
-                    len(reconcile_seeded),
-                    reconcile_seeded,
-                )
-            # Task 4.2: the nightly chat-retention sweep's own bootstrap/
-            # self-healing sweep, same cadence and same try/except as
-            # every other per-iteration call above -- a transient
-            # failure here must not crash the worker either.
-            retention_seeded = await _ensure_retention_sweep_ticks_seeded()
-            if retention_seeded:
-                logger.info(
-                    "worker: seeded retention_sweep for %d tenant(s): %s",
-                    len(retention_seeded),
-                    retention_seeded,
-                )
+            # The three bootstrap/self-healing sweeps (scheduler_tick,
+            # Task 2.9.a; reconcile, Task 2.9.f; retention_sweep, Task
+            # 4.2), same cadence and same try/except as every other
+            # per-iteration call above -- a transient failure in any one
+            # must not crash the worker either. Each call stays a
+            # separately named statement (not a data-driven loop): the
+            # three _ensure_X_ticks_seeded() functions are individually
+            # monkeypatched by name in test_worker.py (see _seed_ticks()'s
+            # own comment above for the identical reasoning). Only the
+            # repeated "log if non-empty" tail -- a real 3rd-occurrence
+            # duplication, found at this task's own duplication check --
+            # is now shared, via _log_if_seeded() below.
+            _log_if_seeded("scheduler_tick", await _ensure_scheduler_ticks_seeded())
+            _log_if_seeded("reconcile", await _ensure_reconcile_ticks_seeded())
+            _log_if_seeded("retention_sweep", await _ensure_retention_sweep_ticks_seeded())
             claimed = await _claim_and_process_one_job()
         except Exception as exc:
             # A transient failure reaching the database (or claiming/
