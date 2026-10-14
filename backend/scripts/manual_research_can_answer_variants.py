@@ -52,11 +52,8 @@
 # discipline as every other real-Qdrant research script in this project
 # (PROJECT_SPEC.md's own Task 3.5.e duplication-check convention).
 import asyncio
-import os
 import re
-import statistics
 import sys
-import time
 
 from scripts._shared import point_test_env_at_env_vars
 
@@ -64,14 +61,11 @@ point_test_env_at_env_vars()  # MUST run before any `app.*` import below
 
 import uuid  # noqa: E402
 
-from langchain.chat_models import init_chat_model  # noqa: E402
-from langchain_core.messages import SystemMessage  # noqa: E402
-from langchain_core.utils.json import parse_partial_json  # noqa: E402
 from pydantic import BaseModel, Field  # noqa: E402
 
 from app import qdrant  # noqa: E402
 from app.agent.graph import _SYSTEM_INSTRUCTION as SYSTEM_A  # noqa: E402
-from app.agent.graph import Answer, _build_messages, _sanitize_answer_text  # noqa: E402
+from app.agent.graph import Answer, _sanitize_answer_text  # noqa: E402
 from app.config import get_settings  # noqa: E402
 from app.evals.golden_set import (  # noqa: E402
     DEFAULT_ITEMS_PATH,
@@ -79,10 +73,12 @@ from app.evals.golden_set import (  # noqa: E402
     load_golden_set,
 )
 from app.retrieval.service import chunk_from_scored_point, retrieve  # noqa: E402
+from scripts._can_answer_research import call_variant, percentile  # noqa: E402
 from scripts.injection_detectors import CANARIES, detect_injection_leak  # noqa: E402
 from scripts.retrieval_eval import load_and_check_frozen_corpus, seed_frozen_corpus  # noqa: E402
 
 _CHAT_MODEL = "gpt-4o-mini"
+_TEMPERATURE = 0.0
 _N_REPEATS = 5
 
 _FALSE_POSITIVE_IDS = ["rel-05", "rel-06", "rel-07", "rel-12"]
@@ -194,62 +190,6 @@ def quote_verified(quote: str, retrieved_chunk_texts: list[str]) -> bool:
     return any(normalized_quote in _normalize_whitespace(text) for text in retrieved_chunk_texts)
 
 
-def _model():
-    return init_chat_model(
-        _CHAT_MODEL, model_provider="openai", api_key=os.environ["OPENAI_API_KEY"],
-        temperature=0.0, max_retries=0, timeout=20.0,
-    )
-
-
-async def call_variant(
-    system_text: str, schema_cls: type[BaseModel], retrieved_chunks, question: str
-) -> dict:
-    """One real streaming call -- the SAME `.astream()`/`parse_partial_
-    json()` mechanism `_answer_node` itself uses, so `first_token_ms`
-    measures the identical real-production quantity (time to the first
-    visible answer-text delta, after can_answer resolves true), not an
-    approximation via `.ainvoke()`.
-    """
-    base_messages = _build_messages(retrieved_chunks, question)
-    messages = [SystemMessage(content=system_text), base_messages[1]]
-    bound = _model().bind_tools([schema_cls], tool_choice=schema_cls.__name__)
-
-    start = time.perf_counter()
-    accumulated = ""
-    first_token_ms: float | None = None
-    can_answer_known = False
-    can_answer_value = False
-    async for chunk in bound.astream(messages):
-        tool_call_chunks = chunk.tool_call_chunks
-        if not tool_call_chunks or not tool_call_chunks[0].get("args"):
-            continue
-        accumulated += tool_call_chunks[0]["args"]
-        partial = parse_partial_json(accumulated) or {}
-        if not can_answer_known and "can_answer" in partial:
-            can_answer_known = True
-            can_answer_value = bool(partial["can_answer"])
-        if (
-            first_token_ms is None
-            and can_answer_known
-            and can_answer_value
-            and partial.get("answer")
-        ):
-            first_token_ms = (time.perf_counter() - start) * 1000
-
-    final = parse_partial_json(accumulated) or {}
-    return {
-        "can_answer": bool(final.get("can_answer", False)),
-        "answer": final.get("answer") or "",
-        "quote": final.get("quote") or "",
-        "used_chunk_ids": list(final.get("used_chunk_ids") or []),
-        "first_token_ms": first_token_ms,
-    }
-
-
-def _percentile(values: list[float], p: float) -> float:
-    return statistics.quantiles(values, n=100, method="inclusive")[int(p) - 1]
-
-
 async def main() -> None:
     # Optional CLI filter (e.g. `python ... c d`) -- reruns only the
     # named variants by their leading letter, so a transient provider
@@ -309,7 +249,10 @@ async def main() -> None:
                 chunk_texts = [c["text"] for c in chunks]
                 repeats = []
                 for _ in range(_N_REPEATS):
-                    result = await call_variant(system_text, schema_cls, chunks, item.question)
+                    result = await call_variant(
+                        system_text, schema_cls, _CHAT_MODEL, _TEMPERATURE,
+                        chunks, item.question, timeout=20.0,
+                    )
                     can_answer = result["can_answer"]
                     if schema_cls is EvidenceFirstAnswer:
                         can_answer = can_answer and quote_verified(result["quote"], chunk_texts)
@@ -352,8 +295,8 @@ async def main() -> None:
                 print(line)
             if latencies:
                 print(
-                    f"  first_token_ms: p50={_percentile(latencies, 50):.0f} "
-                    f"p95={_percentile(latencies, 95):.0f} (n={len(latencies)}, "
+                    f"  first_token_ms: p50={percentile(latencies, 50):.0f} "
+                    f"p95={percentile(latencies, 95):.0f} (n={len(latencies)}, "
                     f"budget: p50<1500 p95<3000)"
                 )
             else:

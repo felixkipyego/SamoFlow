@@ -43,8 +43,6 @@
 # (c)+(d) -- a few dollars for all four variants together, run once.
 # Cleans up its own seeded tenant's points in a `finally`.
 import asyncio
-import os
-import statistics
 import sys
 import time
 
@@ -54,19 +52,11 @@ point_test_env_at_env_vars()  # MUST run before any `app.*` import below
 
 import uuid  # noqa: E402
 
-from langchain.chat_models import init_chat_model  # noqa: E402
-from langchain_core.messages import SystemMessage  # noqa: E402
-from langchain_core.utils.json import parse_partial_json  # noqa: E402
 from pydantic import BaseModel, Field  # noqa: E402
 
 from app import qdrant  # noqa: E402
 from app.agent.graph import _SYSTEM_INSTRUCTION as SYSTEM_A  # noqa: E402
-from app.agent.graph import (  # noqa: E402
-    Answer,
-    _build_messages,
-    _gate_passes,
-    _sanitize_answer_text,
-)
+from app.agent.graph import Answer, _gate_passes, _sanitize_answer_text  # noqa: E402
 from app.config import get_settings  # noqa: E402
 from app.evals.golden_set import (  # noqa: E402
     DEFAULT_ITEMS_PATH,
@@ -74,6 +64,11 @@ from app.evals.golden_set import (  # noqa: E402
     load_golden_set,
 )
 from app.retrieval.service import chunk_from_scored_point, retrieve  # noqa: E402
+from scripts._can_answer_research import (  # noqa: E402
+    call_variant,
+    median_and_range,
+    percentile,
+)
 from scripts.injection_detectors import CANARIES, detect_injection_leak  # noqa: E402
 from scripts.retrieval_eval import (  # noqa: E402
     build_prepared_query,
@@ -139,77 +134,6 @@ VARIANTS: dict[str, tuple[str, type[BaseModel], str]] = {
     "(c) next-tier model": (SYSTEM_A, Answer, _GPT4O),
     "(d) (b)+(c)": (SYSTEM_B, StrictAnswer, _GPT4O),
 }
-
-
-def _model(model_name: str, temperature: float):
-    return init_chat_model(
-        model_name, model_provider="openai", api_key=os.environ["OPENAI_API_KEY"],
-        temperature=temperature, max_retries=0, timeout=30.0,
-    )
-
-
-async def call_variant(
-    system_text: str, schema_cls: type[BaseModel], model_name: str, temperature: float,
-    retrieved_chunks, question: str,
-) -> dict:
-    """One real streaming call -- the SAME `.astream()`/`parse_partial_
-    json()` mechanism `_answer_node` itself uses (first-token timing is
-    the real production quantity), PLUS raw-chunk accumulation (`+=`)
-    to recover real `usage_metadata` (input/output token counts) for
-    the cost estimate -- confirmed live, before relying on it, that
-    accumulating `AIMessageChunk`s via `+` yields a merged chunk whose
-    own `usage_metadata` is the real, complete call total, both with and
-    without `bind_tools()`.
-    """
-    base_messages = _build_messages(retrieved_chunks, question)
-    messages = [SystemMessage(content=system_text), base_messages[1]]
-    model = _model(model_name, temperature)
-    bound = model.bind_tools([schema_cls], tool_choice=schema_cls.__name__)
-
-    start = time.perf_counter()
-    accumulated_args = ""
-    first_token_ms: float | None = None
-    can_answer_known = False
-    can_answer_value = False
-    merged = None
-    async for chunk in bound.astream(messages):
-        merged = chunk if merged is None else merged + chunk
-        tool_call_chunks = chunk.tool_call_chunks
-        if not tool_call_chunks or not tool_call_chunks[0].get("args"):
-            continue
-        accumulated_args += tool_call_chunks[0]["args"]
-        partial = parse_partial_json(accumulated_args) or {}
-        if not can_answer_known and "can_answer" in partial:
-            can_answer_known = True
-            can_answer_value = bool(partial["can_answer"])
-        if (
-            first_token_ms is None
-            and can_answer_known
-            and can_answer_value
-            and partial.get("answer")
-        ):
-            first_token_ms = (time.perf_counter() - start) * 1000
-
-    final = parse_partial_json(accumulated_args) or {}
-    usage = merged.usage_metadata if merged is not None else None
-    return {
-        "can_answer": bool(final.get("can_answer", False)),
-        "answer": final.get("answer") or "",
-        "used_chunk_ids": list(final.get("used_chunk_ids") or []),
-        "first_token_ms": first_token_ms,
-        "input_tokens": usage["input_tokens"] if usage else 0,
-        "output_tokens": usage["output_tokens"] if usage else 0,
-    }
-
-
-def _percentile(values: list[float], p: float) -> float:
-    return statistics.quantiles(values, n=100, method="inclusive")[int(p) - 1]
-
-
-def _median_and_range(values: list[int]) -> str:
-    if not values:
-        return "0 (0-0)"
-    return f"{statistics.median(values):.0f} ({min(values)}-{max(values)})"
 
 
 async def main() -> None:
@@ -339,11 +263,11 @@ async def main() -> None:
             total_fn_runs = [sum(fn_by_run[c][r] for c in categories) for r in range(_N_REPEATS)]
             for category in categories:
                 print(
-                    f"    {category}: FP={_median_and_range(fp_by_run[category])}  "
-                    f"FN={_median_and_range(fn_by_run[category])}"
+                    f"    {category}: FP={median_and_range(fp_by_run[category])}  "
+                    f"FN={median_and_range(fn_by_run[category])}"
                 )
-            total_fp_str = _median_and_range(total_fp_runs)
-            total_fn_str = _median_and_range(total_fn_runs)
+            total_fp_str = median_and_range(total_fp_runs)
+            total_fn_str = median_and_range(total_fn_runs)
             print(f"  TOTAL: FP={total_fp_str}  FN={total_fn_str}")
 
             n_injection = sum(1 for i in golden_set.items if i.category == "injection")
@@ -353,8 +277,8 @@ async def main() -> None:
             )
 
             if latencies:
-                p50 = _percentile(latencies, 50)
-                p95 = _percentile(latencies, 95)
+                p50 = percentile(latencies, 50)
+                p95 = percentile(latencies, 95)
                 print(
                     f"  first_token_ms: p50={p50:.0f} p95={p95:.0f} (n={len(latencies)}, "
                     f"budget: p50<1500 p95<3000) "

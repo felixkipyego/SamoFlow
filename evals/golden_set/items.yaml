@@ -693,10 +693,25 @@ items:
         evidence_passage: "Unplug a device before cleaning it, and use a dry or barely-damp microfiber cloth only"
       - document: warranty-policy
         evidence_passage: "Smart home devices | 2 years | 1 year"
+  # Task 3.7.h, item 1: QUESTION REWRITTEN -- audited, like rel-07, and
+  # found the same class of issue, in the opposite direction: the
+  # ORIGINAL question ("if i pay partly with a gift card can i still
+  # get a refund to my card") presupposes a checkout configuration
+  # (gift card + a card, split payment) the corpus never confirms is
+  # even possible -- gift-cards.md's own "combine" sentence names
+  # combining with ONE OTHER GIFT CARD specifically, never a card
+  # payment, and the refund policy never addresses how a split-payment
+  # refund would be allocated. That premise is genuinely unconfirmed,
+  # not merely under-synthesised -- the original question should not
+  # have been expected_can_answer=true. Rewritten to a question the
+  # SAME two sources genuinely and cleanly combine to answer, with no
+  # unstated assumption: paying with two gift cards together IS an
+  # explicitly confirmed configuration, and the general refund policy
+  # then applies to it directly.
   - id: ms-10
     category: multi_source
     corpus: synthetic
-    question: "if i pay partly with a gift card can i still get a refund to my card"
+    question: "if i pay for my order using two gift cards together and then return it will i get my money back"
     expected_route: answer
     expected_can_answer: true
     expected_sources:
@@ -726,17 +741,31 @@ items:
         evidence_passage: "offer free local pickup from our warehouse on weekdays between 9am and 4pm"
       - document: payment-methods
         evidence_passage: "we also accept M-Pesa at checkout for orders under $500"
+  # Task 3.7.h, item 1: QUESTION REWRITTEN -- audited, like rel-07, and
+  # found the same class of issue. The ORIGINAL question ("can i close
+  # my account and still keep using an existing gift card balance")
+  # asks whether the BALANCE ITSELF survives account closure -- the
+  # corpus never says what happens to a stored gift-card balance when
+  # an account is closed (it only says closing "deletes personal
+  # data", never whether a balance counts as such). That is genuinely
+  # unaddressed, not merely under-synthesised. Rewritten to a question
+  # the SAME two sources genuinely and cleanly combine to answer: the
+  # gift-cards page's own balance-check section explicitly names an
+  # account-INDEPENDENT method (entering the code at checkout without
+  # completing an order), so closing the account (which only removes
+  # account access, per account-help) does not prevent using that
+  # explicitly account-independent method.
   - id: ms-13
     category: multi_source
     corpus: synthetic
-    question: "can i close my account and still keep using an existing gift card balance"
+    question: "if i close my account can i still look up my gift card balance using the code at checkout"
     expected_route: answer
     expected_can_answer: true
     expected_sources:
       - document: account-help
         evidence_passage: "Contact support to close your account."
       - document: gift-cards
-        evidence_passage: "Check your remaining gift card balance any time on the Gift Cards page in your account"
+        evidence_passage: "Check your remaining gift card balance any time on the Gift Cards page in your account, or by entering the code at checkout without completing the order."
   - id: ms-14
     category: multi_source
     corpus: synthetic
