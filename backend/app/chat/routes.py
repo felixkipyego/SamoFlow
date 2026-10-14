@@ -10,9 +10,7 @@
 # full reasoning behind each):
 #   - compiling the graph once, in app/main.py's lifespan hook (not here);
 #   - per-thread turn serialization, closing the resume_turn() TOCTOU
-#     window (a Postgres pg_try_advisory_xact_lock, transaction-scoped,
-#     per Felix's own direct refinement -- PgBouncer-transaction-pooling
-#     safe, unlike a session-scoped advisory lock);
+#     window (a short TURN LEASE on the conversation row, see below);
 #   - the overall per-turn wall-clock timeout and what the stream does on
 #     a dependency failure / mid-stream model failure;
 #   - offer_escalation, computed here from existing graph state, never a
@@ -20,36 +18,50 @@
 #   - the real client_message_id retry/idempotency mechanism docs/SPEC.md
 #     §10's own "Dropped connections" paragraph names but never specifies.
 #
-# [SECURITY] deliberate exception to this project's own standing
-# engineering rule ("never hold a DB connection while streaming",
-# PROJECT_SPEC.md §3): a transaction-scoped advisory lock can only be held
-# by holding its own transaction (and therefore its own connection) open
-# for as long as the lock must be held -- which is exactly as long as one
-# turn's own in-flight operation, by construction, regardless of which
-# concrete mechanism enforces "at most one in-flight operation per
-# thread". This is a REAL, named trade-off (one dedicated pool slot per
-# CONCURRENTLY-STREAMING conversation thread, not per request), not an
-# oversight -- see this task's own PROJECT_SPEC.md entry for the full
-# reasoning and the new §9 marker (owner Phase 7) asking its own load test
-# to confirm the app pool is not exhausted by realistic concurrency. This
-# dedicated lock connection is NEVER the same connection/session as the
-# one used for the conversation-resolution step below (that one,
-# Depends(get_db_session), is closed well before streaming starts) -- the
-# standing rule is still honored for every connection that does not
-# itself need to hold a lock for the turn's own duration.
+# Task 4.1 FOLLOW-UP [SECURITY-adjacent: concurrency/availability]: the
+# original design used `pg_try_advisory_xact_lock`, held for the whole
+# turn by holding its own transaction (and connection) open for the
+# stream's full duration -- capping concurrent conversations at the app
+# pool size, with pool exhaustion surfacing as a misleading 409. Replaced
+# with a short LEASE on `conversations.lease_until`/`lease_token` (Task
+# 4.1-follow-up migration `e0c758a08dee`): acquired and released with ONE
+# short UPDATE statement each, through an ordinary, briefly-held session
+# -- never held open across the stream. The lease duration (chat_request_
+# timeout_seconds + chat_lease_margin_seconds, both Settings fields) is
+# chosen to always exceed the overall per-turn timeout, so a genuinely
+# still-running turn can never lose its own lease to expiry. A crashed
+# worker's own lease simply expires on its own -- no cleanup job needed.
+#
+# A SECOND, real connection-holding gap was found and closed in the SAME
+# pass, not left for later: `Depends(get_current_visitor)` itself depends
+# on `Depends(get_db_session)` -- and FastAPI's own dependency exit stack
+# (confirmed live, a minimal repro, not assumed from documentation) does
+# NOT release a yield-dependency's connection until the ENTIRE response
+# body (the whole SSE stream) has been sent, for ANY dependency declared
+# on a streaming endpoint, nested or not, regardless of how briefly the
+# handler body itself uses it. Declaring `identity`/`session` as Depends()
+# PARAMETERS on this route would therefore hold a SECOND app-pool
+# connection open for the whole stream even after the lease redesign
+# below. Fixed by calling `get_current_visitor()` as a PLAIN function,
+# passing it a short-lived, manually-opened-and-closed session -- the
+# exact same session also used for conversation resolution and the lease
+# acquire, all three sequential, fast operations, closed BEFORE
+# `EventSourceResponse` is ever constructed. Costs this route its
+# automatic OpenAPI auth-scheme annotation (accepted -- this is an
+# internal API with `docs_enabled` off in production anyway, docs/SPEC.md
+# names no OpenAPI/Swagger requirement).
 import asyncio
 import json
 import logging
 import math
-import sys
 import uuid
 from collections.abc import AsyncIterator
-from contextlib import AsyncExitStack
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse, Response
 from langchain_core.messages import AIMessage, HumanMessage
 from sqlalchemy import text
+from sqlalchemy.exc import TimeoutError as PoolTimeoutError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sse_starlette.sse import EventSourceResponse
 
@@ -57,7 +69,7 @@ from app.agent.entrypoint import read_state, run_turn
 from app.auth.dependencies import VerifiedIdentity, get_current_visitor
 from app.chat.schemas import ChatRequest
 from app.config import get_settings
-from app.db import get_db_session, get_engine
+from app.db import _session_factory
 from app.ratelimit import RateLimiter
 from app.tenancy.models import Conversation
 from app.tenancy.repository import TenantScopedRepository
@@ -75,16 +87,21 @@ router = APIRouter(prefix="/api/v1")
 _MESSAGE_CHAR_CAP = 2000
 _MESSAGE_TOO_LONG_STATUS = 413
 _RATE_LIMITED_STATUS = 429
-# 409, not 429: none of "a conversation is already mid-turn" (the
-# advisory lock), "this visitor already has a stream open" (the
-# concurrent-stream cap), or "this retried message was already superseded
-# by a later turn" (the idempotency check below) is a TIME-WINDOW failure
-# with a meaningful Retry-After countdown the way the two RateLimiter-
-# backed 429s below are -- each is a STATE conflict (something else is
-# already in progress, or has already moved on), the conventional meaning
-# of 409. Named once, reused for all three, rather than inventing three
-# different codes for the same underlying shape.
+# 409, not 429: none of "a conversation is already leased" (the turn
+# lease), "this visitor already has a stream open" (the concurrent-
+# stream cap), or "this retried message was already superseded by a
+# later turn" (the idempotency check below) is a TIME-WINDOW failure with
+# a meaningful Retry-After countdown the way the two RateLimiter-backed
+# 429s below are -- each is a STATE conflict (something else is already
+# in progress, or has already moved on), the conventional meaning of 409.
+# Named once, reused for all three, rather than inventing three different
+# codes for the same underlying shape.
 _CONFLICT_STATUS = 409
+# A DIFFERENT failure class from all three 409s above: the database
+# connection pool itself has no free slot to even ATTEMPT the lease
+# acquire -- never reported as "conversation busy" (a real lease
+# conflict), since that would be actively misleading about the cause.
+_SERVICE_UNAVAILABLE_STATUS = 503
 
 # Three fixed, generic error codes (Felix's Phase 4 decision, recorded at
 # the Phase 4 kickoff and PROJECT_SPEC.md's own Step 4.1 entry) -- never a
@@ -192,19 +209,74 @@ def _get_active_streams(request: Request) -> set[uuid.UUID]:
     return streams
 
 
-def _advisory_lock_key(conversation_id: uuid.UUID) -> int:
-    # Postgres pg_try_advisory_xact_lock(key) takes one signed bigint.
-    # conversation_id is already a globally-unique, randomly-generated
-    # UUID primary key (Task 1.2.d) -- masking its own 128-bit integer
-    # form down to 63 bits (fits a signed bigint, never negative) is a
-    # reasonable, documented approximation, not a correctness guarantee:
-    # a hash collision between two DIFFERENT conversation_ids would only
-    # ever cause one extra, spurious 409 (two unrelated conversations
-    # briefly serialized against each other), never a cross-conversation
-    # data leak -- advisory locks have no ACL/content of their own, they
-    # are a pure serialization hint. The birthday bound on a 63-bit space
-    # makes this negligible at any realistic conversation volume.
-    return conversation_id.int & ((1 << 63) - 1)
+async def _acquire_lease(
+    session: AsyncSession,
+    tenant_id: uuid.UUID,
+    conversation_id: uuid.UUID,
+    lease_token: uuid.UUID,
+    lease_seconds: float,
+) -> bool:
+    """ONE short UPDATE, through the caller's own short-lived session --
+    never a connection held open for the lease's own duration. Matches
+    only a row that is tenant-owned AND currently free (`lease_until` is
+    NULL, or already in the past) -- a row matching neither condition
+    returns zero rows, the real "busy" signal `create_chat_turn()` turns
+    into a 409. The tenant_id filter here is NOT redundant with whatever
+    already verified `conversation_id` belongs to this tenant earlier in
+    the request (`_resolve_conversation()`) -- it is this statement's OWN
+    independent proof that a lease can never be acquired against another
+    tenant's row, even if a future caller ever reached this function
+    without that earlier check.
+    """
+    result = await session.execute(
+        text(
+            "UPDATE conversations "
+            "SET lease_until = now() + make_interval(secs => :secs), lease_token = :token "
+            "WHERE cid = :cid AND tenant_id = :tenant_id "
+            "AND (lease_until IS NULL OR lease_until < now()) "
+            "RETURNING cid"
+        ),
+        {
+            "secs": lease_seconds,
+            "token": lease_token,
+            "cid": conversation_id,
+            "tenant_id": tenant_id,
+        },
+    )
+    row = result.first()
+    await session.commit()
+    return row is not None
+
+
+async def _release_lease(
+    tenant_id: uuid.UUID, conversation_id: uuid.UUID, lease_token: uuid.UUID
+) -> None:
+    """Opens its OWN fresh, short-lived session -- the request's own
+    auth/conversation-resolution session is already closed by the time
+    this runs on every real path except the `_Stale` early-exit (see
+    `create_chat_turn()`'s own call site), and reusing a long-lived one
+    here would reintroduce exactly the connection-hold problem this
+    whole redesign exists to remove. Matched on `lease_token` AND
+    `tenant_id`: a stale, foreign, or already-expired-and-reassigned
+    token's own release attempt matches zero rows -- a silent, safe
+    no-op, never an error and never a chance to clear a DIFFERENT
+    holder's own lease. Best-effort: a failure here is logged, never
+    raised further -- the lease's own TTL is the real backstop (an
+    unreleased lease still expires on its own), so a release-time error
+    must not mask whatever the stream's own real outcome already was.
+    """
+    try:
+        async with _session_factory()() as session:
+            await session.execute(
+                text(
+                    "UPDATE conversations SET lease_until = NULL, lease_token = NULL "
+                    "WHERE cid = :cid AND tenant_id = :tenant_id AND lease_token = :token"
+                ),
+                {"cid": conversation_id, "tenant_id": tenant_id, "token": lease_token},
+            )
+            await session.commit()
+    except Exception:
+        logger.exception("failed to release the turn lease for conversation %s", conversation_id)
 
 
 async def _resolve_conversation(
@@ -305,8 +377,8 @@ async def _check_idempotency(
     re-running would still APPEND a second, brand-new AIMessage (nothing
     dedups the model's own fresh output the way add_messages dedups the
     human message it was given an id for) -- so this function inspects
-    current state FIRST, while still holding the per-thread advisory
-    lock, and returns the ALREADY-PERSISTED AIMessage (plus its own
+    current state FIRST, while still holding the conversation's own turn
+    lease, and returns the ALREADY-PERSISTED AIMessage (plus its own
     turn's state dict) instead of a fresh one to run, whenever this exact
     client_message_id was already answered as the thread's own MOST
     RECENT turn. Raises `_Stale` if this id exists but is no longer the
@@ -327,10 +399,10 @@ async def _check_idempotency(
 
 
 async def _stream_turn(
-    conn,
     active_streams: set[uuid.UUID],
     identity: VerifiedIdentity,
     conversation_id: uuid.UUID,
+    lease_token: uuid.UUID,
     graph,
     message: str,
     client_message_id: uuid.UUID,
@@ -338,28 +410,23 @@ async def _stream_turn(
     existing_values: dict,
     chat_request_timeout_seconds: float,
 ) -> AsyncIterator[dict]:
-    """The real SSE body. Takes ownership of an ALREADY-OPEN `conn`
-    (the caller -- create_chat_turn() below -- already acquired the
-    per-thread advisory lock on it and already ran the idempotency check,
-    both BEFORE this generator -- and therefore before the stream itself
-    -- ever starts, so a busy lock or a stale retry can return a clean
-    409 instead of an SSE error event; see this module's own header
-    comment for why the lock cannot simply be released before streaming
-    begins). Releases `conn` (and therefore the lock) and clears this
-    visitor's own active-stream marker in a `finally` that runs on
-    success, on a raised exception, AND on the generator being
-    `.aclose()`'d early (a real client disconnect -- Python's own async
-    generator semantics deliver this as a GeneratorExit at the current
-    `await`, which propagates through this function's own `try/finally`
-    exactly like any other exception; confirmed live, not assumed -- see
-    this task's own dedicated cancellation test).
+    """The real SSE body. Holds NO database connection of its own for the
+    main loop's own duration -- the lease and the idempotency check were
+    already resolved by the caller (create_chat_turn() below), using its
+    own short-lived session, closed before this generator is even
+    constructed; this function's only database touch is the lease
+    RELEASE, one short UPDATE through a brand-new session, in the
+    `finally` below. That `finally` runs on success, on a raised
+    exception, AND on the generator being `.aclose()`'d early (a real
+    client disconnect -- Python's own async generator semantics deliver
+    this as a GeneratorExit at the current `await`, which propagates
+    through this function's own `try/finally` exactly like any other
+    exception; confirmed live, not assumed -- see this task's own
+    dedicated cancellation test).
     """
     event_id = 0
 
-    async with AsyncExitStack() as stack:
-        stack.push_async_callback(conn.close)
-        stack.callback(active_streams.discard, identity.vid)
-
+    try:
         if existing_answer is not None:
             # Replay, no real model call: the loop below never runs.
             event_id += 1
@@ -433,97 +500,105 @@ async def _stream_turn(
                 "offer_escalation": last_node in _ESCALATION_OFFERED_NODES,
             },
         )
+    finally:
+        active_streams.discard(identity.vid)
+        await _release_lease(identity.tenant_id, conversation_id, lease_token)
 
 
 @router.post("/chat")
-async def create_chat_turn(
-    payload: ChatRequest,
-    request: Request,
-    identity: VerifiedIdentity = Depends(get_current_visitor),  # noqa: B008
-    session: AsyncSession = Depends(get_db_session),  # noqa: B008
-) -> Response:
+async def create_chat_turn(payload: ChatRequest, request: Request) -> Response:
     # docs/SPEC.md §10: "Auth, rate-limit and quota failures return real
-    # HTTP codes (401, 413, 429) before the stream opens." 401 is
-    # Depends(get_current_visitor)'s own job, above, before this body ever
-    # runs. Quota: TODO(4.3), no quota system exists yet -- Task 4.3's own
-    # job, per docs/SPEC.md §9's own "order of checks", deliberately not
-    # stubbed here with a fake always-False check, matching this
-    # project's own "name what's real vs deferred accurately" discipline.
+    # HTTP codes (401, 413, 429) before the stream opens." Quota: TODO
+    # (4.3), no quota system exists yet -- Task 4.3's own job, per docs/
+    # SPEC.md §9's own "order of checks", deliberately not stubbed here
+    # with a fake always-False check, matching this project's own "name
+    # what's real vs deferred accurately" discipline.
     if len(payload.message) > _MESSAGE_CHAR_CAP:
         return JSONResponse(
             status_code=_MESSAGE_TOO_LONG_STATUS, content={"detail": "message too long"}
         )
 
-    ip = request.client.host if request.client else "unknown"
-    per_ip_limiter = _get_per_ip_limiter(request)
-    if not per_ip_limiter.check(ip):
-        return _rate_limited_response(per_ip_limiter.get_retry_after(ip))
-
-    per_visitor_limiter = _get_per_visitor_limiter(request)
-    if not per_visitor_limiter.check(str(identity.vid)):
-        return _rate_limited_response(per_visitor_limiter.get_retry_after(str(identity.vid)))
-
-    active_streams = _get_active_streams(request)
-    if identity.vid in active_streams:
-        return JSONResponse(
-            status_code=_CONFLICT_STATUS,
-            content={"detail": "a stream for this visitor is already in progress"},
-        )
-
-    repo = TenantScopedRepository(tenant_id=identity.tenant_id, session=session)
-    conversation = await _resolve_conversation(repo, identity, payload.conversation_id)
-
-    # Lock acquisition and the idempotency check both happen HERE,
-    # synchronously, BEFORE EventSourceResponse is ever constructed --
-    # deliberately, so "this conversation is busy" and "this message was
-    # already answered/superseded" are real 409s returned before the
-    # stream opens (docs/SPEC.md §10's own "before the stream opens"
-    # principle, extended from auth/rate-limit/quota to these two
-    # Step-4.1-specific conflict cases too), never an SSE error event
-    # after the fact. `conn` is deliberately NOT closed on the success
-    # path below -- ownership passes to _stream_turn(), which closes it
-    # (releasing the lock) when the stream itself ends; see this
-    # module's own header comment for the full reasoning.
     settings = get_settings()
-    graph = request.app.state.graph
-    conn = get_engine().connect()
-    await conn.__aenter__()
-    try:
-        acquired = (
-            await conn.execute(
-                text("SELECT pg_try_advisory_xact_lock(:key)"),
-                {"key": _advisory_lock_key(conversation.cid)},
-            )
-        ).scalar_one()
-        if not acquired:
-            await conn.__aexit__(None, None, None)
-            return JSONResponse(
-                status_code=_CONFLICT_STATUS,
-                content={"detail": "this conversation is busy, please retry"},
-            )
 
-        try:
-            existing_answer, existing_values = await _check_idempotency(
-                graph, identity, conversation.cid, payload.client_message_id
+    # Identity resolution, rate limits, conversation resolution and the
+    # lease acquire all happen HERE, synchronously, through ONE short-
+    # lived session -- closed before EventSourceResponse is ever
+    # constructed, per this module's own header comment (the real reason
+    # `identity`/a database session are NOT Depends() parameters on this
+    # route). "This conversation is busy" and "this message was already
+    # answered/superseded" are therefore real 409s returned before the
+    # stream opens (docs/SPEC.md §10's own "before the stream opens"
+    # principle, extended to these two Step-4.1-specific conflict cases
+    # too), never an SSE error event after the fact. `request.app.state.
+    # graph` is read only AFTER identity resolves -- never before, so a
+    # plain missing-token 401 (or any other auth failure) never depends
+    # on the graph existing at all.
+    try:
+        async with _session_factory()() as session:
+            identity = await get_current_visitor(request, session)
+            graph = request.app.state.graph
+
+            ip = request.client.host if request.client else "unknown"
+            per_ip_limiter = _get_per_ip_limiter(request)
+            if not per_ip_limiter.check(ip):
+                return _rate_limited_response(per_ip_limiter.get_retry_after(ip))
+
+            per_visitor_limiter = _get_per_visitor_limiter(request)
+            visitor_key = str(identity.vid)
+            if not per_visitor_limiter.check(visitor_key):
+                return _rate_limited_response(per_visitor_limiter.get_retry_after(visitor_key))
+
+            active_streams = _get_active_streams(request)
+            if identity.vid in active_streams:
+                return JSONResponse(
+                    status_code=_CONFLICT_STATUS,
+                    content={"detail": "a stream for this visitor is already in progress"},
+                )
+
+            repo = TenantScopedRepository(tenant_id=identity.tenant_id, session=session)
+            conversation = await _resolve_conversation(repo, identity, payload.conversation_id)
+
+            lease_token = uuid.uuid4()
+            lease_seconds = (
+                settings.chat_request_timeout_seconds + settings.chat_lease_margin_seconds
             )
-        except _Stale:
-            await conn.__aexit__(None, None, None)
-            return JSONResponse(
-                status_code=_CONFLICT_STATUS,
-                content={"detail": "this message has already been answered"},
+            acquired = await _acquire_lease(
+                session, identity.tenant_id, conversation.cid, lease_token, lease_seconds
             )
-    except BaseException:
-        await conn.__aexit__(*sys.exc_info())
-        raise
+            if not acquired:
+                return JSONResponse(
+                    status_code=_CONFLICT_STATUS,
+                    content={"detail": "this conversation is busy, please retry"},
+                )
+
+            try:
+                existing_answer, existing_values = await _check_idempotency(
+                    graph, identity, conversation.cid, payload.client_message_id
+                )
+            except _Stale:
+                await _release_lease(identity.tenant_id, conversation.cid, lease_token)
+                return JSONResponse(
+                    status_code=_CONFLICT_STATUS,
+                    content={"detail": "this message has already been answered"},
+                )
+    except PoolTimeoutError:
+        # A real pool-checkout timeout (no free app-pool connection at
+        # all) -- never reported as "conversation busy" (a real lease
+        # conflict, decided only once a connection already exists).
+        logger.warning("database connection pool exhausted while starting a chat turn")
+        return JSONResponse(
+            status_code=_SERVICE_UNAVAILABLE_STATUS,
+            content={"detail": "service temporarily unavailable, please retry"},
+        )
 
     active_streams.add(identity.vid)
 
     return EventSourceResponse(
         _stream_turn(
-            conn,
             active_streams,
             identity,
             conversation.cid,
+            lease_token,
             graph,
             payload.message,
             payload.client_message_id,

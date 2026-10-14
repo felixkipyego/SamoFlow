@@ -63,7 +63,16 @@ from pathlib import Path
 from langchain_core.messages import HumanMessage
 from pydantic import BaseModel, ConfigDict
 from qdrant_client import AsyncQdrantClient
-from qdrant_client.models import FieldCondition, Filter, MatchValue
+from qdrant_client.models import (
+    Distance,
+    FieldCondition,
+    Filter,
+    HnswConfigDiff,
+    MatchValue,
+    Modifier,
+    SparseVectorParams,
+    VectorParams,
+)
 
 from app import qdrant
 from app.agent.graph import _prepare_node
@@ -91,7 +100,13 @@ from app.evals.retrieval_metrics import (
 )
 from app.ingest.embedding import EMBEDDING_MODEL, SPARSE_EMBEDDING_MODEL, SparseVectorData
 from app.ingest.qdrant_writer import build_payload, build_point, build_point_id, upsert_points
-from app.qdrant import DENSE_VECTOR_SIZE
+from app.qdrant import (
+    DENSE_VECTOR_NAME,
+    DENSE_VECTOR_SIZE,
+    SPARSE_VECTOR_NAME,
+    _create_client_id_index,
+    _create_source_id_index,
+)
 from app.retrieval.service import retrieve
 
 DEFAULT_QUERY_VECTORS_PATH = GOLDEN_SET_DIR / "query_vectors.json"
@@ -310,6 +325,40 @@ def eval_marker_filter() -> Filter:
     )
 
 
+async def _create_exact_search_collection(client: AsyncQdrantClient, name: str) -> None:
+    """Part C (Task 4.1 follow-up): the SAME schema `qdrant.ensure_
+    collection()` creates (reusing its own private index helpers
+    directly, not duplicated here), with ONE deliberate difference --
+    `hnsw_config=HnswConfigDiff(m=0)` disables HNSW graph construction
+    for this collection entirely, forcing Qdrant's own exact/brute-force
+    scoring for every query against it. `m=16` (the server-side default
+    `ensure_collection()` otherwise leaves in place) is an APPROXIMATE
+    nearest-neighbor index -- confirmed live to be the real, previously
+    undiagnosed source of this eval's own run-to-run nondeterminism
+    (both the corpus's own dense/sparse vectors AND the query vectors
+    were ALREADY fully frozen before this fix -- re-confirmed by reading
+    the committed `synthetic_corpus.json` directly, real 1536-dim dense
+    vectors and real sparse indices/values stored per chunk, never
+    recomputed -- so identical input data was already guaranteed; HNSW's
+    own approximate, construction-order-sensitive graph traversal was
+    the one remaining variable). Deliberately NOT a change to `app.
+    qdrant.ensure_collection()` itself (production code, untouched,
+    still approximate -- the right tradeoff at real tenant scale): this
+    function exists only for this disposable, eval-only collection,
+    never reused in `app/`.
+    """
+    await client.create_collection(
+        collection_name=name,
+        vectors_config={
+            DENSE_VECTOR_NAME: VectorParams(size=DENSE_VECTOR_SIZE, distance=Distance.COSINE)
+        },
+        sparse_vectors_config={SPARSE_VECTOR_NAME: SparseVectorParams(modifier=Modifier.IDF)},
+        hnsw_config=HnswConfigDiff(m=0),
+    )
+    await _create_client_id_index(client, name)
+    await _create_source_id_index(client, name)
+
+
 async def seed_frozen_corpus(
     client: AsyncQdrantClient, collection_name: str, tenant_id: uuid.UUID, corpus: FrozenCorpus
 ) -> dict[str, uuid.UUID]:
@@ -321,7 +370,7 @@ async def seed_frozen_corpus(
     but this corpus's own `document` field is a stable short name (e.g.
     "shipping-domestic"), not a UUID, so one must be assigned.
     """
-    await qdrant.ensure_collection(client, collection_name)
+    await _create_exact_search_collection(client, collection_name)
     document_id_by_name = {name: _document_id(corpus.corpus, name) for name in corpus.documents}
     points = []
     for chunk in corpus.chunks:
@@ -365,9 +414,21 @@ async def retrieve_item_result(
     document_name_by_id = {str(v): k for k, v in document_id_by_name.items()}
     prepared_query = build_prepared_query(item)
     result = await retrieve(tenant_id, prepared_query, k=MAX_K, collection_name=collection_name)
+    # Part C (Task 4.1 follow-up): a deterministic tie-break, applied
+    # HERE in eval code only -- never inside retrieve() itself (production
+    # code, untouched; real tenant traffic has no need for a fixed tie-
+    # break, since there is no "the SAME query run three times and
+    # compared" requirement in production the way there is for this
+    # eval). `result.points` is Qdrant's own returned order; re-sorted
+    # by (score DESCENDING, point id ASCENDING) -- `point.id` is fully
+    # deterministic (build_point_id(), derived from document_id/chunk_
+    # index/embedding_version, all fixed by the frozen corpus), so this
+    # sort is total and stable regardless of whatever order Qdrant itself
+    # returned equal- or near-equal-scored points in.
+    sorted_points = sorted(result.points, key=lambda point: (-point.score, str(point.id)))
     retrieved_keys = tuple(
         (document_name_by_id[point.payload["doc_id"]], point.payload["chunk_index"])
-        for point in result.points
+        for point in sorted_points
     )
 
     resolved_sources = resolve_item_sources(item, corpus)
@@ -506,62 +567,65 @@ def summarize_results(results: list[ItemRetrievalResult]) -> dict:
 
 DEFAULT_BASELINE_PATH = GOLDEN_SET_DIR / "retrieval_baseline.json"
 
-# Confirmed LIVE, not assumed, before picking these numbers: across 5
-# repeated runs of the IDENTICAL frozen vectors, fixed deterministic
-# point ids, a fixed tenant_id and a fixed collection name, exactly 3 of
-# 60 recall-measured items (ans-03, ms-10, inj-03) still flipped their
-# own rank-1 hit between runs -- every other item, and recall@3/5/8 in
-# every category, were perfectly stable across all 5 runs. Root cause
-# identified, not guessed: Reciprocal Rank Fusion produces a genuine
-# EXACT mathematical tie whenever two candidates swap dense/sparse ranks
-# with each other (1/(60+1)+1/(60+2) == 1/(60+2)+1/(60+1)) -- Qdrant's
-# own server does not guarantee a deterministic tiebreak order for such
-# a tie, independent of anything this eval's own seeding controls
-# (point ids, tenant_id and collection-reuse history were each tested
-# and individually ruled out as the cause first). The tolerances below
-# absorb exactly this known, narrow noise (one item's worth of recall in
-# its own category; a small absolute MRR band) without hiding a REAL
-# regression, which would still need to clear a much bigger bar than
-# this. recall@3/5/8 and multi_source's own all-documents recall get the
-# identical tolerance treatment for consistency, though none of them
-# moved at all across the same 5 runs.
-RECALL_TOLERANCE_ITEMS = 1
-MRR_TOLERANCE = 0.05
+# Part C (Task 4.1 follow-up): REMOVED. The tolerance band these two
+# constants used to define (RECALL_TOLERANCE_ITEMS = 1, MRR_TOLERANCE =
+# 0.05) existed to absorb a real, previously root-caused noise source --
+# Reciprocal Rank Fusion produces a genuine EXACT mathematical tie
+# whenever two candidates swap dense/sparse ranks with each other
+# (1/(60+1)+1/(60+2) == 1/(60+2)+1/(60+1)), and Qdrant's own server did
+# not guarantee a deterministic tiebreak order for such a tie. That root
+# cause is now closed at the source, not merely tolerated: (1) the
+# disposable eval collection is created with `hnsw_config=HnswConfigDiff
+# (m=0)` (_create_exact_search_collection() above), forcing exact/brute-
+# force scoring with no approximate-index traversal order in play at
+# all; (2) `retrieve_item_result()` above now re-sorts `result.points`
+# by (score DESCENDING, point id ASCENDING) itself, in eval code only,
+# so even a genuine Qdrant-side exact-score tie resolves identically
+# every run regardless of whatever order the server itself returned it
+# in. Confirmed live, not assumed: 3 consecutive `make eval` runs on
+# unchanged code now produce a BYTE-IDENTICAL summary_retrieval.json
+# (diffed directly, zero differences) -- the exact proof this tolerance
+# band was only ever a workaround for. See PROJECT_SPEC.md's own Task
+# 4.1 follow-up entry for the full before/after and the now-RESOLVED §9
+# marker. `assert_no_regression()` below now requires an EXACT match
+# (within `1e-9`, pure floating-point representation noise, never a real
+# tolerance band) -- any real regression, however small, now fails loudly
+# instead of hiding inside a band sized for noise that no longer exists.
 
 
 def load_baseline(path: Path = DEFAULT_BASELINE_PATH) -> dict:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
-def assert_no_regression(report: dict, baseline: dict, category_sizes: dict[str, int]) -> None:
+def assert_no_regression(report: dict, baseline: dict) -> None:
     """Raises `AssertionError` naming every metric that fell below its
-    own baseline by more than the documented tolerance above. An
-    IMPROVEMENT (actual > baseline) always passes, by construction.
+    own EXACT baseline value (within 1e-9, pure floating-point
+    representation noise -- not a real tolerance band, see this
+    module's own header comment immediately above for why a band is no
+    longer needed at all). An IMPROVEMENT (actual > baseline) always
+    passes, by construction. No longer takes `category_sizes` (every
+    real tolerance calculation that used to need it is gone) -- removed
+    from the signature rather than kept as dead weight; see this
+    function's own call sites for the matching update.
     """
     failures = []
     for category, per_k in baseline["recall_at_k"].items():
-        tolerance = RECALL_TOLERANCE_ITEMS / category_sizes[category]
         for k, baseline_value in per_k.items():
             actual_value = report["recall_at_k"][category][k]
-            if actual_value < baseline_value - tolerance - 1e-9:
+            if actual_value < baseline_value - 1e-9:
                 failures.append(
-                    f"recall@{k} [{category}]: {actual_value:.3f} < baseline "
-                    f"{baseline_value:.3f} (tolerance {tolerance:.3f})"
+                    f"recall@{k} [{category}]: {actual_value:.3f} < baseline {baseline_value:.3f}"
                 )
     for category, baseline_value in baseline["mrr"].items():
         actual_value = report["mrr"][category]
-        if actual_value < baseline_value - MRR_TOLERANCE - 1e-9:
-            failures.append(
-                f"mrr [{category}]: {actual_value:.3f} < baseline {baseline_value:.3f} "
-                f"(tolerance {MRR_TOLERANCE})"
-            )
-    multi_source_tolerance = RECALL_TOLERANCE_ITEMS / category_sizes["multi_source"]
+        if actual_value < baseline_value - 1e-9:
+            failures.append(f"mrr [{category}]: {actual_value:.3f} < baseline {baseline_value:.3f}")
     for k, baseline_value in baseline["multi_source_all_documents_recall_at_k"].items():
         actual_value = report["multi_source_all_documents_recall_at_k"][k]
-        if actual_value < baseline_value - multi_source_tolerance - 1e-9:
+        if actual_value < baseline_value - 1e-9:
             failures.append(
                 f"multi_source_all_documents_recall@{k}: {actual_value:.3f} < baseline "
-                f"{baseline_value:.3f} (tolerance {multi_source_tolerance:.3f})"
+                f"{baseline_value:.3f}"
             )
     if failures:
         raise AssertionError("retrieval metric regression(s) detected:\n" + "\n".join(failures))

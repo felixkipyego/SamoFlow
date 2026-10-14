@@ -6,20 +6,34 @@
 # own established fakes, reused from test_agent_graph_answer.py/conftest.py
 # -- zero real OpenAI/Qdrant calls anywhere in this file), so these tests
 # exercise this endpoint's OWN new logic (auth wiring, rate limits, the
-# advisory lock, idempotency/replay, the overall timeout, the SSE event
+# turn lease, idempotency/replay, the overall timeout, the SSE event
 # mapping) against a real graph, not a fake one.
+#
+# Task 4.1 follow-up: the original advisory-lock tests below were
+# rewritten for the lease mechanism (app/chat/routes.py's own
+# _acquire_lease()/_release_lease()) -- direct row manipulation via
+# `app.db` instead of a real `pg_advisory_xact_lock` held on a separate
+# connection, plus new tests this follow-up's own prompt names
+# explicitly: expired-lease recovery, non-owner release no-op, no pooled
+# connection held during the main streaming loop, pool exhaustion -> 503
+# (never 409), and cross-tenant lease isolation.
 import asyncio
 import json
 import uuid
+from datetime import UTC, datetime, timedelta
 
 import psycopg
 import pytest
+import sqlalchemy as sa
+from sqlalchemy.ext.asyncio import create_async_engine
 
+import app.db as db_module
 from app.agent import checkpointer
 from app.agent import graph as graph_module
 from app.agent.graph import build_graph
 from app.auth.secrets import generate_visitor_secret, hash_visitor_secret
 from app.auth.tokens import encode_session_token
+from app.chat.routes import _acquire_lease, _release_lease
 from app.config import get_settings
 from app.main import create_app
 from app.plans import models as plans_models  # noqa: F401 (registers "plans" on Base.metadata)
@@ -598,6 +612,10 @@ async def test_retrying_the_same_client_message_id_after_completion_replays_once
 async def test_two_concurrent_requests_for_the_same_conversation_return_409_for_the_second(
     monkeypatch, _seeded
 ):
+    # Simulates a real in-flight turn by acquiring the lease directly
+    # (the same statement create_chat_turn() itself runs) BEFORE the real
+    # HTTP request -- exactly one request gets the conversation, the
+    # other 409s, never both.
     app = await _build_app(monkeypatch)
     token = _token_for(_seeded)
     async with db_session() as session:
@@ -606,24 +624,243 @@ async def test_two_concurrent_requests_for_the_same_conversation_return_409_for_
         await session.commit()
         conversation_id = conversation.cid
 
-    conninfo = checkpointer.checkpointer_conninfo()
-    lock_key = conversation_id.int & ((1 << 63) - 1)
-    async with await psycopg.AsyncConnection.connect(conninfo, autocommit=False) as holder:
-        await holder.execute("SELECT pg_advisory_xact_lock(%s)", (lock_key,))
+    async with db_session() as holder_session:
+        acquired = await _acquire_lease(
+            holder_session, _seeded["tenant"], conversation_id, uuid.uuid4(), lease_seconds=30.0
+        )
+        assert acquired is True
+
+    async with await http_client(app) as client:
+        response = await _post_chat(
+            client,
+            token,
+            {
+                "message": "hi",
+                "client_message_id": str(uuid.uuid4()),
+                "conversation_id": str(conversation_id),
+            },
+        )
+    assert response.status_code == 409
+
+
+async def test_truly_concurrent_acquire_attempts_on_the_same_row_never_both_win(
+    monkeypatch, _seeded
+):
+    # [SECURITY] adversarial pass -- a REAL race, not a sequential
+    # simulation: two genuinely concurrent requests (asyncio.gather, both
+    # in flight at once, both DB round-trips genuinely overlapping)
+    # against the SAME conversation row, proving Postgres's own row-level
+    # UPDATE atomicity (not application-level locking) is what actually
+    # prevents both from acquiring -- never zero, never two.
+    async with db_session() as session:
+        repo = TenantScopedRepository(tenant_id=_seeded["tenant"], session=session)
+        conversation = await repo.create_conversation(vid=_seeded["visitor"])
+        await session.commit()
+        conversation_id = conversation.cid
+
+    async def _attempt():
+        async with db_session() as session:
+            return await _acquire_lease(
+                session, _seeded["tenant"], conversation_id, uuid.uuid4(), lease_seconds=30.0
+            )
+
+    results = await asyncio.gather(*(_attempt() for _ in range(8)))
+    assert results.count(True) == 1
+    assert results.count(False) == 7
+
+
+async def test_an_expired_lease_lets_the_next_turn_proceed(monkeypatch, _seeded):
+    app = await _build_app(monkeypatch)
+    token = _token_for(_seeded)
+    async with db_session() as session:
+        repo = TenantScopedRepository(tenant_id=_seeded["tenant"], session=session)
+        conversation = await repo.create_conversation(vid=_seeded["visitor"])
+        await session.commit()
+        conversation_id = conversation.cid
+
+    # Simulates a crashed worker: a lease that is already in the past,
+    # never released by anyone -- the real recovery path, no cleanup job
+    # involved at all.
+    async with db_session() as session:
+        await session.execute(
+            sa.update(Conversation)
+            .where(Conversation.cid == conversation_id)
+            .values(
+                lease_until=datetime.now(UTC) - timedelta(seconds=5), lease_token=uuid.uuid4()
+            )
+        )
+        await session.commit()
+
+    async with await http_client(app) as client:
+        response = await _post_chat(
+            client,
+            token,
+            {
+                "message": "hi",
+                "client_message_id": str(uuid.uuid4()),
+                "conversation_id": str(conversation_id),
+            },
+        )
+    assert response.status_code == 200
+
+
+async def test_releasing_with_the_wrong_token_is_a_no_op(monkeypatch, _seeded):
+    async with db_session() as session:
+        repo = TenantScopedRepository(tenant_id=_seeded["tenant"], session=session)
+        conversation = await repo.create_conversation(vid=_seeded["visitor"])
+        await session.commit()
+        conversation_id = conversation.cid
+
+    real_token = uuid.uuid4()
+    async with db_session() as session:
+        acquired = await _acquire_lease(
+            session, _seeded["tenant"], conversation_id, real_token, lease_seconds=30.0
+        )
+        assert acquired is True
+
+    # A foreign/stale token's own release attempt matches zero rows --
+    # silently, never an error -- and must not clear the REAL holder's
+    # own lease.
+    await _release_lease(_seeded["tenant"], conversation_id, uuid.uuid4())
+
+    async with db_session() as session:
+        row = (
+            await session.execute(
+                sa.select(Conversation.lease_until, Conversation.lease_token).where(
+                    Conversation.cid == conversation_id
+                )
+            )
+        ).one()
+    assert row.lease_until is not None
+    assert row.lease_token == real_token
+
+    # The REAL owner's own release still works normally.
+    await _release_lease(_seeded["tenant"], conversation_id, real_token)
+    async with db_session() as session:
+        row = (
+            await session.execute(
+                sa.select(Conversation.lease_until, Conversation.lease_token).where(
+                    Conversation.cid == conversation_id
+                )
+            )
+        ).one()
+    assert row.lease_until is None
+    assert row.lease_token is None
+
+
+async def test_a_lease_cannot_be_acquired_or_released_using_another_tenants_conversation_id(
+    monkeypatch, _seeded
+):
+    async with db_session() as session:
+        repo = TenantScopedRepository(tenant_id=_seeded["tenant"], session=session)
+        conversation = await repo.create_conversation(vid=_seeded["visitor"])
+        await session.commit()
+        conversation_id = conversation.cid
+
+    # Acquire attempted with the WRONG tenant_id for a real, otherwise-
+    # free conversation row -- must match zero rows.
+    async with db_session() as session:
+        acquired = await _acquire_lease(
+            session, _seeded["other_tenant"], conversation_id, uuid.uuid4(), lease_seconds=30.0
+        )
+    assert acquired is False
+
+    # The real owner acquires it for real.
+    real_token = uuid.uuid4()
+    async with db_session() as session:
+        acquired = await _acquire_lease(
+            session, _seeded["tenant"], conversation_id, real_token, lease_seconds=30.0
+        )
+    assert acquired is True
+
+    # A release attempted with the WRONG tenant_id (even with the
+    # correct token) must not clear the real tenant's own lease.
+    await _release_lease(_seeded["other_tenant"], conversation_id, real_token)
+    async with db_session() as session:
+        row = (
+            await session.execute(
+                sa.select(Conversation.lease_until).where(Conversation.cid == conversation_id)
+            )
+        ).one()
+    assert row.lease_until is not None
+
+
+async def test_pool_exhaustion_returns_503_not_409(monkeypatch, _seeded):
+    # A deliberately tiny, separate engine (pool_size=1, no overflow, a
+    # short pool_timeout so the test itself stays fast) -- swapped in for
+    # app.db.get_engine so app/chat/routes.py's own _session_factory()
+    # calls resolve against it. One connection held open externally
+    # leaves ZERO free slots for the real request's own short-lived
+    # session to acquire -- a real pool-checkout timeout, never a lease
+    # conflict (this conversation was never even reached).
+    app = create_app()
+    app.state.graph = object()
+    token = _token_for(_seeded)
+    db_url = get_settings().database_url_str()
+    tiny_engine = create_async_engine(db_url, pool_size=1, max_overflow=0, pool_timeout=0.2)
+    # Restored manually (not left to monkeypatch's own fixture-order
+    # undo): reset_test_database's own teardown (which calls db.get_
+    # engine.cache_clear()) depends on the SAME monkeypatch fixture and
+    # therefore tears down BEFORE it, so this swap must already be
+    # reverted by the time that teardown runs, confirmed live (without
+    # this, that teardown's own cache_clear() call fails -- this swap
+    # replaced the real lru_cache-wrapped function with a plain lambda).
+    real_get_engine = db_module.get_engine
+    db_module.get_engine = lambda: tiny_engine
+    db_module._session_factory.cache_clear()
+
+    holder = await tiny_engine.connect()
+    try:
         async with await http_client(app) as client:
             response = await _post_chat(
-                client,
-                token,
-                {
-                    "message": "hi",
-                    "client_message_id": str(uuid.uuid4()),
-                    "conversation_id": str(conversation_id),
-                },
+                client, token, {"message": "hi", "client_message_id": str(uuid.uuid4())}
             )
-        assert response.status_code == 409
+        assert response.status_code == 503
+    finally:
+        await holder.close()
+        await tiny_engine.dispose()
+        db_module.get_engine = real_get_engine
+        db_module._session_factory.cache_clear()
 
 
-async def test_cancelling_the_stream_releases_the_lock_and_leaves_valid_state(monkeypatch, _seeded):
+async def test_no_pooled_connection_is_checked_out_during_the_main_streaming_loop(
+    monkeypatch, _seeded
+):
+    class _PausingModel(FakeAnswerToolChatModel):
+        async def _astream(self, messages, stop=None, run_manager=None, **kwargs):
+            upstream = super()._astream(messages, stop=stop, run_manager=run_manager, **kwargs)
+            yield await upstream.__anext__()
+            await asyncio.sleep(1.0)
+
+    chunks = build_fake_answer_arg_chunks(can_answer=True, used_chunk_ids=[], answer="pausing")
+    app = await _build_app(
+        monkeypatch, chat_model=_PausingModel(arg_chunks=chunks), retrieve_chunks=_answer_chunks()
+    )
+    token = _token_for(_seeded)
+    # Baseline: the app's own pool, idle, before the request even starts.
+    assert db_module.get_engine().pool.checkedout() == 0
+
+    async with await http_client(app) as client:
+        async with client.stream(
+            "POST",
+            "/api/v1/chat",
+            json={"message": "hi", "client_message_id": str(uuid.uuid4())},
+            headers={"Authorization": f"Bearer {token}", "Origin": ORIGIN},
+        ) as response:
+            async for _line in response.aiter_lines():
+                # The generator has already yielded its first token and
+                # is now paused INSIDE the main loop (the fake model's
+                # own asyncio.sleep, which never yields again) -- the one
+                # moment that matters; the stream is closed early right
+                # after, same as the cancellation test below.
+                assert db_module.get_engine().pool.checkedout() == 0
+                break
+    assert db_module.get_engine().pool.checkedout() == 0
+
+
+async def test_cancelling_the_stream_releases_the_lease_and_leaves_valid_state(
+    monkeypatch, _seeded
+):
     class _NeverEndingModel(FakeAnswerToolChatModel):
         async def _astream(self, messages, stop=None, run_manager=None, **kwargs):
             upstream = super()._astream(messages, stop=stop, run_manager=run_manager, **kwargs)
@@ -655,7 +892,23 @@ async def test_cancelling_the_stream_releases_the_lock_and_leaves_valid_state(mo
         assert len(rows) == 1
         conversation_id = rows[0].cid
 
-        # The lock must already be released -- a fresh request for the
+        # The lease must already be cleared by the generator's own
+        # `finally` (a real client disconnect delivers GeneratorExit) --
+        # checked directly in the row, BEFORE issuing the follow-up
+        # request below, so this proves cancellation itself released it,
+        # not merely that a second request would have anyway.
+        async with db_session() as session:
+            row = (
+                await session.execute(
+                    sa.select(Conversation.lease_until, Conversation.lease_token).where(
+                        Conversation.cid == conversation_id
+                    )
+                )
+            ).one()
+        assert row.lease_until is None
+        assert row.lease_token is None
+
+        # The lease must already be released -- a fresh request for the
         # SAME conversation succeeds immediately rather than 409ing.
         follow_up = await _post_chat(
             client,

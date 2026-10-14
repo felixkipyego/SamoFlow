@@ -296,6 +296,20 @@ class Settings(BaseSettings):
     # 7's load test is the real check, same discipline as every other
     # unvalidated-under-load number in this file.
     chat_request_timeout_seconds: float = Field(default=30.0, gt=0)
+    # Task 4.1 follow-up [SECURITY-adjacent: concurrency/availability]: the
+    # turn-lease margin added on top of chat_request_timeout_seconds above
+    # -- the lease duration (app/chat/routes.py's own _LEASE_MARGIN_
+    # SECONDS... no, this constant) MUST exceed the overall per-turn
+    # timeout, so a genuinely still-running turn can never lose its own
+    # lease to expiry while it is still legitimately in flight (the
+    # direct instruction this field exists to satisfy). 15s is a
+    # deliberately generous round margin -- covers the real wall-clock gap
+    # between "asyncio.timeout() fires inside _stream_turn()" and "the
+    # lease's own release statement actually executes and commits" (DNS/
+    # TCP/connection-pool-checkout time for that one release UPDATE),
+    # plus slack for GC pauses or scheduler delay under load. Named as an
+    # estimate, same discipline as chat_request_timeout_seconds itself.
+    chat_lease_margin_seconds: float = Field(default=15.0, gt=0)
     # Task 3.7.a follow-up [correctness]: an EXPLICIT choice replacing an
     # inherited provider default -- `ChatOpenAI`'s own default `temperature`
     # is `None` (confirmed live, not assumed: nothing is sent, so OpenAI's

@@ -121,9 +121,8 @@ async def test_retrieval_metrics_meet_the_committed_baseline(monkeypatch):
     )
     assert len(results) == expected_item_count
 
-    category_sizes = golden_set.category_counts()
     report = summarize_results(results)
-    assert_no_regression(report, baseline, category_sizes)
+    assert_no_regression(report, baseline)
 
 
 # --- CLI entry point (`make eval`, Task 3.7.e item 3) -----------------------
@@ -148,13 +147,13 @@ def test_main_writes_a_committed_summary_and_prints_a_delta_table(tmp_path, monk
 
     retrieval_eval_module.main()  # second run: diffs against its own first-run output
     second_run = json.loads(summary_path.read_text(encoding="utf-8"))
-    # Same TOP-LEVEL metric structure both runs -- not byte-identical
-    # values: this module's own documented RRF near-tie finding (see
-    # RECALL_TOLERANCE_ITEMS's own header comment) means recall@1/MRR can
-    # genuinely differ by one item's worth between two otherwise-
-    # identical runs of the same frozen vectors, which is exactly the
-    # real, already-accepted noise `assert_no_regression()`'s own
-    # tolerance exists for -- this test's job is proving the committed-
-    # summary/delta-table plumbing works against the real shape, not
-    # re-asserting perfect eval determinism a second time.
-    assert second_run.keys() == first_run.keys()
+    # Part C (Task 4.1 follow-up): BYTE-IDENTICAL now, not merely same
+    # top-level keys -- the real RRF-near-tie nondeterminism this test
+    # used to accept (Qdrant's own server not guaranteeing a
+    # deterministic tiebreak order) is closed at the source (exact
+    # search via HnswConfigDiff(m=0) on this eval's own disposable
+    # collection, plus a deterministic (score, point id) re-sort in eval
+    # code -- see retrieval_eval.py's own header comment above
+    # assert_no_regression() for the full before/after). This is now the
+    # real, primary proof of that fix, not merely plumbing coverage.
+    assert second_run == first_run

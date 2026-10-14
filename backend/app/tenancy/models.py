@@ -143,3 +143,18 @@ class Conversation(Base):
     title: Mapped[str | None] = mapped_column(String, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), **TIMESTAMP_NOW)
     last_message_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), **TIMESTAMP_NOW)
+    # Task 4.1 follow-up [SECURITY-adjacent: concurrency/availability]:
+    # replaces the original pg_try_advisory_xact_lock-for-the-whole-stream
+    # mechanism (which held one app-pool connection open for the full
+    # turn duration, capping concurrent conversations at the pool size)
+    # with a short, two-statement LEASE on the row itself -- acquired and
+    # released via ordinary, FAST UPDATE statements through the request's
+    # own ordinary Depends(get_db_session), never a connection held open
+    # across the stream. `lease_until` NULL or in the past means free;
+    # a crashed worker's own lease simply expires on its own, no cleanup
+    # job needed. `lease_token` lets release() prove ownership (a stale
+    # or foreign token's own release attempt is a safe no-op, matching
+    # UPDATE's own "0 rows matched" semantics) -- see app/chat/routes.py's
+    # own _acquire_lease()/_release_lease() for the two SQL statements.
+    lease_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    lease_token: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
