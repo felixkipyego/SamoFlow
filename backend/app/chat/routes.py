@@ -56,6 +56,7 @@ import logging
 import math
 import uuid
 from collections.abc import AsyncIterator
+from datetime import UTC, datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse, Response
@@ -76,6 +77,9 @@ from app.chat.schemas import (
 )
 from app.config import get_settings
 from app.db import _session_factory, get_db_session
+from app.plans import usage
+from app.plans.service import get_plan_limits
+from app.plans.usage import PendingUsageEvent, estimate_cost_usd
 from app.ratelimit import RateLimiter
 from app.tenancy.models import Conversation
 from app.tenancy.repository import TenantScopedRepository
@@ -414,6 +418,7 @@ async def _stream_turn(
     existing_answer: AIMessage | None,
     existing_values: dict,
     chat_request_timeout_seconds: float,
+    quota_exhausted: bool,
 ) -> AsyncIterator[dict]:
     """The real SSE body. Holds NO database connection of its own for the
     main loop's own duration -- the lease and the idempotency check were
@@ -428,6 +433,19 @@ async def _stream_turn(
     through this function's own `try/finally` exactly like any other
     exception; confirmed live, not assumed -- see this task's own
     dedicated cancellation test).
+
+    Task 4.3: `usage.record_usage_event()` (called below, on the
+    success path only) is a PURE in-memory operation -- no database
+    access of its own (app/plans/usage.py's own design, "updates them
+    locally per message") -- so calling it from here does not reintroduce
+    a connection-hold risk. Deliberately NOT called for a replay (not a
+    new turn -- would double-count an already-recorded one), nor for the
+    `timeout`/`model_error` early returns below (a real attempted turn
+    that produced no visible or billable output at all; recording a
+    free, reason-coded usage row for these too is a reasonable future
+    extension, not built here -- out of scope for this task, which
+    focuses on the cases docs/SPEC.md §9 names explicitly: a real
+    answer, and quota-exhausted).
     """
     event_id = 0
 
@@ -462,7 +480,13 @@ async def _stream_turn(
             async with asyncio.timeout(chat_request_timeout_seconds):
                 last_node: str | None = None
                 last_output: dict = {}
-                async for mode, chunk in run_turn(graph, identity, conversation_id, graph_input):
+                async for mode, chunk in run_turn(
+                    graph,
+                    identity,
+                    conversation_id,
+                    graph_input,
+                    quota_exhausted=quota_exhausted,
+                ):
                     if mode == "custom":
                         event_id += 1
                         yield _sse_event(event_id, "token", {"text": chunk["text"]})
@@ -495,13 +519,53 @@ async def _stream_turn(
             event_id += 1
             yield _build_citations_event(event_id, citations)
 
+        # Task 4.3: True ONLY when `last_node == "answer"` -- confirmed
+        # by reading `_route_after_answer()` (app/agent/graph.py)
+        # directly: a `can_answer=False` verdict from the answer node
+        # itself routes to a SEPARATE node (`no_answer_fallback`) before
+        # the turn ends, so `last_node` can equal `"answer"` only when a
+        # real, completed, `can_answer=True` answer was produced -- never
+        # for a fallback/guardrail/quota-exhausted/escalation turn, all
+        # of which are free per docs/SPEC.md §9 ("Fallback replies and
+        # escalations are free and don't count").
+        counted_toward_quota = last_node == "answer"
+        resolved_model = last_output.get("resolved_model") if counted_toward_quota else None
+        prompt_tokens = last_output.get("prompt_tokens") if counted_toward_quota else None
+        completion_tokens = last_output.get("completion_tokens") if counted_toward_quota else None
+        estimated_cost_usd = (
+            estimate_cost_usd(resolved_model, prompt_tokens, completion_tokens)
+            if resolved_model is not None and prompt_tokens is not None
+            else None
+        )
+        await usage.record_usage_event(
+            PendingUsageEvent(
+                tenant_id=identity.tenant_id,
+                vid=identity.vid,
+                conversation_id=conversation_id,
+                counted_toward_quota=counted_toward_quota,
+                model=resolved_model,
+                prompt_tokens=prompt_tokens,
+                completion_tokens=completion_tokens,
+                estimated_cost_usd=estimated_cost_usd,
+                created_at=datetime.now(UTC),
+            )
+        )
+
         event_id += 1
         yield _sse_event(
             event_id,
             "done",
             {
                 "message_id": str(uuid.uuid4()),
-                "usage": None,
+                "usage": (
+                    {
+                        "prompt_tokens": prompt_tokens,
+                        "completion_tokens": completion_tokens,
+                        "estimated_cost_usd": estimated_cost_usd,
+                    }
+                    if counted_toward_quota
+                    else None
+                ),
                 "offer_escalation": last_node in _ESCALATION_OFFERED_NODES,
             },
         )
@@ -513,11 +577,14 @@ async def _stream_turn(
 @router.post("/chat")
 async def create_chat_turn(payload: ChatRequest, request: Request) -> Response:
     # docs/SPEC.md §10: "Auth, rate-limit and quota failures return real
-    # HTTP codes (401, 413, 429) before the stream opens." Quota: TODO
-    # (4.3), no quota system exists yet -- Task 4.3's own job, per docs/
-    # SPEC.md §9's own "order of checks", deliberately not stubbed here
-    # with a fake always-False check, matching this project's own "name
-    # what's real vs deferred accurately" discipline.
+    # HTTP codes (401, 413, 429) before the stream opens." Quota is now
+    # real (Task 4.3) -- the readiness gate for it is checked further
+    # below, at the SAME point in this function §9's own "order of
+    # checks" names ("JWT, cached tenant/plan status, rate limit, quota,
+    # then embedding and the AI call"): AFTER identity/rate-limit, never
+    # before -- a missing/invalid token or an over-cap message must
+    # still 401/413 even while the quota system is still loading, since
+    # those checks are structurally prior in that same ordering.
     if len(payload.message) > _MESSAGE_CHAR_CAP:
         return JSONResponse(
             status_code=_MESSAGE_TOO_LONG_STATUS, content={"detail": "message too long"}
@@ -553,6 +620,27 @@ async def create_chat_turn(payload: ChatRequest, request: Request) -> Response:
             if not per_visitor_limiter.check(visitor_key):
                 return _rate_limited_response(per_visitor_limiter.get_retry_after(visitor_key))
 
+            # Task 4.3: the readiness HALF of docs/SPEC.md §9's own
+            # quota-reload guarantee -- "a restart cannot reset
+            # counters... until the reload finishes, /api/v1/chat
+            # returns 503 with Retry-After, so no chat is answered over
+            # quota." Checked here, AFTER auth/rate-limit (both
+            # structurally prior in §9's own check order) and BEFORE
+            # the quota verdict itself is computed below, which would
+            # otherwise silently read an empty/incomplete in-memory
+            # counter. `usage_counters_ready` is set True exactly once,
+            # after app/main.py's own lifespan finishes the real startup
+            # reload (`app.plans.usage.sync_usage_counters()`) -- never
+            # flipped back to False afterward (a later periodic refresh
+            # failing is logged, not treated as "unready again"; see
+            # that lifespan's own comment).
+            if not getattr(request.app.state, "usage_counters_ready", False):
+                return JSONResponse(
+                    status_code=_SERVICE_UNAVAILABLE_STATUS,
+                    content={"detail": "service starting up, please retry"},
+                    headers={"Retry-After": "5"},
+                )
+
             active_streams = _get_active_streams(request)
             if identity.vid in active_streams:
                 return JSONResponse(
@@ -562,6 +650,21 @@ async def create_chat_turn(payload: ChatRequest, request: Request) -> Response:
 
             repo = TenantScopedRepository(tenant_id=identity.tenant_id, session=session)
             conversation = await _resolve_conversation(repo, identity, payload.conversation_id)
+
+            # Task 4.3: docs/SPEC.md §9's own check order ("quota, then
+            # embedding and the AI call") -- decided HERE, with the
+            # already-open session, before the graph ever runs, never
+            # re-derived inside it (see app.agent.context.
+            # quota_exhausted_from_config()'s own docstring for why).
+            # `plan_limits is None` (no plan assigned yet -- docs/SPEC.md
+            # §5.4: "Plans are assigned manually in an admin screen")
+            # means no quota to enforce, matching get_plan_limits()'s own
+            # documented contract exactly.
+            tenant = await repo.get_tenant()
+            plan_limits = await get_plan_limits(tenant, session)
+            quota_exhausted = plan_limits is not None and usage.is_over_quota(
+                tenant.id, plan_limits
+            )
 
             lease_token = uuid.uuid4()
             lease_seconds = (
@@ -610,6 +713,7 @@ async def create_chat_turn(payload: ChatRequest, request: Request) -> Response:
             existing_answer,
             existing_values,
             settings.chat_request_timeout_seconds,
+            quota_exhausted,
         ),
         ping=15,
         headers={

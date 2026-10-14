@@ -27,7 +27,13 @@ import re
 from typing import TypedDict
 from urllib.parse import urlsplit
 
-from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
+from langchain_core.messages import (
+    AIMessage,
+    AIMessageChunk,
+    BaseMessage,
+    HumanMessage,
+    SystemMessage,
+)
 from langchain_core.runnables import RunnableConfig
 from langchain_core.utils.json import parse_partial_json
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
@@ -37,7 +43,7 @@ from langgraph.graph.state import CompiledStateGraph
 from pydantic import BaseModel, Field
 
 from app.agent.chat_model import get_chat_model
-from app.agent.context import tenant_id_from_config
+from app.agent.context import quota_exhausted_from_config, tenant_id_from_config
 from app.agent.greeting_phrases import is_greeting_or_thanks
 from app.agent.rewrite_trigger import needs_join
 from app.config import get_settings
@@ -116,6 +122,22 @@ class AgentState(MessagesState):
     # same reasoning `_gate_node` already applies to the query/chunk text
     # it logs around but never includes).
     prepared_query: str
+    # Task 4.3: the RESOLVED model id and real token counts from
+    # `_answer_node`'s own chat-model call -- `None` unless that node
+    # actually reached a real, completed `can_answer=True` answer (every
+    # other path -- guardrail, no-answer fallback, dependency failure,
+    # quota-exhausted -- makes no real model call at all, so there is
+    # nothing real to report). Plain (OVERWRITE), reset every turn by
+    # `_reset_turn_state_node`, same reasoning as every other per-turn
+    # field above. Read by app/chat/routes.py after the turn completes,
+    # to build the `done` event's own `usage` payload and the
+    # `usage_events` row (app/plans/usage.py) -- never persisted as part
+    # of `messages`/any other LangGraph-checkpointed content beyond this
+    # one turn's own transient state, matching `usage_events never
+    # contain message content` (docs/SPEC.md §4.6).
+    resolved_model: str | None
+    prompt_tokens: int | None
+    completion_tokens: int | None
 
 
 # Task 3.4.e [SECURITY-adjacent]: every per-turn field in AgentState,
@@ -167,6 +189,9 @@ def _reset_turn_state_node(state: AgentState) -> dict:
         "citations": [],
         "dependency_failed": False,
         "prepared_query": "",
+        "resolved_model": None,
+        "prompt_tokens": None,
+        "completion_tokens": None,
     }
 
 
@@ -181,16 +206,24 @@ def _reset_turn_state_node(state: AgentState) -> dict:
 # Each predicate is a plain, private module-level function (not a list of
 # bound references built once at import time): `route()` below calls each
 # by name, so a test can `monkeypatch.setattr(graph, "_quota_exhausted",
-# lambda state: True)` and have `route()`'s own next call see it -- a
+# lambda state, config: True)` and have `route()`'s own next call see it
+# -- a
 # function body's bare name reference is resolved against its module's
 # globals at CALL time, not captured as a fixed object reference at
 # definition time, confirmed by Python's own documented scoping rules (and
 # re-confirmed live by the tests this task adds). A pre-built list
 # capturing the function OBJECTS directly would not be monkeypatchable
 # this way -- this is deliberately simpler, not an oversight.
-def _quota_exhausted(state: AgentState) -> bool:
-    # TODO(4.3): real quota check once Step 4.3's quota system exists.
-    return False
+def _quota_exhausted(state: AgentState, config: RunnableConfig) -> bool:
+    """Task 4.3: reads the pre-computed quota verdict out of config, via
+    the ONE accessor allowed to subscript `configurable`
+    (`app.agent.context.quota_exhausted_from_config()`, same confinement
+    `tenant_id_from_config()` already has) -- never re-derives it here.
+    See that accessor's own docstring and `_build_thread_config()`'s own
+    `quota_exhausted` parameter for why the verdict is decided by `app/
+    chat/routes.py` BEFORE the graph runs, not inside this predicate.
+    """
+    return quota_exhausted_from_config(config)
 
 
 def _is_greeting_or_thanks(state: AgentState) -> bool:
@@ -235,14 +268,23 @@ def _is_escalation_intent(state: AgentState) -> bool:
     return False
 
 
-def route(state: AgentState) -> str:
+def route(state: AgentState, config: RunnableConfig = {}) -> str:  # noqa: B006 (never mutated -- see docstring)
     """docs/SPEC.md §6.2's own routing rules, in order. "Otherwise" (no
     rule matches) routes to the prepare node -- the start of §6.3's own
     `prepare -> retrieve -> gate -> answer` path. **Task 3.5.c**: `prepare`
     is now a real node (`_prepare_node` below), not a stub -- this was
-    `"retrieve"` directly before this task.
+    `"retrieve"` directly before this task. **Task 4.3**: now takes
+    `config` too (confirmed live, before relying on it, that a LangGraph
+    conditional-edge function receives `config` exactly like a node
+    does, the same mechanism `_retrieve_node`'s own `(state, config)`
+    signature already uses, REGARDLESS of this parameter having a
+    default) -- needed by `_quota_exhausted()` below. The default `{}`
+    is read-only here (only ever passed to `.get()` calls, never
+    written to) -- exists so every pre-Task-4.3 direct test call
+    (`route(state)`, no config) keeps working unchanged; the real graph
+    always supplies a real config regardless of this default.
     """
-    if _quota_exhausted(state):
+    if _quota_exhausted(state, config):
         return "fallback"
     if _is_greeting_or_thanks(state) or _is_unsafe_or_abusive(state):
         return "guardrail"
@@ -260,9 +302,22 @@ _ROUTE_PATH_MAP = {
 
 
 def _fallback_node(state: AgentState) -> dict:
-    raise NotImplementedError(
-        "Fallback & Guardrail specialist (quota-exhausted reply) not built yet (Step 4.3)"
-    )
+    """Task 4.3: docs/SPEC.md §6.2 rule 1 -- quota exhausted routes here
+    DIRECTLY from `route()`, before `prepare`/`retrieve`/`gate`/`answer`
+    ever run (confirmed by `_ROUTE_PATH_MAP`'s own wiring: `"fallback"`
+    is a top-level entry-point target, not reached via any OTHER node's
+    own conditional edge) -- "no AI call" (docs/SPEC.md §6.2) is
+    structural here, not a behavior this node itself has to enforce: no
+    model, no retrieval, nothing but this fixed reply. This node's own
+    return carries no `can_answer`/`resolved_model`/token fields at all
+    -- `_reset_turn_state_node` (run unconditionally
+    before `route()`, every turn) already set them to this turn's own
+    fresh defaults (`can_answer=False`, the three Task-4.3 fields all
+    `None`), exactly the "free turn, no real model call" state app/
+    chat/routes.py's own `counted_toward_quota = last_node == "answer"`
+    check depends on.
+    """
+    return {"messages": [AIMessage(content=_sanitize_answer_text(_QUOTA_EXHAUSTED_TEXT))]}
 
 
 # One neutral reply for BOTH greeting and thanks -- docs/SPEC.md §6.1
@@ -1007,8 +1062,24 @@ async def _answer_node(state: AgentState) -> dict:
     can_answer_known = False
     can_answer_value = False
     started_emitting = False
+    # Task 4.3: accumulated via AIMessageChunk's own `+` (confirmed live
+    # before relying on it, `/tmp/.../probe_model_metadata.py`-shaped
+    # script against the real API): the RESOLVED model id
+    # (`response_metadata["model_name"]`) and real token counts
+    # (`usage_metadata`) do NOT both land on the same chunk, nor on the
+    # LAST chunk specifically -- `model_name`/`finish_reason` arrive on
+    # the chunk that closes the tool call, `usage_metadata` arrives on a
+    # SEPARATE, later, otherwise-empty chunk. `AIMessageChunk.__add__`
+    # merges both dicts correctly (proven live: a 5-chunk real stream's
+    # own summed chunk carried both). Every chunk is folded in here,
+    # BEFORE either `continue` below -- unlike `accumulated_args`, which
+    # only cares about tool-call-bearing chunks, this accumulator must
+    # not skip the usage-only chunk, which carries no tool_call_chunks
+    # at all.
+    accumulated_chunk: AIMessageChunk | None = None
     try:
         async for chunk in model.astream(messages):
+            accumulated_chunk = chunk if accumulated_chunk is None else accumulated_chunk + chunk
             tool_call_chunks = chunk.tool_call_chunks
             if not tool_call_chunks or not tool_call_chunks[0].get("args"):
                 continue
@@ -1075,11 +1146,27 @@ async def _answer_node(state: AgentState) -> dict:
     final = parse_partial_json(accumulated_args) or {}
     cited_labels = final.get("used_chunk_ids") or []
     citations = _build_citations(cited_labels, retrieved_chunks)
+    # Task 4.3: `accumulated_chunk` is never `None` here -- the loop
+    # above only reaches this line after at least one iteration ran to
+    # completion without raising (a zero-chunk stream would leave
+    # `emitted_sanitized`/`cited_labels` empty too, an already-possible,
+    # already-untested-separately edge no real provider has ever been
+    # observed to produce). `response_metadata.get("model_name")` and
+    # `usage_metadata` can still individually be absent/`None` on a
+    # non-OpenAI secondary provider (Anthropic's own streaming metadata
+    # shape was never confirmed to match, Task 3.4.a's own `.with_
+    # fallbacks()` note) -- `.get()` throughout, never a direct
+    # subscript, so a missing value is `None`, not a `KeyError`.
+    resolved_model = accumulated_chunk.response_metadata.get("model_name")
+    usage = accumulated_chunk.usage_metadata
     return {
         "can_answer": True,
         "messages": [AIMessage(content=emitted_sanitized)],
         "cited_chunk_labels": cited_labels,
         "citations": citations,
+        "resolved_model": resolved_model,
+        "prompt_tokens": usage.get("input_tokens") if usage else None,
+        "completion_tokens": usage.get("output_tokens") if usage else None,
     }
 
 
@@ -1103,21 +1190,21 @@ async def _answer_node(state: AgentState) -> dict:
 # dashboard UI to edit them) for the real templating mechanism this will
 # need once that data exists.
 #
-# Both fixed texts below are DIFFERENT visitor-facing messages for
+# All three fixed texts below are DIFFERENT visitor-facing messages for
 # DIFFERENT reasons (docs/SPEC.md §6.1's own enumerated fixed-reply
-# list treats "no relevant answer" and a dependency failure as distinct
-# cases) -- never the model's own words either way, and both pass
-# through `_sanitize_answer_text()` (Task 3.4.c) before ever being
-# wrapped in an `AIMessage`, the SAME single choke point every other
-# piece of visitor-facing text in this graph already goes through.
-# Today neither string itself contains any of that function's own six
-# escaped characters, so this is currently a no-op in practice -- it is
-# written this way so that whenever Step 6.2's REAL per-tenant template
-# interpolates tenant-supplied text (support details ARE tenant-
-# controlled content shown to visitors, the identical trust boundary
-# the model's own answer text already has) into either string, that
-# interpolated content is automatically covered, with no separate
-# decision required at that point.
+# list treats "no relevant answer", a dependency failure, and quota
+# exhausted as three distinct cases) -- never the model's own words
+# either way, and all three pass through `_sanitize_answer_text()`
+# (Task 3.4.c) before ever being wrapped in an `AIMessage`, the SAME
+# single choke point every other piece of visitor-facing text in this
+# graph already goes through. None of the three strings contains any of
+# that function's own six escaped characters today, so this is
+# currently a no-op in practice -- written this way so that whenever
+# Step 6.2's REAL per-tenant template interpolates tenant-supplied text
+# (support details ARE tenant-controlled content shown to visitors, the
+# identical trust boundary the model's own answer text already has)
+# into any of the three, that interpolated content is automatically
+# covered, with no separate decision required at that point.
 _NO_ANSWER_FALLBACK_TEXT = (
     "I'm sorry, I don't have the information to answer that question. "
     "Please reach out to our support team for further help."
@@ -1125,6 +1212,19 @@ _NO_ANSWER_FALLBACK_TEXT = (
 _DEPENDENCY_FAILURE_TEXT = (
     "Something went wrong on our end while looking for an answer. Please try again "
     "in a moment, or contact our support team if the problem continues."
+)
+# Task 4.3: docs/SPEC.md §9's own quota-exhausted visitor copy, word for
+# word -- "the visitor sees the same fixed fallback message with the
+# tenant's support details, with no mention of quota or plans". Checked
+# directly against this string: it names neither word. A SEPARATE
+# constant from _NO_ANSWER_FALLBACK_TEXT above, not a reuse of it --
+# matching this project's own "distinct §6.1 case, distinct text"
+# precedent (the comment directly above) -- even though both are, today,
+# the identical platform-default stand-in pattern for the same missing
+# real per-tenant support-details template (owner Step 6.2).
+_QUOTA_EXHAUSTED_TEXT = (
+    "I'm sorry, I'm not able to help with that right now. "
+    "Please reach out to our support team for further help."
 )
 
 

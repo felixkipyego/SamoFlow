@@ -569,6 +569,46 @@ class Settings(BaseSettings):
     # job_handlers.py), not validated here -- a value READ from JSONB has
     # no pydantic Field to enforce it the way this Settings default does.
     default_chat_retention_days: int = Field(default=30, ge=1, le=90)
+    # Task 4.3: how often app/main.py's own lifespan background task
+    # flushes pending usage events to `usage_events` and reloads the
+    # authoritative per-tenant monthly count (app/plans/usage.py's own
+    # sync_usage_counters()) -- docs/SPEC.md §9's own "refreshes them
+    # from usage_events about every minute (small overshoot accepted)".
+    # 60s matches that wording directly; not a per-tenant/per-plan
+    # value, since it is a platform-wide operational cadence, not a
+    # business limit.
+    usage_counter_sync_interval_seconds: float = Field(default=60.0, gt=0)
+    # Task 4.3: the worker's own usage-alert sweep (handle_usage_alert_
+    # sweep(), app/ingest/job_handlers.py) -- how often each tenant's
+    # own self-re-enqueuing sweep fires, the same shape as retention_
+    # sweep_interval_seconds above. docs/SPEC.md §9 names WHEN to email
+    # (80%/100%, once per threshold per month) but no sweep cadence --
+    # hourly is a deliberate, stated judgment call: frequent enough that
+    # a tenant crossing a threshold hears about it within the hour, far
+    # less job-table churn than scheduler_tick's own 5-minute cadence
+    # (a quota threshold does not need near-real-time detection the way
+    # a due content refresh does).
+    usage_alert_sweep_interval_seconds: float = Field(default=3600.0, gt=0)
+    # Task 4.3: docs/SPEC.md §14/§18's own "our own SMTP server, behind
+    # a provider-neutral interface" -- all four OPTIONAL (matching
+    # Settings.anthropic_api_key's own established "a deployment that
+    # never configures this opt-in feature must still start" precedent):
+    # a deployment with no SMTP server configured yet still starts and
+    # serves chats normally, with alert emails simply not sent (logged,
+    # `email_log` status "skipped_not_configured" -- app/notifications/
+    # service.py's own send_email()) rather than failing startup for a
+    # feature nothing has configured yet. 587 (STARTTLS), not 25: docs/
+    # SPEC.md §14 itself names port 25 as commonly blocked by hosting
+    # providers.
+    smtp_host: str | None = Field(default=None)
+    smtp_port: int = Field(default=587, gt=0, le=65535)
+    smtp_username: str | None = Field(default=None)
+    smtp_password: SecretStr | None = Field(default=None)
+    # The sending address, distinct from smtp_username (some providers'
+    # own auth user differs from the real From: address) -- required
+    # only together with smtp_host (see app/notifications/service.py's
+    # own is_smtp_configured() for the real "configured" definition).
+    smtp_from_address: str | None = Field(default=None)
     # Task 3.1.c: retrieve()'s own final result count -- the `k` in
     # `retrieve(client_id, query, k)` (docs/SPEC.md §6.3), made
     # Settings-configurable rather than hardcoded so it can be retuned
@@ -859,6 +899,15 @@ class Settings(BaseSettings):
         if self.anthropic_api_key is None:
             return None
         return self.anthropic_api_key.get_secret_value()
+
+    def smtp_password_str(self) -> str | None:
+        # The one explicit call that unwraps the secret. Never log this.
+        # None means "not configured" -- matching anthropic_api_key_str()'s
+        # own identical optional shape (an SMTP server requiring no auth
+        # at all is a real, legitimate configuration too).
+        if self.smtp_password is None:
+            return None
+        return self.smtp_password.get_secret_value()
 
 
 class SettingsError(Exception):

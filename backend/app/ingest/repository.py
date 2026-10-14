@@ -138,6 +138,14 @@ VALID_JOB_TYPES: frozenset[str] = frozenset(
         # seeded()` and app/ingest/job_handlers.py's own
         # `handle_retention_sweep()` for the real design/handler.
         "retention_sweep",
+        # Task 4.3: "usage_alert_sweep" added -- the identical shape as
+        # "retention_sweep" directly above (the exact bug Task 4.2 found
+        # live -- forgetting this frozenset for a new self-re-enqueuing
+        # job type -- deliberately checked against this time before it
+        # could recur). See app/ingest/scheduler.py's own `ensure_usage_
+        # alert_sweep_ticks_seeded()` and app/ingest/job_handlers.py's
+        # own `handle_usage_alert_sweep()` for the real design/handler.
+        "usage_alert_sweep",
     }
 )
 

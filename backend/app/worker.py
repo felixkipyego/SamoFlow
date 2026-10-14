@@ -60,6 +60,7 @@ from app.ingest.job_handlers import (
     handle_reconcile,
     handle_retention_sweep,
     handle_scheduler_tick,
+    handle_usage_alert_sweep,
 )
 from app.ingest.models import Job
 from app.ingest.queue import claim_next_job, mark_job_failed, mark_job_succeeded, reap_stuck_jobs
@@ -67,6 +68,7 @@ from app.ingest.scheduler import (
     ensure_reconcile_ticks_seeded,
     ensure_retention_sweep_ticks_seeded,
     ensure_scheduler_ticks_seeded,
+    ensure_usage_alert_sweep_ticks_seeded,
 )
 
 # all_models above is imported for the side effect of registering every
@@ -189,6 +191,7 @@ JOB_HANDLERS: dict[str, Callable[[Job], Awaitable[None]]] = {
     "scheduler_tick": handle_scheduler_tick,
     "reconcile": handle_reconcile,
     "retention_sweep": handle_retention_sweep,
+    "usage_alert_sweep": handle_usage_alert_sweep,
 }
 
 
@@ -286,6 +289,17 @@ async def _ensure_retention_sweep_ticks_seeded() -> list:
     # scheduler.py) for the full reasoning.
     return await _seed_ticks(
         ensure_retention_sweep_ticks_seeded, get_settings().retention_sweep_interval_seconds
+    )
+
+
+async def _ensure_usage_alert_sweep_ticks_seeded() -> list:
+    # Task 4.3: the usage-alert sweep's own bootstrap/self-healing tick,
+    # same cadence and same reasoning as _ensure_retention_sweep_ticks_
+    # seeded() directly above -- see ensure_usage_alert_sweep_ticks_
+    # seeded()'s own docstring (app/ingest/scheduler.py) for the full
+    # reasoning.
+    return await _seed_ticks(
+        ensure_usage_alert_sweep_ticks_seeded, get_settings().usage_alert_sweep_interval_seconds
     )
 
 
@@ -399,21 +413,23 @@ async def run(stop: asyncio.Event | None = None, max_iterations: int | None = No
             reaped = await _reap_stuck_jobs()
             if reaped:
                 logger.info("worker: reaped %d stuck job(s): %s", len(reaped), reaped)
-            # The three bootstrap/self-healing sweeps (scheduler_tick,
+            # The four bootstrap/self-healing sweeps (scheduler_tick,
             # Task 2.9.a; reconcile, Task 2.9.f; retention_sweep, Task
-            # 4.2), same cadence and same try/except as every other
-            # per-iteration call above -- a transient failure in any one
-            # must not crash the worker either. Each call stays a
-            # separately named statement (not a data-driven loop): the
-            # three _ensure_X_ticks_seeded() functions are individually
-            # monkeypatched by name in test_worker.py (see _seed_ticks()'s
-            # own comment above for the identical reasoning). Only the
-            # repeated "log if non-empty" tail -- a real 3rd-occurrence
-            # duplication, found at this task's own duplication check --
-            # is now shared, via _log_if_seeded() below.
+            # 4.2; usage_alert_sweep, Task 4.3), same cadence and same
+            # try/except as every other per-iteration call above -- a
+            # transient failure in any one must not crash the worker
+            # either. Each call stays a separately named statement (not
+            # a data-driven loop): the four _ensure_X_ticks_seeded()
+            # functions are individually monkeypatched by name in
+            # test_worker.py (see _seed_ticks()'s own comment above for
+            # the identical reasoning). Only the repeated "log if
+            # non-empty" tail -- a real 3rd-occurrence duplication,
+            # found at the duplication check before Task 4.3 -- is
+            # shared, via _log_if_seeded() below.
             _log_if_seeded("scheduler_tick", await _ensure_scheduler_ticks_seeded())
             _log_if_seeded("reconcile", await _ensure_reconcile_ticks_seeded())
             _log_if_seeded("retention_sweep", await _ensure_retention_sweep_ticks_seeded())
+            _log_if_seeded("usage_alert_sweep", await _ensure_usage_alert_sweep_ticks_seeded())
             claimed = await _claim_and_process_one_job()
         except Exception as exc:
             # A transient failure reaching the database (or claiming/

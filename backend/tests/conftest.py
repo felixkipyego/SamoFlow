@@ -635,6 +635,8 @@ EXPECTED_TABLES = {
     "jobs",
     "verified_domains",
     "audit_log",
+    "usage_events",
+    "email_log",
 }
 
 EXPECTED_PK_COLUMNS = {
@@ -649,6 +651,8 @@ EXPECTED_PK_COLUMNS = {
     "jobs": "id",
     "verified_domains": "id",
     "audit_log": "id",
+    "usage_events": "id",
+    "email_log": "id",
 }
 
 # tenant_id columns cascade from tenants (PROJECT_SPEC.md decision: DB-level
@@ -671,6 +675,12 @@ CASCADE_FK_COLUMNS = {
     # not tenant-scoped -- see app/ingest/models.py's AuditLog class), so
     # it adds no entry here.
     ("verified_domains", "tenant_id"): "tenants",
+    # Task 4.3: usage_events/email_log both follow the identical,
+    # already-established tenant_id-cascades-from-tenants rule -- a
+    # deleted tenant's own usage/billing history has no reason to
+    # survive the tenant row it describes.
+    ("usage_events", "tenant_id"): "tenants",
+    ("email_log", "tenant_id"): "tenants",
 }
 
 # site_key_id (visitors) and vid (conversations) are a separate edge the
@@ -680,6 +690,11 @@ CASCADE_FK_COLUMNS = {
 NO_ACTION_FK_COLUMNS = {
     ("visitors", "site_key_id"),
     ("conversations", "vid"),
+    # Task 4.3: usage_events.vid/conversation_id -- the identical
+    # "no cascade feature exists yet" reasoning as the two entries
+    # above, not a new decision.
+    ("usage_events", "vid"),
+    ("usage_events", "conversation_id"),
 }
 
 # Closed-vocabulary CHECK constraints, keyed by table (Task 1.4.d adds
@@ -712,6 +727,13 @@ EXPECTED_STATUS_CHECK_CONSTRAINTS = {
     # chunks exist) / failed (extraction raised) -- see app/ingest/
     # models.py's Document class for the full vocabulary reasoning.
     "documents": [("ck_documents_status", frozenset({"pending", "extracted", "failed"}))],
+    # Task 4.3: email_log's own two independent closed vocabularies
+    # (status, threshold) -- see app/plans/models.py's EmailLog class
+    # for the full reasoning.
+    "email_log": [
+        ("ck_email_log_status", frozenset({"sent", "failed", "skipped_not_configured"})),
+        ("ck_email_log_threshold", frozenset({"80", "100"})),
+    ],
 }
 
 # Composite unique indexes, keyed by table -- same (name, value) shape as
@@ -1136,6 +1158,20 @@ class FakeAnswerToolChatModel(BaseChatModel):
 
     arg_chunks: list[str]
     fail_after: int | None = None
+    # Task 4.3: when set, mirrors the REAL OpenAI streaming shape
+    # confirmed live before building `_answer_node`'s own accumulator
+    # (a one-off probe script against the real API, documented in
+    # PROJECT_SPEC.md's Step 4.3 decision-log entry, never committed as
+    # a paid-per-run test): the resolved model id and usage_metadata do
+    # NOT arrive on the same chunk as the tool-call data, nor on a
+    # "last" chunk with any tool_call_chunks of its own -- they arrive
+    # on one or more EXTRA, separate chunks after every tool_call_chunks
+    # fragment has already been yielded, each with empty tool_call_
+    # chunks. `None` (the default) reproduces the OLDER shape every
+    # pre-Task-4.3 test using this fake already relies on (no extra
+    # chunk at all) -- existing call sites are unaffected.
+    resolved_model_name: str | None = None
+    usage: dict | None = None
 
     @property
     def _llm_type(self) -> str:
@@ -1160,6 +1196,17 @@ class FakeAnswerToolChatModel(BaseChatModel):
                         }
                     ],
                 )
+            )
+        if self.resolved_model_name is not None:
+            yield ChatGenerationChunk(
+                message=AIMessageChunk(
+                    content="",
+                    response_metadata={"model_name": self.resolved_model_name},
+                )
+            )
+        if self.usage is not None:
+            yield ChatGenerationChunk(
+                message=AIMessageChunk(content="", usage_metadata=self.usage)
             )
 
     def bind_tools(self, tools, *, tool_choice=None, **kwargs):

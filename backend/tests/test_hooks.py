@@ -83,7 +83,7 @@ def _run_hooks(cwd) -> str:
     return result.stdout
 
 
-def test_the_real_repository_marker_count_is_76():
+def test_the_real_repository_marker_count_is_70():
     # The real, live regression this task's own exclusion exists for:
     # Task 3.7.d's own injection-detector constant and its test both
     # mirror real planted-injection text verbatim, which happens to
@@ -94,6 +94,35 @@ def test_the_real_repository_marker_count_is_76():
     # avoids spelling any of the four trigger words literally anywhere in
     # THIS file's own comments/strings -- this file is itself scanned,
     # and is not in the exclusion set below.)
+    #
+    # 71 -> 70 at Task 4.3 (2026-10-14), real, not accidental: app/
+    # notifications/service.py's own Step-1.1b-era deferral marker,
+    # resolved -- the real send_email() replaced that whole stub.
+    # Confirmed by diffing `python hooks.py` output directly: exactly
+    # one real removal, plus two unrelated lines in app/worker.py that
+    # only shifted line numbers (new code added above them in this same
+    # task), not a second/third removal.
+    #
+    # 72 -> 71 at Task 4.3 (2026-10-14), real, not accidental: app/chat/
+    # routes.py's own quota-related marker, resolved -- the quota system
+    # is real now, replacing that comment with a real description of the
+    # check order rather than a deferral note. Confirmed by diffing
+    # `python hooks.py` output directly (no other marker moved).
+    #
+    # 76 -> 72 at Task 4.3 (2026-10-14), real, not accidental: diffed
+    # `python hooks.py` output before/after directly (not just trusted
+    # the new total) and confirmed exactly 4 real removals, 0 real
+    # additions: app/agent/graph.py's own Step-4.1-era quota-related
+    # marker (resolved -- `_quota_exhausted()` now reads a real
+    # pre-computed verdict out of config); and all three of the
+    # Step-1.1b-era `app/plans/service.py` stub's own markers (one of
+    # each of the first three trigger words, gone together, since that
+    # whole stub file was replaced by the real `get_plan_limits()`). Two
+    # OTHER lines shifted in the diff (app/agent/graph.py's own
+    # escalation-related marker, and its own cross-reference to this
+    # scanner by name) -- confirmed these are the SAME two marker
+    # instances at new line numbers (code was added above them in this
+    # same file), not a 5th/6th removal-and-re-add pair.
     #
     # 75 -> 76 at Task 4.2 (2026-10-14), real, not accidental: app/chat/
     # schemas.py's two new response shapes (GET /conversations, GET
@@ -115,8 +144,8 @@ def test_the_real_repository_marker_count_is_76():
     stdout = _run_hooks(REPO_ROOT)
     first_line = stdout.splitlines()[0]
     count = int(first_line.split()[0])
-    assert count == 76, (
-        f"expected 76 markers against the real repository, got {count} -- "
+    assert count == 70, (
+        f"expected 70 markers against the real repository, got {count} -- "
         f"either a real marker was added/removed, or the exclusion below "
         f"needs revisiting:\n{stdout}"
     )

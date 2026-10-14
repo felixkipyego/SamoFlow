@@ -210,6 +210,66 @@ async def test_prepared_query_still_never_reaches_token_events_or_persisted_answ
     assert stored_human_message.content == "what about that?"
 
 
+async def test_a_completed_answer_captures_the_resolved_model_and_token_counts(monkeypatch):
+    # Task 4.3: the real OpenAI streaming shape -- resolved model id and
+    # usage_metadata arriving on SEPARATE, later chunks than the
+    # tool-call data, confirmed live against the real API before
+    # building this (PROJECT_SPEC.md's own Step 4.3 decision-log entry)
+    # -- reproduced here via FakeAnswerToolChatModel's own matching
+    # extra-chunk shape, not asserted against a real paid API call on
+    # every test run.
+    _patched(
+        monkeypatch,
+        FakeAnswerToolChatModel(
+            arg_chunks=build_fake_answer_arg_chunks(
+                can_answer=True, used_chunk_ids=["c1"], answer="A fixed test answer."
+            ),
+            resolved_model_name="gpt-6-luna",
+            usage={"input_tokens": 42, "output_tokens": 7, "total_tokens": 49},
+        ),
+    )
+    state = {
+        "messages": [HumanMessage(content="hi")],
+        "prepared_query": "hi",
+        "retrieved_chunks": [_chunk("doc-a", "Alpha.")],
+    }
+
+    result = await graph_module._answer_node(state)
+
+    assert result["resolved_model"] == "gpt-6-luna"
+    assert result["prompt_tokens"] == 42
+    assert result["completion_tokens"] == 7
+
+
+async def test_a_can_answer_false_turn_never_reports_a_resolved_model_or_tokens(monkeypatch):
+    # The "free turn" half of the same guarantee: can_answer=False means
+    # no real answer, so even if the fake model WOULD have reported
+    # usage (it does here, deliberately, to prove this isn't just "no
+    # usage was ever given"), _answer_node's own early return for this
+    # case must not include resolved_model/prompt_tokens/completion_
+    # tokens at all -- they stay whatever _reset_turn_state_node already
+    # set (None), per AgentState's own OVERWRITE-field reasoning.
+    _patched(
+        monkeypatch,
+        FakeAnswerToolChatModel(
+            arg_chunks=build_fake_answer_arg_chunks(
+                can_answer=False, used_chunk_ids=[], answer=""
+            ),
+            resolved_model_name="gpt-6-luna",
+            usage={"input_tokens": 42, "output_tokens": 7, "total_tokens": 49},
+        ),
+    )
+    state = {
+        "messages": [HumanMessage(content="hi")],
+        "prepared_query": "hi",
+        "retrieved_chunks": [_chunk("doc-a", "Alpha.")],
+    }
+
+    result = await graph_module._answer_node(state)
+
+    assert result == {"can_answer": False}
+
+
 # --- Incremental streaming mechanism (fakes only) ----------------------------
 
 
@@ -646,7 +706,15 @@ async def test_injected_client_id_and_tenant_id_in_the_tool_call_has_no_effect(m
     # anywhere in this node's own returned state -- checked both by exact
     # key-set (nothing extra returned at all) and by value (the injected
     # UUID string itself never appears anywhere in the result).
-    assert set(result.keys()) == {"can_answer", "messages", "cited_chunk_labels", "citations"}
+    assert set(result.keys()) == {
+        "can_answer",
+        "messages",
+        "cited_chunk_labels",
+        "citations",
+        "resolved_model",
+        "prompt_tokens",
+        "completion_tokens",
+    }
     assert str(other_tenant_id) not in repr(result)
 
 

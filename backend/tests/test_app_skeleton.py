@@ -51,10 +51,18 @@ SUBPACKAGES = [
 # Task 4.1 -- POST /api/v1/chat is real (tested separately in
 # test_chat_routes.py), and the stub function itself no longer exists at
 # all (not merely replaced) -- removed from this list the same way.
+# app.plans.service.get_plan_limits is no longer a raising stub as of
+# Task 4.3 -- it now requires real `tenant`/`session` arguments and
+# returns a real PlanLimits (or None), tested separately in
+# test_plans_service.py; calling it with zero arguments raises TypeError,
+# not NotImplementedError, so it is removed from this list the same way.
+# app.notifications.service.send_email is no longer a raising stub as of
+# Task 4.3 -- it is now `async def`, so calling it directly (without
+# `await`) returns a coroutine object rather than raising anything at
+# all; removed from this list the same way, tested separately in
+# test_notifications_service.py.
 STUB_ENTRY_POINTS = [
-    ("app.plans.service", "get_plan_limits"),
     ("app.handoff.routes", "submit_escalation"),
-    ("app.notifications.service", "send_email"),
     ("app.mcp.service", "search_knowledge_base"),
     ("app.admin.routes", "list_platform_tenants"),
     ("app.telemetry.service", "record_trace"),

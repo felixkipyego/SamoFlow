@@ -54,6 +54,21 @@ pytestmark = pytest.mark.usefixtures("close_any_checkpointer_pool_left_open")
 ORIGIN = "https://widget.example"
 
 
+@pytest.fixture(autouse=True)
+def _clear_usage_module_state():
+    # Task 4.3: app.plans.usage's own counter/pending-write buffer are
+    # process-wide module globals by design (one API process serves
+    # chats) -- cleared before AND after every test in this file so no
+    # test's own quota state leaks into another's.
+    from app.plans import usage as usage_module
+
+    usage_module._counts_by_tenant_month.clear()
+    usage_module._pending.clear()
+    yield
+    usage_module._counts_by_tenant_month.clear()
+    usage_module._pending.clear()
+
+
 async def _fake_retrieve_node_with(chunks: list[dict], best_dense_score: float = 0.9):
     async def _node(state, config):  # noqa: ANN001 -- matches _retrieve_node's own real signature
         return {"retrieved_chunks": chunks, "best_dense_score": best_dense_score}
@@ -101,6 +116,7 @@ async def _build_app(
     graph = build_graph(cp)
     app = create_app()
     app.state.graph = graph
+    app.state.usage_counters_ready = True
     return app
 
 
@@ -298,6 +314,7 @@ async def test_per_ip_cap_trips_independently_of_the_per_visitor_limit(monkeypat
 async def test_a_conversation_id_belonging_to_another_tenant_returns_404(monkeypatch, _seeded):
     app = create_app()
     app.state.graph = object()
+    app.state.usage_counters_ready = True
     async with db_session() as session:
         other_tenant_visitor_id = uuid.uuid4()
         session.add(
@@ -351,6 +368,7 @@ async def test_a_conversation_id_belonging_to_another_visitor_same_tenant_return
     # vid check, visitor A could read/drive visitor B's own conversation.
     app = create_app()
     app.state.graph = object()
+    app.state.usage_counters_ready = True
     async with db_session() as session:
         repo = TenantScopedRepository(tenant_id=_seeded["tenant"], session=session)
         other_visitor_conversation = await repo.create_conversation(vid=_seeded["other_visitor"])
@@ -795,6 +813,7 @@ async def test_pool_exhaustion_returns_503_not_409(monkeypatch, _seeded):
     # conflict (this conversation was never even reached).
     app = create_app()
     app.state.graph = object()
+    app.state.usage_counters_ready = True
     token = _token_for(_seeded)
     db_url = get_settings().database_url_str()
     tiny_engine = create_async_engine(db_url, pool_size=1, max_overflow=0, pool_timeout=0.2)

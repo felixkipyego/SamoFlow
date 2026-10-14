@@ -90,3 +90,24 @@ def tenant_id_from_config(config: Mapping[str, Any]) -> uuid.UUID:
             "app.agent.entrypoint._build_thread_config()"
         )
     return tenant_id
+
+
+def quota_exhausted_from_config(config: Mapping[str, Any]) -> bool:
+    """Task 4.3: the ONE way `route()`'s own `_quota_exhausted()` predicate
+    (app/agent/graph.py) may read the pre-computed quota verdict out of
+    the LangGraph config. Decided BEFORE the graph ever runs, by `app/
+    chat/routes.py`'s own request handler (which already has a real DB
+    session open, from resolving `identity`/the conversation/the lease,
+    same connection-hold discipline as every other pre-stream check) --
+    never re-derived inside the graph itself, matching `tenant_id_from_
+    config()`'s own identical reasoning: a graph predicate has no DB
+    session of its own, and re-deriving a quota verdict mid-graph would
+    mean either giving a predicate its own ad hoc session (a new,
+    unwanted pattern) or passing a session through config (a much larger
+    departure from this project's existing design). Defaults to `False`
+    (never exhausted) when absent -- matches `_build_thread_config()`'s
+    own `quota_exhausted` parameter default, so every EXISTING caller
+    that predates Task 4.3 (every test building a config by hand) keeps
+    working unchanged.
+    """
+    return bool(config.get("configurable", {}).get("quota_exhausted", False))

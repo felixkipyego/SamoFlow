@@ -346,6 +346,10 @@ from app.ingest.row_templates import MissingColumnError, MissingPrimaryKeyError,
 from app.ingest.scheduler import get_due_sources, is_tenant_active
 from app.ingest.upload_adapter import ingest_upload
 from app.ingest.web_adapter import ingest_url, is_domain_verified
+from app.notifications.service import send_email
+from app.plans import usage
+from app.plans.models import EmailLog
+from app.plans.service import get_plan_limits
 from app.tenancy.repository import TenantScopedRepository
 
 logger = logging.getLogger(__name__)
@@ -1114,3 +1118,112 @@ async def handle_retention_sweep(job: Job) -> None:
             len(expired),
             retention_days,
         )
+
+
+async def handle_usage_alert_sweep(job: Job) -> None:
+    """Task 4.3: the nightly-shaped (hourly, see Settings.usage_alert_
+    sweep_interval_seconds) usage-alert sweep's own `JOB_HANDLERS
+    ["usage_alert_sweep"]` entry -- mirrors `handle_retention_sweep()`
+    directly above exactly (per-tenant, suspended-tenant check + self-
+    re-enqueue FIRST via the shared `_check_active_and_reenqueue_self()`,
+    so an unexpected failure in the real sweep below can never break
+    this tenant's own chain).
+
+    Reads the AUTHORITATIVE count directly from `usage_events`
+    (`app.plans.usage.monthly_count_from_db()`), never the API
+    process's own in-memory counter -- this is a SEPARATE process with
+    no access to that in-memory state at all (app/plans/usage.py's own
+    header comment: "Only the API process serves chats" is the precise
+    reason that counter is in-memory in the first place). A tenant with
+    no plan assigned (`get_plan_limits()` returns `None`) has no quota
+    to compare against, so nothing to alert on -- the identical "no
+    plan, no enforcement" treatment app/chat/routes.py's own quota
+    check already gives it.
+
+    docs/SPEC.md §9: "the worker emails the tenant's dashboard contact
+    at 80% and 100%, once per threshold per month." The dedup/retry
+    mechanism IS `email_log`'s own unique constraint (tenant_id,
+    threshold, month) -- see that model's own header comment for the
+    full upsert reasoning: a `status="sent"` row stops here; a
+    `status="failed"`/no row at all retries (or attempts for the first
+    time) this tick.
+
+    **A real, named gap, not silently worked around**: docs/SPEC.md
+    never defines WHICH `tenants.config` key holds the tenant's own
+    alert-recipient address -- the identical "no per-tenant support-
+    details fields exist yet, no dashboard writes them" gap `app/agent/
+    graph.py`'s own `_no_answer_fallback_node` already names (owner Step
+    6.2). `tenants.config.get("alert_email")` is this task's own chosen
+    key name, matching that same "a dashboard will write this key
+    someday" convention (Step 4.2's own `retention_days` key, Step
+    3.4.e's own unbuilt support-details fields) -- when absent (every
+    tenant today), the outcome is recorded as `"skipped_not_configured"`,
+    the identical status `app/notifications/service.py`'s own
+    `send_email()` already uses for "SMTP itself isn't configured",
+    since from THIS sweep's own perspective both cases are identically
+    "there is genuinely nothing to send this to/with" -- never a
+    guessed or hardcoded fallback address.
+    """
+    settings = get_settings()
+    async with _session_factory()() as session:
+        if not await _check_active_and_reenqueue_self(
+            session,
+            job,
+            job_type="usage_alert_sweep",
+            interval_seconds=settings.usage_alert_sweep_interval_seconds,
+        ):
+            return
+
+        repo = TenantScopedRepository(tenant_id=job.tenant_id, session=session)
+        tenant = await repo.get_tenant()
+        limits = await get_plan_limits(tenant, session)
+        if limits is None:
+            return
+
+        count = await usage.monthly_count_from_db(tenant.id, session)
+        fraction = count / limits.ai_message_quota_per_month
+        month = datetime.now(UTC).strftime("%Y-%m")
+        alert_email = tenant.config.get("alert_email")
+
+        for threshold_label, threshold_fraction in (("80", 0.80), ("100", 1.0)):
+            if fraction < threshold_fraction:
+                continue
+
+            existing = (
+                await session.execute(
+                    select(EmailLog).where(
+                        EmailLog.tenant_id == tenant.id,
+                        EmailLog.threshold == threshold_label,
+                        EmailLog.month == month,
+                    )
+                )
+            ).scalar_one_or_none()
+            if existing is not None and existing.status == "sent":
+                continue  # already sent this threshold this month -- dedup stops here
+
+            if alert_email is None:
+                status = "skipped_not_configured"
+            else:
+                subject = f"Usage alert: {threshold_label}% of your monthly AI message quota used"
+                body = (
+                    f"Your account has used {threshold_label}% of its monthly AI-answered "
+                    "message quota. No action is needed immediately -- this is an "
+                    "informational alert."
+                )
+                status = "sent" if await send_email(alert_email, subject, body) else "failed"
+
+            if existing is None:
+                session.add(
+                    EmailLog(
+                        tenant_id=tenant.id,
+                        threshold=threshold_label,
+                        month=month,
+                        status=status,
+                        attempts=1,
+                    )
+                )
+            else:
+                existing.status = status
+                existing.attempts += 1
+
+        await session.commit()

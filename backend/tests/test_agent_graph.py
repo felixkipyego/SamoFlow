@@ -39,6 +39,13 @@
 # `test_run_turn_reaches_the_guardrail_stub_when_greeting_thanks_or_
 # unsafe` are REWRITTEN, not removed -- both nodes are real now, so
 # these prove the real fixed replies instead of a raised stub error.
+#
+# Task 4.3: `_fallback_node` (quota-exhausted reply) is real now, the
+# identical pattern -- `test_fallback_node_names_its_destination_and_
+# owning_step` is REWRITTEN to `test_fallback_node_returns_the_real_
+# fixed_sanitized_reply`, proving the real fixed reply instead of a
+# raised stub error. `_coordinator_node` (Step 4.4) is the only
+# destination-node stub left in this file.
 import uuid
 
 import pytest
@@ -79,7 +86,7 @@ def test_route_returns_prepare_when_no_rule_matches():
 def test_route_rule_1_quota_exhausted_wins(monkeypatch):
     # Quota short-circuits before the real greeting check ever reads
     # state["messages"] -- a bare {} is still fine here.
-    monkeypatch.setattr(graph_module, "_quota_exhausted", lambda state: True)
+    monkeypatch.setattr(graph_module, "_quota_exhausted", lambda state, config: True)
     assert route({}) == "fallback"
 
 
@@ -97,7 +104,7 @@ def test_route_precedence_rule_1_beats_rule_3_when_both_match(monkeypatch):
     # docs/SPEC.md §6.2's own enumerated order -- rule 1 (quota) is
     # checked before rule 3 (escalation intent), so it wins when both
     # predicates would otherwise match.
-    monkeypatch.setattr(graph_module, "_quota_exhausted", lambda state: True)
+    monkeypatch.setattr(graph_module, "_quota_exhausted", lambda state, config: True)
     monkeypatch.setattr(graph_module, "_is_escalation_intent", lambda state: True)
     assert route({}) == "fallback"
 
@@ -114,9 +121,17 @@ def test_route_precedence_rule_2_beats_rule_3_when_both_match(monkeypatch):
 # test_agent_graph_answer.py for their own real tests) ----------------
 
 
-def test_fallback_node_names_its_destination_and_owning_step():
-    with pytest.raises(NotImplementedError, match="Step 4.3"):
-        graph_module._fallback_node({})
+def test_fallback_node_returns_the_real_fixed_sanitized_reply():
+    # Task 4.3: no longer a stub -- see test_no_answer_fallback_node_
+    # returns_the_real_fixed_sanitized_reply's own identical pattern
+    # directly below. A SEPARATE text from that node's own
+    # _NO_ANSWER_FALLBACK_TEXT (see _QUOTA_EXHAUSTED_TEXT's own header
+    # comment for why), confirmed here, not just asserted in prose: the
+    # two are different strings.
+    result = graph_module._fallback_node({})
+    expected_text = graph_module._sanitize_answer_text(graph_module._QUOTA_EXHAUSTED_TEXT)
+    assert result == {"messages": [AIMessage(content=expected_text)]}
+    assert graph_module._QUOTA_EXHAUSTED_TEXT != graph_module._NO_ANSWER_FALLBACK_TEXT
 
 
 def test_guardrail_node_returns_the_real_fixed_sanitized_reply():
@@ -192,12 +207,26 @@ async def _fresh_real_graph(monkeypatch):
     return build_graph(cp)
 
 
-async def test_run_turn_reaches_the_fallback_stub_when_quota_exhausted(monkeypatch):
-    monkeypatch.setattr(graph_module, "_quota_exhausted", lambda state: True)
+async def test_run_turn_reaches_the_real_fallback_reply_when_quota_exhausted(monkeypatch):
+    # Task 4.3: no longer a stub -- REWRITTEN, not removed, matching
+    # test_fallback_node_returns_the_real_fixed_sanitized_reply's own
+    # identical pattern and this file's own real-guardrail-reply test
+    # directly below (same end-to-end run_turn() shape, no model/
+    # retrieval ever reached either way -- route()'s own rule 1 short-
+    # circuits before "prepare" even runs).
+    monkeypatch.setattr(graph_module, "_quota_exhausted", lambda state, config: True)
     graph = await _fresh_real_graph(monkeypatch)
     identity = _identity()
-    with pytest.raises(NotImplementedError, match="Step 4.3"):
-        await _collect(run_turn(graph, identity, uuid.uuid4(), {"messages": ["hello"]}))
+    conversation_id = uuid.uuid4()
+    results = await _collect(run_turn(graph, identity, conversation_id, {"messages": ["hello"]}))
+    assert results
+
+    snapshot = await read_state(graph, identity, conversation_id)
+    messages = snapshot.values["messages"]
+    expected_text = graph_module._sanitize_answer_text(graph_module._QUOTA_EXHAUSTED_TEXT)
+    assert messages[-1].content == expected_text
+    assert snapshot.values["can_answer"] is False
+    assert snapshot.values["resolved_model"] is None
 
 
 async def test_run_turn_reaches_the_real_guardrail_reply_for_a_real_greeting(monkeypatch):

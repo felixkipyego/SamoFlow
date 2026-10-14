@@ -119,7 +119,9 @@ class NoResumableInterruptError(Exception):
     """
 
 
-def _build_thread_config(identity: VerifiedIdentity, conversation_id: uuid.UUID) -> RunnableConfig:
+def _build_thread_config(
+    identity: VerifiedIdentity, conversation_id: uuid.UUID, *, quota_exhausted: bool = False
+) -> RunnableConfig:
     """The ONE place a LangGraph config dict is ever constructed in this
     codebase -- every public function below routes through this, nothing
     else does.
@@ -153,6 +155,18 @@ def _build_thread_config(identity: VerifiedIdentity, conversation_id: uuid.UUID)
     that this is what keeps it out of LangGraph's own persisted
     checkpoint metadata (see `app/agent/context.py`'s own header comment
     for the full finding).
+
+    Task 4.3: also carries `quota_exhausted` -- a plain `bool` decided by
+    THIS function's own caller (`run_turn()` below, itself called by
+    `app/chat/routes.py`'s request handler, which already has a real DB
+    session open to look up the tenant's plan/usage BEFORE the graph
+    ever runs) and read back by `route()`'s own `_quota_exhausted()`
+    predicate via `app.agent.context.quota_exhausted_from_config()`.
+    Defaults to `False` so every pre-Task-4.3 caller (every test
+    building a config without this parameter) is unaffected. A resume
+    never recomputes this (resume_turn()/read_state() don't accept it) --
+    quota is only ever relevant to routing a brand NEW turn's input, and
+    a resume by definition continues a turn already past that decision.
     """
     if not isinstance(identity.tenant_id, uuid.UUID):
         raise ValueError("identity.tenant_id must be a uuid.UUID")
@@ -162,7 +176,13 @@ def _build_thread_config(identity: VerifiedIdentity, conversation_id: uuid.UUID)
         raise ValueError("conversation_id must be a uuid.UUID")
 
     thread_id = build_thread_id(identity.tenant_id, identity.vid, conversation_id)
-    return {"configurable": {"thread_id": thread_id, "tenant_id": identity.tenant_id}}
+    return {
+        "configurable": {
+            "thread_id": thread_id,
+            "tenant_id": identity.tenant_id,
+            "quota_exhausted": quota_exhausted,
+        }
+    }
 
 
 def _assert_thread_prefix_matches(config: Mapping[str, Any], identity: VerifiedIdentity) -> None:
@@ -209,6 +229,8 @@ async def run_turn(
     identity: VerifiedIdentity,
     conversation_id: uuid.UUID,
     input: Any,  # noqa: A002 (matches astream()'s own `input` parameter name)
+    *,
+    quota_exhausted: bool = False,
 ) -> AsyncIterator[Any]:
     """Runs one turn (`graph.astream`), yielding whatever the graph itself
     yields unchanged. `input` is forwarded to `astream()` exactly as
@@ -216,8 +238,13 @@ async def run_turn(
     those keys have no special meaning to this function at all; only the
     config this function builds itself, from `identity`/`conversation_id`,
     ever determines which thread a run executes against.
+
+    Task 4.3: `quota_exhausted` is this turn's OWN caller-decided quota
+    verdict (`app/chat/routes.py`, which already resolved the tenant's
+    plan/usage with a real DB session before calling this) -- forwarded
+    straight into `_build_thread_config()`, never computed here.
     """
-    config = _build_thread_config(identity, conversation_id)
+    config = _build_thread_config(identity, conversation_id, quota_exhausted=quota_exhausted)
     async for chunk in graph.astream(input, config, stream_mode=_STREAM_MODE):
         yield chunk
 

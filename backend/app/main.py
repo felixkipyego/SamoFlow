@@ -44,6 +44,7 @@
 # app/qdrant.py's own test fixture (Task 1.3.b, test_qdrant.py's
 # _close_the_shared_live_client_once). Reused here rather than inventing a
 # second one.
+import asyncio
 import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -58,11 +59,20 @@ from app.chat.routes import router as chat_router
 from app.config import Settings, get_settings
 from app.db import _session_factory, get_engine
 from app.health import router as health_router
+from app.plans.usage import sync_usage_counters
 from app.qdrant import get_qdrant_client
 
 _TITLE = "widgetplatform API"  # neutral name; no brand name in code
 
 logger = logging.getLogger(__name__)
+
+# Task 4.3: see _lifespan()'s own comment at its first call site for
+# the live-tested reasoning (an unreachable-but-not-refused DATABASE_URL
+# otherwise blocks for the OS's own TCP connect timeout, often 60-130+
+# seconds). Also applied to the PERIODIC sync below, for the identical
+# reason -- a single stuck tick must not silently take far longer than
+# `usage_counter_sync_interval_seconds` itself.
+_USAGE_COUNTER_STARTUP_TIMEOUT_SECONDS = 30.0
 
 
 @asynccontextmanager
@@ -80,7 +90,86 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     # place Settings/StatusCache/RateLimiter instances already live --
     # app/chat/routes.py reads it back via request.app.state.graph.
     app.state.graph = build_graph(get_checkpointer())
+
+    # Task 4.3: docs/SPEC.md §9's own quota-reload guarantee -- "On
+    # startup the API reloads the current month's usage before serving
+    # chats, so a restart cannot reset counters. Until the reload
+    # finishes, /api/v1/chat returns 503..." `app.state.usage_counters_
+    # ready` starts unset (falsy via getattr(..., False) at the call
+    # site, app/chat/routes.py) and is set True only AFTER this first
+    # real reload completes -- never set True unconditionally before
+    # it, which would defeat the whole guarantee. A startup-time
+    # failure here (e.g. the database genuinely unreachable) still
+    # fails loudly -- re-raised below, never swallowed -- but a REAL
+    # bug was found live while testing this exact path, fixed before
+    # it shipped, not just reasoned about: a plain, unwrapped `await`
+    # here that raises leaves `open_checkpointer_pool()` (already
+    # opened, two lines above) NEVER CLOSED, since `@asynccontextmanager`
+    # never reaches this generator's own post-`yield` shutdown code when
+    # the pre-`yield` half raises. `psycopg_pool`'s own AsyncConnectionPool
+    # retries a failed connection forever in the background by design
+    # (confirmed live: a deliberately unreachable DATABASE_URL produced
+    # an UNBOUNDED stream of "error connecting in 'pool-1'" log lines,
+    # and the process never exited) -- an orphaned, permanently-retrying
+    # background pool, not a clean failed-startup exit. Fixed by
+    # explicitly closing the checkpointer pool before re-raising.
+    try:
+        settings = get_settings()
+        # A second real finding from the same live test: with no
+        # `connect_timeout` set anywhere on this engine (app/db.py's
+        # own get_engine(), confirmed by reading it directly), a
+        # DATABASE_URL that is unreachable in the "silently dropped"
+        # sense (a blackholed/firewalled address, unlike the much more
+        # common "connection refused" case, which fails in
+        # milliseconds) would block this `await` for the OS's own TCP
+        # connect timeout -- often 60-130+ seconds -- before the
+        # try/except above even gets a chance to clean up. Bounded
+        # explicitly here, matching this project's own "internal safety
+        # ceiling, no corresponding spec number" precedent (e.g.
+        # `docx_max_part_size_bytes`): a genuinely slow-to-fail startup
+        # DB check should fail in a bounded, human-reasonable time, not
+        # however long the OS/network stack happens to take.
+        async with asyncio.timeout(_USAGE_COUNTER_STARTUP_TIMEOUT_SECONDS):
+            async with _session_factory()() as session:
+                await sync_usage_counters(session)
+        app.state.usage_counters_ready = True
+
+        # The periodic half of the same guarantee -- docs/SPEC.md §9's
+        # own "refreshes them from usage_events about every minute". A
+        # plain background `asyncio.Task`, cancelled at shutdown
+        # (below) -- the same lifecycle shape as every other per-
+        # process background loop in this project (app/worker.py's own
+        # run()), just on the API side this time. A single iteration's
+        # own failure (a transient DB hiccup) is caught and logged,
+        # matching worker.py's own "a transient failure must not crash
+        # the process" reasoning exactly -- `usage_counters_ready` is
+        # never flipped back to False for a LATER refresh failing; only
+        # the FIRST, startup reload gates it.
+        async def _sync_usage_counters_periodically() -> None:
+            while True:
+                try:
+                    await asyncio.sleep(settings.usage_counter_sync_interval_seconds)
+                    async with asyncio.timeout(_USAGE_COUNTER_STARTUP_TIMEOUT_SECONDS):
+                        async with _session_factory()() as session:
+                            await sync_usage_counters(session)
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    logger.exception("periodic usage-counter sync failed")
+
+        sync_task = asyncio.create_task(_sync_usage_counters_periodically())
+    except Exception:
+        await close_checkpointer_pool()
+        raise
+
     yield
+
+    sync_task.cancel()
+    try:
+        await sync_task
+    except asyncio.CancelledError:
+        pass
+
     # Each disposal in its own try/except: one failing must never prevent
     # the other from being attempted, and must never crash the shutdown
     # sequence itself -- logged (same logging.getLogger(__name__) + the

@@ -211,23 +211,101 @@ def _clear_engine_and_qdrant_caches():
     qdrant.get_qdrant_client.cache_clear()
 
 
-async def test_lifespan_never_creates_engine_or_qdrant_client_when_unused(monkeypatch):
-    # (a) Nothing touches Postgres or Qdrant during this app's short life --
-    # proves the lazy contract survives the lifespan hook itself: shutdown
-    # must not be what FIRST creates either singleton just to tear it down.
-    # cache_info().currsize is pure introspection on the lru_cache wrapper
-    # (this project's own established "created yet?" mechanism, first used
-    # in app/qdrant.py's own test fixture, Task 1.3.b) -- it never calls the
-    # wrapped function itself.
-    set_valid_env(monkeypatch, VALID_ENV)
+async def test_lifespan_never_creates_a_qdrant_client_when_unused(monkeypatch):
+    # (a) REWRITTEN at Task 4.3, not removed -- its own premise ("nothing
+    # touches Postgres... during this app's short life") is now false BY
+    # DESIGN: docs/SPEC.md §9's own quota-reload guarantee ("on startup
+    # the API reloads the current month's usage before serving chats")
+    # means the lifespan now ALWAYS opens a real engine, unconditionally,
+    # whether or not any route ever uses one -- see
+    # test_lifespan_always_reloads_usage_counters_and_marks_ready below
+    # for the real proof of that new behavior. Qdrant's own lazy contract
+    # is UNCHANGED by this task (nothing in Task 4.3 touches Qdrant at
+    # all) -- this test keeps proving exactly that half, using the real
+    # test database (required now, so the usage-counter reload succeeds
+    # instead of raising) rather than the fake, unroutable DATABASE_URL
+    # this test used before.
+    database_url = require_test_database()
+    set_valid_env(monkeypatch, VALID_ENV, DATABASE_URL=database_url)
     _clear_engine_and_qdrant_caches()
 
     app = create_app()
     async with app.router.lifespan_context(app):
         pass
 
-    assert db.get_engine.cache_info().currsize == 0
     assert qdrant.get_qdrant_client.cache_info().currsize == 0
+    db.get_engine.cache_clear()
+    db._session_factory.cache_clear()
+
+
+async def test_lifespan_always_reloads_usage_counters_and_marks_ready(monkeypatch):
+    # Task 4.3: the real proof of the new startup behavior -- an engine
+    # IS created (confirmed directly, not inferred), and `app.state.
+    # usage_counters_ready` becomes True, with NO request of any kind
+    # made during the lifespan's own body. `usage_counters_ready` starts
+    # unset on a bare FastAPI app (app/chat/routes.py's own `getattr(...,
+    # False)` default), so checking it is `True` here is a real,
+    # non-vacuous proof the reload actually ran, not just "didn't crash".
+    database_url = require_test_database()
+    set_valid_env(monkeypatch, VALID_ENV, DATABASE_URL=database_url)
+    _clear_engine_and_qdrant_caches()
+
+    app = create_app()
+    async with app.router.lifespan_context(app):
+        assert app.state.usage_counters_ready is True
+        assert db.get_engine.cache_info().currsize == 1
+
+    db.get_engine.cache_clear()
+    db._session_factory.cache_clear()
+
+
+async def test_lifespan_closes_the_checkpointer_pool_when_usage_counter_reload_fails(
+    monkeypatch,
+):
+    # [Correctness] A real bug found live while building this task, not
+    # merely reasoned about: a startup-time failure in the usage-counter
+    # reload (any raised exception) used to leave the checkpointer pool
+    # (already opened one line earlier in _lifespan()) orphaned --
+    # `psycopg_pool`'s own AsyncConnectionPool retries a failed
+    # connection FOREVER in the background by design, so a bare,
+    # unwrapped failure here meant an unbounded stream of retry
+    # attempts and a process that never cleanly finished starting up.
+    # Reproduced here with a genuinely unreachable (TEST-NET-3, RFC
+    # 5737 -- silently dropped, never even a fast "connection refused")
+    # DATABASE_URL, bounded by _lifespan()'s own explicit timeout
+    # (app/main.py's `_USAGE_COUNTER_STARTUP_TIMEOUT_SECONDS`) so this
+    # test itself does not hang for the OS's own much longer TCP
+    # connect timeout. Proves BOTH halves: the real exception propagates
+    # (not swallowed), AND close_checkpointer_pool() was actually called
+    # (via get_checkpointer()/open_checkpointer_pool()'s own module-level
+    # pool reference going back to None -- confirmed by a second
+    # open_checkpointer_pool() call afterward succeeding cleanly, which
+    # would itself raise if the first pool were still considered open).
+    set_valid_env(monkeypatch, VALID_ENV)  # VALID_ENV's own DATABASE_URL is TEST-NET-3
+    _clear_engine_and_qdrant_caches()
+    # 1s, not the real 30s default -- this test only needs the TIMEOUT
+    # to fire at all, not the real production bound; monkeypatched on
+    # the module (main_module), not imported as a bare name, since
+    # _lifespan() reads it as a module global at call time.
+    import app.main as main_module
+
+    monkeypatch.setattr(main_module, "_USAGE_COUNTER_STARTUP_TIMEOUT_SECONDS", 1.0)
+
+    app = create_app()
+    with pytest.raises(TimeoutError):
+        async with app.router.lifespan_context(app):
+            pass  # pragma: no cover -- startup itself raises first
+
+    from app.agent import checkpointer as checkpointer_module
+
+    # A second open/close cycle must still work cleanly -- proves the
+    # first pool was genuinely closed, not merely that no exception
+    # propagated from this test's own `with pytest.raises()` block.
+    await checkpointer_module.open_checkpointer_pool()
+    await checkpointer_module.close_checkpointer_pool()
+
+    db.get_engine.cache_clear()
+    db._session_factory.cache_clear()
 
 
 async def test_lifespan_disposes_engine_and_closes_qdrant_client_that_were_actually_used(
@@ -316,8 +394,14 @@ async def test_lifespan_engine_disposal_failure_does_not_prevent_qdrant_closure(
     # (c) The engine's own dispose() is made to raise -- the Qdrant client
     # must still be closed, and shutdown itself must still complete without
     # raising (if it did, this test would error right here, at the
-    # `async with` block's own __aexit__).
-    set_valid_env(monkeypatch, VALID_ENV, QDRANT_URL="http://127.0.0.1:1")
+    # `async with` block's own __aexit__). A real DATABASE_URL, not
+    # VALID_ENV's own TEST-NET-3 default, as of Task 4.3 -- the lifespan
+    # now ALWAYS performs a real startup usage-counter reload, which
+    # would otherwise time out before this test's own body ever runs.
+    database_url = require_test_database()
+    set_valid_env(
+        monkeypatch, VALID_ENV, DATABASE_URL=database_url, QDRANT_URL="http://127.0.0.1:1"
+    )
     _clear_engine_and_qdrant_caches()
 
     app = create_app()
@@ -342,8 +426,12 @@ async def test_lifespan_engine_disposal_failure_does_not_prevent_qdrant_closure(
 async def test_lifespan_qdrant_closure_failure_does_not_prevent_engine_disposal(monkeypatch):
     # (c), the reverse: the Qdrant client's own close() is made to raise --
     # the engine must still be disposed, and shutdown itself must still
-    # complete without raising.
-    set_valid_env(monkeypatch, VALID_ENV, QDRANT_URL="http://127.0.0.1:1")
+    # complete without raising. A real DATABASE_URL, same Task 4.3 reason
+    # as the sibling test directly above.
+    database_url = require_test_database()
+    set_valid_env(
+        monkeypatch, VALID_ENV, DATABASE_URL=database_url, QDRANT_URL="http://127.0.0.1:1"
+    )
     _clear_engine_and_qdrant_caches()
 
     app = create_app()
