@@ -23,6 +23,7 @@ anyio==4.15.1 \
     #   httpx2
     #   langsmith
     #   openai
+    #   sse-starlette
     #   starlette
 asyncpg==0.32.0 \
     --hash=sha256:0549af18b697221d1992b7def18aa61652a85ecbe6e19ba2a75277560efe6016 \
@@ -2156,10 +2157,16 @@ sqlalchemy==2.0.54 \
     # via
     #   widgetplatform (backend/pyproject.toml)
     #   alembic
+sse-starlette==3.5.0 \
+    --hash=sha256:3e6e1070df3f0f5d9cea81496de92dbb72f6721871d99748ece67441dd8b7997 \
+    --hash=sha256:75de713aa8a9441513cc283220826da079d982770965b951e9437720e8bafdb2
+    # via widgetplatform (backend/pyproject.toml)
 starlette==1.7.0 \
     --hash=sha256:67f8e99895493dd2911a03f11314af6ceebeae4e704bb9f43dfc6a9db151c93e \
     --hash=sha256:c79f74ea63cff761804fbbfb182f1e0b440c2d07b164d24700c5a1bab5d6ff5d
-    # via fastapi
+    # via
+    #   fastapi
+    #   sse-starlette
 sympy==1.14.0 \
     --hash=sha256:d3d3fe8df1e5a0b42f0e7bdf50541697dbe7d23746e894990c030e2b05e72517 \
     --hash=sha256:e091cc3e99d2141a0ba2847328f5479b05d94a6635cb96148ccb3f34671bd8f5

@@ -73,7 +73,36 @@ from app.auth.dependencies import VerifiedIdentity
 # parameter must not exist either; test_run_turn_and_resume_turn_do_not_
 # expose_stream_mode (tests/test_agent_entrypoint.py) asserts this
 # directly against both signatures.
-_STREAM_MODE = "updates"
+#
+# Task 4.1: widened from the single "updates" string to a LIST
+# (["custom", "updates"]) -- the real `/chat` endpoint is this constant's
+# first real consumer, and it needs BOTH channels: "custom" carries
+# `_answer_node`'s own real token-by-token writer events (the ONLY
+# source of real streamed answer text, per that node's own docstring and
+# PROJECT_SPEC.md's own §9 marker), while "updates" still carries each
+# node's own full return dict -- needed for the FIXED-reply nodes
+# (guardrail/no_answer_fallback/dependency_failure/fallback/coordinator),
+# none of which call the stream writer at all, so "custom" alone would
+# surface nothing for those paths. Confirmed live, against the installed
+# langgraph, before relying on it: a LIST stream_mode changes astream()'s
+# own yielded shape from a bare chunk to a `(mode_name, chunk)` tuple --
+# a real, deliberate shape change this constant's own callers (`run_turn`/
+# `resume_turn`) now propagate unchanged, same as every other
+# "whatever the graph itself yields" passthrough already documented
+# below. No prefix check is added for either channel: neither "custom"
+# (an arbitrary dict the node itself wrote, with no config/thread
+# metadata at all) nor "updates" (a per-node return dict, same today as
+# before this change) carries anything resembling the "configurable"-
+# keyed config shape the comment above was written to anticipate -- this
+# was confirmed by direct inspection of both channels' real chunk shapes
+# before relying on it, not assumed from the comment's own old wording.
+# "messages" mode is deliberately NOT added -- it would carry the
+# answer node's own raw tool-call JSON fragments (including
+# `used_chunk_ids`, which must never reach a visitor), exactly what this
+# module's header comment and `_answer_node`'s own docstring already warn
+# against forwarding; Step 4.1's own decision (PROJECT_SPEC.md) is to
+# never subscribe to it at all, not merely to filter it after the fact.
+_STREAM_MODE = ["custom", "updates"]
 
 
 class NoResumableInterruptError(Exception):

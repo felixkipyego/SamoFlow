@@ -51,8 +51,10 @@ from importlib.metadata import version
 
 from fastapi import FastAPI
 
-from app.agent.checkpointer import close_checkpointer_pool, open_checkpointer_pool
+from app.agent.checkpointer import close_checkpointer_pool, get_checkpointer, open_checkpointer_pool
+from app.agent.graph import build_graph
 from app.auth.routes import router as auth_router
+from app.chat.routes import router as chat_router
 from app.config import Settings, get_settings
 from app.db import _session_factory, get_engine
 from app.health import router as health_router
@@ -66,6 +68,18 @@ logger = logging.getLogger(__name__)
 @asynccontextmanager
 async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     await open_checkpointer_pool()
+    # Task 4.1: resolves the §9 marker recorded at the Step 3.3 breakdown
+    # (decision Q5) -- "compile the graph once, in the lifespan hook,
+    # after open_checkpointer_pool(), store it, and pass it into the
+    # entry point." Compiled exactly once per process lifetime (never
+    # per-request, unlike get_checkpointer() itself, which deliberately
+    # builds a fresh AsyncPostgresSaver per call because pytest's own
+    # event-loop churn makes a cached one unsafe across tests -- a real
+    # uvicorn process has exactly one event loop for its whole lifetime,
+    # so that concern does not apply here). Stored on app.state, the same
+    # place Settings/StatusCache/RateLimiter instances already live --
+    # app/chat/routes.py reads it back via request.app.state.graph.
+    app.state.graph = build_graph(get_checkpointer())
     yield
     # Each disposal in its own try/except: one failing must never prevent
     # the other from being attempted, and must never crash the shutdown
@@ -159,4 +173,5 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.settings = settings
     app.include_router(health_router)
     app.include_router(auth_router)
+    app.include_router(chat_router)
     return app

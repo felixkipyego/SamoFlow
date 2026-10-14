@@ -263,6 +263,39 @@ class Settings(BaseSettings):
     # with ingestion's own looser tolerance, so a construction-time
     # default here is the right place, not a per-call override.
     chat_model_timeout_seconds: float = Field(default=5.0, gt=0)
+    # Task 4.1. docs/SPEC.md §9's own two named POST /api/v1/chat limits --
+    # "10 messages per minute per visitor" (the number, taken verbatim from
+    # the spec, not invented here) and "a per-IP cap across visitors" (no
+    # number named in the spec for this one). The per-IP default below
+    # reuses session_rate_limit_per_ip's own established 3x-the-per-key-
+    # limit ratio (30 = 3x10, matching that field's own 30:10 shape) rather
+    # than inventing a new, unjustified ratio -- rule 11, reuse an
+    # already-justified number. Same `RateLimiter` class (Task 1.5.a), two
+    # NEW, separate instances with disjoint key spaces (per-visitor keyed by
+    # `vid`, per-IP keyed by the request's own IP) -- never the session
+    # endpoint's own two limiter instances, which track a structurally
+    # different pair of keys (IP, site_key).
+    chat_rate_limit_per_visitor: int = Field(default=10, gt=0)
+    chat_rate_limit_per_visitor_window_seconds: float = Field(default=60, gt=0)
+    chat_rate_limit_per_ip: int = Field(default=30, gt=0)
+    chat_rate_limit_per_ip_window_seconds: float = Field(default=60, gt=0)
+    # Task 4.1. The OVERALL wall-clock ceiling for one /chat turn (retrieve
+    # + gate + the full answer stream), enforced via asyncio.wait_for() in
+    # the endpoint itself -- a DIFFERENT timeout from chat_model_timeout_
+    # seconds above, which (per that field's own header comment) is an IDLE
+    # timeout between streamed chunks, not a total-duration one: a long,
+    # genuinely-streaming answer can legitimately run well past 5s in total
+    # as long as chunks keep arriving within that window, so a total-
+    # duration cap must be a separate, larger number, not a reuse of that
+    # field. 30s is a deliberately generous, round estimate (Qdrant's own
+    # ~5s default timeout for retrieve(), plus the chat model's own
+    # `.with_fallbacks()` chain potentially retrying through a slow primary
+    # before engaging a secondary, plus margin) -- named here as an
+    # estimate because no docs/SPEC.md §17 budget exists yet for "total
+    # answer duration" (only first-token latency is budgeted there); Phase
+    # 7's load test is the real check, same discipline as every other
+    # unvalidated-under-load number in this file.
+    chat_request_timeout_seconds: float = Field(default=30.0, gt=0)
     # Task 3.7.a follow-up [correctness]: an EXPLICIT choice replacing an
     # inherited provider default -- `ChatOpenAI`'s own default `temperature`
     # is `None` (confirmed live, not assumed: nothing is sent, so OpenAI's

@@ -47,9 +47,12 @@ SUBPACKAGES = [
 # real compiled graph (tested separately in test_agent_graph.py); calling
 # it with zero arguments would raise TypeError, not NotImplementedError,
 # so it is removed from this list the same way, not left to fail here.
+# app.chat.routes.stream_chat_response is no longer a raising stub as of
+# Task 4.1 -- POST /api/v1/chat is real (tested separately in
+# test_chat_routes.py), and the stub function itself no longer exists at
+# all (not merely replaced) -- removed from this list the same way.
 STUB_ENTRY_POINTS = [
     ("app.plans.service", "get_plan_limits"),
-    ("app.chat.routes", "stream_chat_response"),
     ("app.handoff.routes", "submit_escalation"),
     ("app.notifications.service", "send_email"),
     ("app.mcp.service", "search_knowledge_base"),
