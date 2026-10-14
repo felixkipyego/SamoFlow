@@ -11,18 +11,29 @@
 # it lived under backend/app/ (that guard, like the Qdrant read-path
 # guard, only scans backend/app/ -- confirmed by reading it directly).
 #
-# Judge model: gpt-4o-mini -- cheap enough to run across the whole
-# golden set repeatedly, and precisely the class of model whose
-# judgments need the calibration this task builds, not assumed
-# trustworthy because it is a "bigger" model. Originally justified as
-# "cost-matched to the production primary" (Task 3.7.d) -- Task 3.7.g
-# (2026-10-14) moved `Settings.chat_model_primary` to "gpt-4o", so that
-# specific justification is now stale; the judge was deliberately left
-# on "gpt-4o-mini" rather than silently following the primary's own
-# model choice, since re-matching it would also invalidate Felix's own
-# not-yet-collected calibration labels (judged against gpt-4o-mini's
-# own real output) for no measured benefit -- see PROJECT_SPEC.md's own
-# §9 marker for the real, now-separate decision this leaves open.
+# Judge model: gpt-6-luna -- moved from gpt-4o-mini at Task 3.7.i
+# (2026-10-14), confirmed live against OpenAI's own deprecations page:
+# gpt-4o-mini has an announced shutdown date (January 14, 2027), and
+# Felix's own calibration labelling has not started yet (no committed
+# `calibration_*.csv` has ever had a single filled-in `label`) -- the
+# switch costs nothing in already-collected ground truth, since there
+# is none yet. gpt-6-luna is also strictly CHEAPER ($0.10/$0.60 per 1M
+# tokens vs. gpt-4o-mini's $0.15/$0.60) with no announced shutdown.
+# Real head-to-head check before switching, not assumed equivalent: the
+# SAME 30-row calibration export from Task 3.7.h's own committed
+# `calibration_20261014-152627.csv` was re-judged with both models --
+# 29/30 (96.7%) agreement, and gpt-6-luna caught one real corrupted
+# (hallucinated) row gpt-4o-mini itself missed, not the reverse -- a
+# real, modest accuracy edge alongside the cost cut, not just "cheaper
+# and hopefully still fine." Originally justified as "cost-matched to
+# the production primary" (Task 3.7.d) -- Task 3.7.g (2026-10-14) moved
+# `Settings.chat_model_primary` to "gpt-4o", already making that
+# specific justification stale before this task's own switch; Felix's
+# own future labels are judge-independent by construction (labelling
+# reads only `question`/`context`/`answer`, never the judge's own
+# verdict -- confirmed by reading `write_labelling_csv()` directly, it
+# never includes `judge_label`), so no past or future calibration work
+# is invalidated by this change either way.
 #
 # Delimiting untrusted context the SAME way the real answer node does
 # (per direct instruction): `_build_messages()` (app/agent/graph.py) is
@@ -45,7 +56,7 @@ import phoenix.evals as pe
 
 from app.agent.graph import RetrievedChunk, _build_messages
 
-JUDGE_MODEL = "gpt-4o-mini"
+JUDGE_MODEL = "gpt-6-luna"
 
 _GROUNDEDNESS_PROMPT_TEMPLATE = """You are evaluating whether an AI assistant's answer is \
 fully GROUNDED in the provided context, or states something not supported by it (a \

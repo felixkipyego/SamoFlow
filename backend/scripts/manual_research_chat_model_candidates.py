@@ -3,12 +3,17 @@
 # Task 3.7.h (opt-in, real OpenAI + real Qdrant; NEVER run by pytest/CI
 # -- not under tests/, no test_ prefix, not imported by anything).
 #
-# Chooses the primary chat model on cost AND quality: gpt-4o (the
-# shipped reference, Task 3.7.g) vs. up to 3 real candidates priced
-# between gpt-4o-mini and gpt-4o, current-generation, not scheduled to
-# shut down before May 2027 -- see this task's own PROJECT_SPEC.md
-# entry for the real OpenAI pricing/models/deprecations pages checked,
-# with URLs and the check date, before picking them.
+# Chooses the primary chat model on cost AND quality against the real,
+# shipped `gpt-4o` reference. Task 3.7.i corrected 3.7.h's own filter
+# ("priced between gpt-4o-mini and gpt-4o", which wrongly excluded
+# cheaper current models) to: cheaper than gpt-4o, current generation,
+# no announced shutdown before May 2027 -- see this task's own PROJECT_
+# SPEC.md entry for the real OpenAI pricing/models/deprecations pages
+# checked, with URLs and the check date, before picking candidates.
+# `_CANDIDATES` reflects whichever task most recently ran this script;
+# older candidates' own real numbers are not lost -- they are recorded
+# in PROJECT_SPEC.md's own decision log, under the task that measured
+# them, not re-run here just to keep them "in" this file.
 #
 # The CURRENT (shipped) prompt/schema is held fixed (`_SYSTEM_
 # INSTRUCTION`/`Answer`, unmodified) -- this task varies ONLY the
@@ -95,30 +100,44 @@ _N_REPEATS = 3
 # own PROJECT_SPEC.md entry for the exact pages/URLs/check date.
 _PRICE_PER_MILLION = {
     "gpt-4o": (2.50, 10.00),
-    "gpt-5-mini": (0.25, 2.00),
+    "gpt-6-luna": (0.10, 0.50),
     "gpt-6.1-sol": (2.00, 10.00),
-    "o3": (2.00, 8.00),
+}
+
+# Task 3.7.i: the gpt-4o REFERENCE is NOT re-run this task -- reused
+# directly from Task 3.7.g's committed numbers (full set, N=3, corrected
+# golden set), per direct instruction. `per_category_correct_median`
+# derived from that task's own real committed confusion-by-category
+# counts (16 answerable, 15 each of follow_up/greeting/injection/off_
+# topic, 10/15 multi_source correct (FN=5), 14/15 related_unanswerable
+# correct (FP=1)).
+_GPT4O_REFERENCE = {
+    "fp_median": "1 (1-2)", "fn_median": "5 (5-5)", "injection_failed": 0,
+    "p50": 704.0, "p95": 982.0, "failure_rate": 0.0, "cost_per_1000": 7.0100,
+    "per_category_correct_median": {
+        "answerable": 16, "follow_up": 15, "greeting": 15, "injection": 15,
+        "multi_source": 10, "off_topic": 15, "related_unanswerable": 14,
+    },
 }
 
 # (model_name, temperature_or_None, extra model kwargs) -- temperature
-# None means "omit the kwarg", not "pass None through"; see this
-# module's own header comment for why two of these four need it.
+# None means "omit the kwarg", not "pass None through"; both GPT-6
+# models reject `temperature=0.0` outright, confirmed live before this
+# task's own real run ("Only the default (1) value is supported").
+#
+# gpt-6-luna: confirmed live to be a real reasoning model (non-zero
+# `output_token_details.reasoning` at `reasoning_effort="medium"`) --
+# tested at BOTH its lowest ("low") and second-lowest ("medium")
+# setting, per direct instruction, since the task's own filter does not
+# say which one would actually meet the ship rule.
+# gpt-6.1-sol: tested at "low", confirmed BELOW the setting Task 3.7.h
+# used (that task passed no `reasoning_effort` at all, i.e. this
+# model's own default -- "low" is one step down the real low/medium/
+# high/xhigh/max scale this model confirms supporting).
 _CANDIDATES: dict[str, tuple[str, float | None, dict]] = {
-    "gpt-4o": ("gpt-4o", 0.0, {}),
-    # Task 3.7.h, item 2: a real, found correction, not assumed --
-    # confirmed LIVE before this task's own real run that "gpt-5-mini"
-    # is ITSELF a reasoning model (a trivial "Say OK." call returned
-    # real `output_token_details.reasoning` tokens with no
-    # `reasoning_effort` set at all, and took ~4000ms vs. ~900ms with
-    # `reasoning_effort="minimal"` -- the real cause of this candidate's
-    # own first, uncorrected run timing out on the large majority of
-    # real calls at production's real 5s timeout). "minimal" is the
-    # model's own LOWEST setting (OpenAI's own ordering: minimal < low
-    # < medium < high), matching this task's own direct instruction
-    # literally.
-    "gpt-5-mini": ("gpt-5-mini", 0.0, {"reasoning_effort": "minimal"}),
-    "gpt-6.1-sol": ("gpt-6.1-sol", None, {}),
-    "o3": ("o3", None, {"reasoning_effort": "low"}),
+    "gpt-6-luna-low": ("gpt-6-luna", None, {"reasoning_effort": "low"}),
+    "gpt-6-luna-medium": ("gpt-6-luna", None, {"reasoning_effort": "medium"}),
+    "gpt-6.1-sol-low": ("gpt-6.1-sol", None, {"reasoning_effort": "low"}),
 }
 
 
@@ -291,6 +310,13 @@ async def main() -> None:
             }
 
         print("\n=== Summary ===")
+        print(
+            f"  gpt-4o (REFERENCE, reused from Task 3.7.g, not re-run): "
+            f"FP={_GPT4O_REFERENCE['fp_median']} FN={_GPT4O_REFERENCE['fn_median']} "
+            f"injection_failed={_GPT4O_REFERENCE['injection_failed']}/{n_injection} "
+            f"failure_rate={_GPT4O_REFERENCE['failure_rate']:.1%} "
+            f"cost/1000={_GPT4O_REFERENCE['cost_per_1000']:.4f}"
+        )
         for label, data in per_candidate.items():
             print(
                 f"  {label}: FP={data['fp_median']} FN={data['fn_median']} "
@@ -299,23 +325,20 @@ async def main() -> None:
                 f"cost/1000={data['cost_per_1000']:.4f}"
             )
 
-        if "gpt-4o" in per_candidate:
-            reference = per_candidate["gpt-4o"]
-            print("\n=== Ship-rule check against the gpt-4o reference ===")
-            for label, data in per_candidate.items():
-                if label == "gpt-4o":
-                    continue
-                category_drop = max(
-                    (
-                        reference["per_category_correct_median"][c]
-                        - data["per_category_correct_median"][c]
-                    )
-                    for c in categories
+        print("\n=== Ship-rule check against the gpt-4o reference (reused, not re-run) ===")
+        reference = _GPT4O_REFERENCE
+        for label, data in per_candidate.items():
+            category_drop = max(
+                (
+                    reference["per_category_correct_median"][c]
+                    - data["per_category_correct_median"][c]
                 )
-                print(
-                    f"  {label}: max category correct-count drop = {category_drop:+.1f} "
-                    f"(fails if >= 2)"
-                )
+                for c in categories
+            )
+            print(
+                f"  {label}: max category correct-count drop = {category_drop:+.1f} "
+                f"(fails if >= 2)"
+            )
     finally:
         await client.delete(
             collection_name=qdrant.COLLECTION_NAME, points_selector=qdrant.tenant_filter(tenant_id)

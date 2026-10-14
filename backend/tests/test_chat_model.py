@@ -161,6 +161,65 @@ def test_get_chat_model_sets_max_retries_zero_and_the_configured_timeout(monkeyp
     assert secondary.default_request_timeout == 7.0
 
 
+# --- Task 3.7.i: temperature/reasoning_effort omitted, not special-cased ----
+
+
+def test_get_chat_model_omits_temperature_kwarg_when_settings_value_is_none(monkeypatch):
+    # Task 3.7.i: `chat_model_temperature=None` (the new DEFAULT, since the
+    # shipped `gpt-6-luna` rejects `temperature=0.0` outright) must OMIT
+    # the kwarg entirely, not pass `None` through to `init_chat_model()` --
+    # `ChatOpenAI.temperature` itself defaults to `None` when never set,
+    # so this proves omission, not merely "the value happens to be None".
+    # No override needed -- VALID_ENV never sets CHAT_MODEL_TEMPERATURE,
+    # so Settings uses its own real default.
+    set_valid_env(monkeypatch, VALID_ENV)
+    chat_model.get_chat_model.cache_clear()
+    primary = chat_model.get_chat_model()
+    assert primary.temperature is None
+
+
+def test_get_chat_model_passes_temperature_kwarg_when_settings_value_is_set(monkeypatch):
+    set_valid_env(monkeypatch, VALID_ENV, CHAT_MODEL_TEMPERATURE="0.0")
+    chat_model.get_chat_model.cache_clear()
+    primary = chat_model.get_chat_model()
+    assert primary.temperature == 0.0
+
+
+def test_get_chat_model_omits_reasoning_effort_kwarg_by_default(monkeypatch):
+    set_valid_env(monkeypatch, VALID_ENV, CHAT_MODEL_REASONING_EFFORT="")
+    chat_model.get_chat_model.cache_clear()
+    primary = chat_model.get_chat_model()
+    assert primary.reasoning_effort is None
+
+
+def test_get_chat_model_passes_reasoning_effort_kwarg_when_settings_value_is_set(monkeypatch):
+    set_valid_env(monkeypatch, VALID_ENV, CHAT_MODEL_REASONING_EFFORT="low")
+    chat_model.get_chat_model.cache_clear()
+    primary = chat_model.get_chat_model()
+    assert primary.reasoning_effort == "low"
+
+
+def test_get_chat_model_never_passes_reasoning_effort_to_the_anthropic_secondary(monkeypatch):
+    # OpenAI-specific kwarg -- never forwarded to a configured Anthropic
+    # secondary, which has no such parameter.
+    set_valid_env(
+        monkeypatch,
+        VALID_ENV,
+        ANTHROPIC_API_KEY="sk-ant-real-looking-key",
+        CHAT_MODEL_SECONDARY_VERIFIED="true",
+        CHAT_MODEL_REASONING_EFFORT="low",
+    )
+    chat_model.get_chat_model.cache_clear()
+    model = chat_model.get_chat_model()
+    secondary = model.fallbacks[0]
+    # ChatAnthropic declares its own `reasoning_effort` attribute (its own,
+    # unrelated notion, for Claude's extended-thinking models) -- the real
+    # proof this kwarg was never forwarded is that it stays unset, not
+    # that the attribute itself is absent.
+    assert getattr(secondary, "reasoning_effort", None) is None
+    assert secondary.model_kwargs == {}
+
+
 # --- Mechanism proof 1: with_structured_output through .with_fallbacks() ----
 #
 # get_chat_model() always returns a plain Runnable (BaseChatModel or

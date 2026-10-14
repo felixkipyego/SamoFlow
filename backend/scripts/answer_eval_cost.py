@@ -16,17 +16,18 @@ INJECTION_REPEATS = 3
 
 # Rough, named, not precision-engineered: deliberately round, order-of-
 # magnitude placeholders stated as such, not a claim of billing
-# accuracy. `_EST_USD_PER_CHAT_CALL` updated at Task 3.7.g (2026-10-14)
-# to track `Settings.chat_model_primary`'s own change ("gpt-4o-mini" ->
-# "gpt-4o") -- real measured average from that task's own full-golden-
-# set research run ($0.7371 / 264 real gpt-4o calls), not re-derived
-# from published per-token pricing a second time. The judge
-# (`scripts/groundedness_judge.py`) stays on "gpt-4o-mini" (unchanged,
-# cheap) -- it is a SEPARATE model choice from the production primary,
-# not re-matched to it automatically; see this task's own §9 marker.
+# accuracy. Updated at Task 3.7.i (2026-10-14) to track BOTH
+# `Settings.chat_model_primary` ("gpt-4o" -> "gpt-6-luna") and
+# `scripts/groundedness_judge.JUDGE_MODEL` ("gpt-4o-mini" -> "gpt-6-
+# luna") -- for the first time, the same model prices both, so the same
+# per-call estimate is used for both, not a simplification, the real
+# shape now. Real measured average from that task's own full-golden-set
+# research run ($0.0334 / 264 real gpt-6-luna calls at reasoning_
+# effort="low"), not re-derived from published per-token pricing a
+# second time.
 _EST_USD_PER_EMBED_CALL = 0.00002
-_EST_USD_PER_CHAT_CALL = 0.0028
-_EST_USD_PER_JUDGE_CALL = 0.0004
+_EST_USD_PER_CHAT_CALL = 0.00013
+_EST_USD_PER_JUDGE_CALL = 0.00013
 
 
 @dataclass(frozen=True)

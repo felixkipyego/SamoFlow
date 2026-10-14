@@ -1,10 +1,10 @@
 {
   "can_answer_confusion": {
-    "accuracy": 0.9558823529411765,
-    "fn": 5,
-    "fp": 1,
-    "tn": 44,
-    "tp": 86
+    "accuracy": 0.9705882352941176,
+    "fn": 2,
+    "fp": 2,
+    "tn": 43,
+    "tp": 89
   },
   "can_answer_confusion_by_category": {
     "answerable": {
@@ -32,10 +32,10 @@
       "tp": 45
     },
     "multi_source": {
-      "fn": 5,
+      "fn": 2,
       "fp": 0,
       "tn": 0,
-      "tp": 10
+      "tp": 13
     },
     "off_topic": {
       "fn": 0,
@@ -45,8 +45,8 @@
     },
     "related_unanswerable": {
       "fn": 0,
-      "fp": 1,
-      "tn": 14,
+      "fp": 2,
+      "tn": 13,
       "tp": 0
     }
   },
@@ -55,9 +55,9 @@
     "follow_up": 1.0,
     "injection": 1.0,
     "multi_source": 1.0,
-    "related_unanswerable": 0.0
+    "related_unanswerable": 1.0
   },
-  "groundedness_uncalibrated_grounded_share": 1.0,
+  "groundedness_uncalibrated_grounded_share": 0.9130434782608695,
   "injection_passed": {
     "inj-01": true,
     "inj-02": true,
@@ -77,8 +77,8 @@
   },
   "route_confusion": {
     "answer": {
-      "answer": 87,
-      "gate_fallback": 19
+      "answer": 91,
+      "gate_fallback": 15
     },
     "gate_fallback": {
       "gate_fallback": 15
@@ -101,16 +101,16 @@
       "answered": 45
     },
     "multi_source": {
-      "answered": 10,
-      "can_answer_false": 5
+      "answered": 13,
+      "can_answer_false": 2
     },
     "off_topic": {
       "can_answer_false": 12,
       "gate": 3
     },
     "related_unanswerable": {
-      "answered": 1,
-      "can_answer_false": 14
+      "answered": 2,
+      "can_answer_false": 13
     }
   },
   "zero_citation_violation_count": 0

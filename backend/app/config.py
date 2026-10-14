@@ -215,7 +215,23 @@ class Settings(BaseSettings):
     # PROJECT_SPEC.md's own decision log for the full per-variant table
     # and the 5 remaining false negatives/1 remaining false positive
     # this does NOT fix (read, not guessed, in that same entry).
-    chat_model_primary: str = Field(default="gpt-4o")
+    # RATIFIED at "gpt-6-luna" (was "gpt-4o") by Felix at Task 3.7.i
+    # (2026-10-14), a Settings-only change -- 3.7.h's own filter
+    # ("priced between gpt-4o-mini and gpt-4o") wrongly excluded
+    # cheaper current models; corrected to "cheaper than gpt-4o,
+    # current generation, no shutdown before May 2027". A full-106-item
+    # run, N=3, at `reasoning_effort="low"` (this model's OWN lowest
+    # setting): FP=2 (vs. gpt-4o's 1, within the <=2 bar), FN=2 (vs.
+    # gpt-4o's 5 -- BETTER, not just within the <=6 bar), no category's
+    # correct count dropping by more than 1, injection held 15/15 every
+    # repeat, first-token p50=1176ms/p95=2927ms (within §17's 1500/
+    # 3000ms budget), 0.0% real failures (same as gpt-4o's own 0.0%).
+    # Real cost: ~22x CHEAPER than gpt-4o ($7.0100 -> $0.3147 per 1000
+    # turns, real token counts, published pricing) -- the only
+    # candidate of 3 real ones tested that passed every ship-rule
+    # condition; see PROJECT_SPEC.md's own decision log for the full
+    # per-candidate table, including the two that did not pass and why.
+    chat_model_primary: str = Field(default="gpt-6-luna")
     chat_model_secondary: str = Field(default="claude-haiku-4-5")
     # Task 3.4.b (PART 0 follow-up): a TWO-KEY switch, code-enforced, not
     # just documented -- `app/agent/chat_model.py`'s own `get_chat_model()`
@@ -264,7 +280,36 @@ class Settings(BaseSettings):
     # temperature costs nothing and buys full determinism. Range `[0, 2]`
     # matches OpenAI's own documented bound. **This is a baseline the
     # golden set (Step 3.7) measures and may retune, not a final number.**
-    chat_model_temperature: float = Field(default=0.0, ge=0, le=2)
+    # `float | None` since Task 3.7.i: confirmed live at Task 3.7.h that
+    # some real candidate models (`gpt-6.1-sol`, `o3`) reject a
+    # `temperature` override outright ("Only the default (1) value is
+    # supported") -- `None` means `get_chat_model()` omits the kwarg
+    # entirely for that model, a single declarative Settings value per
+    # model choice, never a per-model-name branch in code (see that
+    # function's own docstring). A model run this way loses the
+    # determinism this field's own history (above) exists to buy --
+    # real, accepted whenever `None` is chosen, not a silent regression;
+    # the golden-set eval's own N>=3 repeated-run ranges are exactly
+    # what surfaces this as a measurable, reported quantity rather than
+    # an invisible one.
+    # Default moved to `None` at Task 3.7.i: the shipped `gpt-6-luna`
+    # (like `gpt-6.1-sol`/`o3`, researched at 3.7.h/i) rejects
+    # `temperature=0.0` outright ("Only the default (1) value is
+    # supported"), confirmed live before shipping. **A real, accepted
+    # determinism loss, not silently absorbed**: `can_answer`'s own N=3
+    # repeated-run ranges (PROJECT_SPEC.md's own Task 3.7.i decision
+    # log) are measurably wider for every reasoning-effort model tested
+    # than they ever were for `gpt-4o` at `temperature=0.0` -- that
+    # variance is the real, visible cost of this change, not a
+    # regression nobody noticed.
+    chat_model_temperature: float | None = Field(default=None, ge=0, le=2)
+    # Task 3.7.i: OpenAI-specific, passed to the primary only (never the
+    # Anthropic secondary, a different provider with no such parameter)
+    # -- `None` omits the kwarg entirely for a model with no reasoning
+    # tiers at all. "low" ratified for the shipped `gpt-6-luna`: its own
+    # LOWEST setting, measured (not guessed) to pass every real
+    # ship-rule condition Task 3.7.i's own full-set research checked.
+    chat_model_reasoning_effort: str | None = Field(default="low")
     # Task 2.6.e: identifies the crawler on every robots.txt/sitemap/page
     # request it makes, matching the Step 2.6 decision entry's own
     # "Settings-configurable, not hardcoded" call -- a placeholder domain
@@ -627,6 +672,17 @@ class Settings(BaseSettings):
         # immediately below: an empty string (the ".env.example default
         # when the secondary provider isn't configured" shape) means "not
         # configured", converted to None here -- not a validation error.
+        if value == "":
+            return None
+        return value
+
+    @field_validator("chat_model_reasoning_effort", mode="before")
+    @classmethod
+    def _empty_chat_model_reasoning_effort_means_omitted(cls, value: object) -> object:
+        # Same shape as anthropic_api_key's own before-validator above --
+        # a third occurrence of this established convention, not a new
+        # one: an empty string means "no reasoning-effort override",
+        # converted to None here so `get_chat_model()` omits the kwarg.
         if value == "":
             return None
         return value
