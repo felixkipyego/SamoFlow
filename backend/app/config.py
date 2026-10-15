@@ -135,16 +135,6 @@ class Settings(BaseSettings):
     # within half an hour" rather than forever -- retuned later with real
     # numbers, like every other estimate in this project.
     job_stuck_after_seconds: float = Field(default=1800, gt=0)
-    # Task 2.2.f: the temporary admin-key mechanism (docs/SPEC.md §12:
-    # "during Phases 2 to 5 the admin endpoints... are protected by a
-    # single secret from the environment"). Required, same discipline as
-    # every other secret here -- an unauthenticated admin surface would
-    # silently work today and silently stay wrong on a real deployment if
-    # this were optional. Explicitly temporary: superseded outright by
-    # Step 6.1's real `platform_admin` role, never extended between now
-    # and then (see PROJECT_SPEC.md's own Open marker and
-    # app/admin/dependencies.py's header comment).
-    admin_api_key: SecretStr = Field(min_length=32)
     # Task 2.1.d: how long worker.py's run() waits between poll attempts
     # when claim_next_job() finds nothing ready -- never a tight spin
     # loop. Same treatment as the fields directly above (plain
@@ -157,8 +147,8 @@ class Settings(BaseSettings):
     worker_poll_interval_seconds: float = Field(default=2, gt=0)
     # Task 2.5.a: the dense-embedding primitive's own API credential
     # (docs/SPEC.md §5.1: "an English embedding model such as
-    # text-embedding-3-small"). Required, same discipline as qdrant_api_key/
-    # admin_api_key -- an unauthenticated embedding call is not a real
+    # text-embedding-3-small"). Required, same discipline as qdrant_api_key
+    # -- an unauthenticated embedding call is not a real
     # failure mode (the API simply refuses it), but a missing key would
     # silently defer the failure from startup to the first real ingestion
     # job, which this project's own "fail loud at startup" pattern exists
@@ -758,6 +748,35 @@ class Settings(BaseSettings):
     # a different cosine-similarity distribution entirely, and this
     # number would not transfer. Re-tune whenever either changes.
     gate_relevance_threshold: float = Field(default=0.20, ge=0.0, le=1.0)
+    # Step 6.1: dashboard login (docs/SPEC.md §12). Two independent
+    # RateLimiter instances (app/ratelimit.py, reused as-is), the same
+    # "sliding window log, per-IP checked first" shape session creation
+    # already established (app/auth/routes.py) -- not a new mechanism.
+    # The per-ACCOUNT instance gates every attempt (success or failure
+    # alike) for one normalized email, which is what gives "rate-limited
+    # login with lockout" its real teeth: 10 attempts per 15 minutes is
+    # already a strong deterrent against online password guessing, while
+    # essentially never affecting a legitimate human (nobody logs in more
+    # than 10 times in 15 minutes under normal use) -- the simplest
+    # correct design, not a separate persisted failed-attempt counter.
+    dashboard_login_rate_limit_per_ip: int = Field(default=20, gt=0)
+    dashboard_login_rate_limit_per_ip_window_seconds: float = Field(default=300.0, gt=0)
+    dashboard_login_rate_limit_per_account: int = Field(default=10, gt=0)
+    dashboard_login_rate_limit_per_account_window_seconds: float = Field(default=900.0, gt=0)
+    # Step 6.1: server-side dashboard sessions (docs/SPEC.md §12: "server-
+    # side sessions... revocable, with idle and absolute expiry" -- this
+    # task's own direct instruction, docs/SPEC.md itself names no
+    # numbers). Idle: how long a session may sit untouched before a
+    # request is refused regardless of its own absolute expiry -- 30
+    # minutes, a conventional admin-dashboard idle window. Absolute: the
+    # hard ceiling on a session's own lifetime regardless of activity,
+    # forcing a real re-login periodically even for an actively-used
+    # session -- 12 hours, long enough to cover one real working day
+    # without re-login, short enough that a stolen, still-active session
+    # cannot be ridden indefinitely. Both retuned later with real usage
+    # data, like every other estimate in this project.
+    dashboard_session_idle_seconds: float = Field(default=1800.0, gt=0)
+    dashboard_session_absolute_seconds: float = Field(default=43200.0, gt=0)
 
     @field_validator("database_url")
     @classmethod
@@ -882,16 +901,6 @@ class Settings(BaseSettings):
             )
         return value
 
-    @field_validator("admin_api_key")
-    @classmethod
-    def _require_a_clean_admin_api_key(cls, value: SecretStr) -> SecretStr:
-        _require_no_whitespace_or_control_chars(
-            value.get_secret_value(),
-            "ADMIN_API_KEY",
-            "it is sent as an HTTP header value; a newline would allow header injection",
-        )
-        return value
-
     @field_validator("jwt_signing_key_previous", mode="before")
     @classmethod
     def _empty_previous_signing_key_means_none(cls, value: object) -> object:
@@ -956,10 +965,6 @@ class Settings(BaseSettings):
     def db_connection_encryption_key_str(self) -> str:
         # The one explicit call that unwraps the secret. Never log this.
         return self.db_connection_encryption_key.get_secret_value()
-
-    def admin_api_key_str(self) -> str:
-        # The one explicit call that unwraps the secret. Never log this.
-        return self.admin_api_key.get_secret_value()
 
     def openai_api_key_str(self) -> str:
         # The one explicit call that unwraps the secret. Never log this.

@@ -14,6 +14,7 @@
 # that imports every package once, so a third future entrypoint gets the
 # property for free by importing this module, with nothing new to remember
 # to register.
+from app.dashboard import models as dashboard_models  # noqa: F401
 from app.handoff import models as handoff_models  # noqa: F401
 from app.ingest import models as ingest_models  # noqa: F401
 from app.plans import models as plans_models  # noqa: F401
