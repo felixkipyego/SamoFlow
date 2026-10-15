@@ -7,10 +7,32 @@
 # manually triggering startup/shutdown outside a real ASGI server run
 # (confirmed live: httpx's installed ASGITransport has no lifespan= option
 # of its own, so this is the correct way, not an assumption).
+import asyncio
 import time
 
 import pytest
 
+# Task 4.3: a real bug found live, not merely reasoned about -- a test
+# body doing a LOCAL `import app.main as main_module` after
+# `test_importing_app_main_succeeds_with_empty_environment`'s own
+# `fresh_import("app.main")` call (below) gets a module object
+# DISCONNECTED from the one `create_app` below was bound to at this
+# file's own import time (fresh_import() pops and re-imports, replacing
+# `sys.modules["app.main"]` -- see its own docstring, tests/conftest.py).
+# Monkeypatching that disconnected object's own attributes (e.g.
+# `sync_usage_counters`) silently has NO EFFECT on the real `_lifespan()`
+# code path `create_app()` actually runs, since that closure resolves
+# names from the ORIGINAL module's globals, confirmed live by a mock
+# that measurably never fired when patched this way, and by a separate,
+# much worse symptom: a real network-timeout Settings field monkeypatched
+# the SAME wrong way silently went back to the real 30s default,
+# producing a real, reproducible multi-hour hang against a genuinely
+# unreachable test address. Fixed: ONE shared `main_module` reference,
+# imported here at file-load time (same moment `create_app` itself is
+# bound), used by every test below instead of a fresh, test-local
+# import -- consistent with `create_app`'s own origin regardless of
+# what `fresh_import()` does to `sys.modules` later in the run.
+import app.main as main_module
 from app import db, qdrant
 from app.config import Settings, SettingsError, get_settings
 from app.main import create_app
@@ -259,53 +281,99 @@ async def test_lifespan_always_reloads_usage_counters_and_marks_ready(monkeypatc
     db._session_factory.cache_clear()
 
 
-async def test_lifespan_closes_the_checkpointer_pool_when_usage_counter_reload_fails(
+async def test_lifespan_survives_a_usage_counter_reload_failure_and_health_stays_up(
     monkeypatch,
 ):
-    # [Correctness] A real bug found live while building this task, not
-    # merely reasoned about: a startup-time failure in the usage-counter
-    # reload (any raised exception) used to leave the checkpointer pool
-    # (already opened one line earlier in _lifespan()) orphaned --
-    # `psycopg_pool`'s own AsyncConnectionPool retries a failed
-    # connection FOREVER in the background by design, so a bare,
-    # unwrapped failure here meant an unbounded stream of retry
-    # attempts and a process that never cleanly finished starting up.
-    # Reproduced here with a genuinely unreachable (TEST-NET-3, RFC
-    # 5737 -- silently dropped, never even a fast "connection refused")
-    # DATABASE_URL, bounded by _lifespan()'s own explicit timeout
-    # (app/main.py's `_USAGE_COUNTER_STARTUP_TIMEOUT_SECONDS`) so this
-    # test itself does not hang for the OS's own much longer TCP
-    # connect timeout. Proves BOTH halves: the real exception propagates
-    # (not swallowed), AND close_checkpointer_pool() was actually called
-    # (via get_checkpointer()/open_checkpointer_pool()'s own module-level
-    # pool reference going back to None -- confirmed by a second
-    # open_checkpointer_pool() call afterward succeeding cleanly, which
-    # would itself raise if the first pool were still considered open).
-    set_valid_env(monkeypatch, VALID_ENV)  # VALID_ENV's own DATABASE_URL is TEST-NET-3
+    # [Correctness] A REAL regression found live, not merely reasoned
+    # about, via the real CI "image" job's own smoke test: an EARLIER
+    # version of this code let a startup-time usage-counter reload
+    # failure propagate and crash the whole lifespan. Reproduced there
+    # with the smoke test's own real `DATABASE_URL=...@postgres:...`
+    # (a hostname that genuinely does not resolve outside docker-
+    # compose's network) -- the container exited immediately
+    # ("Application startup failed. Exiting."), so `/health` was never
+    # reachable at all, directly contradicting docs/SPEC.md §9's own
+    # explicit "the container health check stays healthy" requirement.
+    # Fixed: the reload failure is now caught and logged inside
+    # `_lifespan()` itself, never re-raised.
+    #
+    # A synthetic, monkeypatched failure, deliberately NOT a real
+    # network attempt at a genuinely unreachable address (TEST-NET-3,
+    # RFC 5737, this file's own `VALID_ENV` default) -- an EARLIER
+    # version of this test used exactly that, and a real, reproducible
+    # hang was found live: that address is silently dropped rather than
+    # refused, and across a long test session (this file's own many
+    # prior real checkpointer-pool open/close cycles) the attempt
+    # stopped reliably respecting `asyncio.timeout()`'s own cancellation
+    # -- confirmed live by sending the stuck process a signal, which
+    # unblocked it immediately (the classic signature of a blocking
+    # syscall asyncio could not actually interrupt), and by the test
+    # passing cleanly every time it was run ALONE or in small subsets,
+    # never in the full file. Matches this project's own established
+    # "synthetic failure, not a real one" precedent for exactly this
+    # class of test (`test_main_still_cleans_up_on_a_mid_run_crash`,
+    # `scripts/manual_run_answer_eval.py`'s own tests) -- deterministic
+    # regardless of network/OS state, and exercises the identical
+    # `except Exception` branch in `_sync_usage_counters_once()` a real
+    # failure would reach, without depending on real network timing at
+    # all.
+    database_url = require_test_database()
+    set_valid_env(monkeypatch, VALID_ENV, DATABASE_URL=database_url)
     _clear_engine_and_qdrant_caches()
-    # 1s, not the real 30s default -- this test only needs the TIMEOUT
-    # to fire at all, not the real production bound; monkeypatched on
-    # the module (main_module), not imported as a bare name, since
-    # _lifespan() reads it as a module global at call time.
-    import app.main as main_module
 
-    monkeypatch.setattr(main_module, "_USAGE_COUNTER_STARTUP_TIMEOUT_SECONDS", 1.0)
+    async def _raise(*args, **kwargs):
+        raise RuntimeError("synthetic failure, simulating a real reload failure")
+
+    monkeypatch.setattr(main_module, "sync_usage_counters", _raise)
 
     app = create_app()
-    with pytest.raises(TimeoutError):
-        async with app.router.lifespan_context(app):
-            pass  # pragma: no cover -- startup itself raises first
-
-    from app.agent import checkpointer as checkpointer_module
-
-    # A second open/close cycle must still work cleanly -- proves the
-    # first pool was genuinely closed, not merely that no exception
-    # propagated from this test's own `with pytest.raises()` block.
-    await checkpointer_module.open_checkpointer_pool()
-    await checkpointer_module.close_checkpointer_pool()
+    async with app.router.lifespan_context(app):
+        assert app.state.usage_counters_ready is False
+        async with await http_client(app) as client:
+            response = await client.get("/health")
+        assert response.status_code == 200
 
     db.get_engine.cache_clear()
     db._session_factory.cache_clear()
+
+
+async def test_the_periodic_task_really_ticks_on_its_own_timer(monkeypatch):
+    # The recovery half of the same guarantee: a startup reload that
+    # failed must not stay broken forever. Proves the PERIODIC task
+    # itself genuinely re-runs on a real timer (not merely that calling
+    # the shared retry function once works, already covered above) --
+    # a short real interval, a real test database throughout, and
+    # waiting slightly past one real interval for a SECOND real sync
+    # beyond the one startup already performed.
+    database_url = require_test_database()
+    set_valid_env(
+        monkeypatch,
+        VALID_ENV,
+        DATABASE_URL=database_url,
+        USAGE_COUNTER_SYNC_INTERVAL_SECONDS="0.2",
+    )
+    _clear_engine_and_qdrant_caches()
+    get_settings.cache_clear()
+
+    call_count = 0
+    real_sync = main_module.sync_usage_counters
+
+    async def _counting_sync(session, **kwargs):
+        nonlocal call_count
+        call_count += 1
+        await real_sync(session, **kwargs)
+
+    monkeypatch.setattr(main_module, "sync_usage_counters", _counting_sync)
+
+    app = create_app()
+    async with app.router.lifespan_context(app):
+        assert call_count == 1  # the startup call
+        await asyncio.sleep(0.5)  # well past one 0.2s interval
+        assert call_count >= 2  # the periodic task really ticked on its own
+
+    db.get_engine.cache_clear()
+    db._session_factory.cache_clear()
+    get_settings.cache_clear()
 
 
 async def test_lifespan_disposes_engine_and_closes_qdrant_client_that_were_actually_used(

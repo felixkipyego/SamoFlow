@@ -346,7 +346,34 @@ async def _create_exact_search_collection(client: AsyncQdrantClient, name: str) 
     still approximate -- the right tradeoff at real tenant scale): this
     function exists only for this disposable, eval-only collection,
     never reused in `app/`.
+
+    Real bug found live (full-suite run, not an isolated one): this
+    deliberately targets the SAME real collection name production
+    `retrieve()` hardcodes (`qdrant.COLLECTION_NAME`) -- the whole point
+    is exercising the real retrieval code path against real tenant-
+    isolated data, not a renamed/forked collection, so changing the
+    name is not a valid fix. On the SHARED test-qdrant container a full
+    `pytest` run uses, that collection is routinely already created by
+    OTHER tests calling the idempotent `qdrant.ensure_collection()` on
+    it first (e.g. `tests/test_manual_run_answer_eval.py`'s own sweep
+    tests, which run earlier in file order and never drop the
+    collection, only their own seeded points) -- confirmed live by
+    reproducing the exact 409 ("Collection `knowledge_chunks` already
+    exists!") from a bare `create_collection()` call in that same
+    sequence. This function's own OLD body called `create_collection()`
+    unconditionally, silently assuming it was always the first to touch
+    this name -- false whenever ANY other test shares the container.
+    Fixed to be genuinely idempotent to ITS OWN repeated/collided calls:
+    delete first (confirmed live, `delete_collection()` on a name that
+    does not exist returns `False`, never raises -- safe to call
+    unconditionally), then create. Delete-then-create, not skip-if-
+    exists: a pre-existing collection from another test carries the
+    WRONG (approximate-HNSW) config, and silently reusing it would
+    quietly reintroduce the exact nondeterminism this function exists
+    to prevent -- the whole reason this is a distinct variant of
+    `ensure_collection()` rather than that function reused directly.
     """
+    await client.delete_collection(collection_name=name)
     await client.create_collection(
         collection_name=name,
         vectors_config={
