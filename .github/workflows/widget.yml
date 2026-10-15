@@ -52,11 +52,17 @@ jobs:
       - name: Lint
         run: npm run lint
 
-      - name: Unit tests
-        run: npm test
-
       - name: Build
         run: npm run build
+
+      # Must run after Build: loader/test/size-budget.test.mjs measures
+      # the real dist/widget.js, which only Build produces (Task 5.1
+      # Part A's own CI-failure root cause -- this order was backwards
+      # before, and locally invisible because every manual verification
+      # run during Step 5.1 happened to call `npm run build` first,
+      # every single time, by habit, not because anything enforced it).
+      - name: Unit tests
+        run: npm test
 
       - name: Size budget
         run: npm run size

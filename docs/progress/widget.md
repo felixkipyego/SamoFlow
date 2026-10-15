@@ -201,6 +201,81 @@ correctly reported not-yet-built. `npm run test:e2e` — 1 passed, stable
 across 3 runs (after the fixture fix above). `npm audit` — 0
 vulnerabilities.
 
+## Part A — widget.yml CI was red on `main`, fixed with root cause (2026-10-15)
+
+**Symptom**: Felix reported both `widget.yml` runs so far (push `5ecf8d9`,
+run #1; a Dependabot PR bumping `actions/setup-node` 5.0.0→7.1.0, run #2)
+failed in CI in ~16-19s, despite every step passing locally at Step 5.1's
+own close-out.
+
+**Root cause, found via the real GitHub Actions API** (`gh` is not
+installed in this environment; the repo's public, unauthenticated REST API
+was enough: `GET /repos/.../actions/workflows/{id}/runs`, then
+`/actions/runs/{id}/jobs`): both runs show an IDENTICAL step-level
+breakdown — Checkout/Set up Node/Install/Lint all `success`, **Unit tests
+`failure`**, everything after (Build, Size budget, Playwright install, the
+e2e test, Audit) `skipped`. This by itself rules out every Node-version/
+lockfile/action-SHA hypothesis the task prompt suggested checking: run #2
+used a DIFFERENT `actions/setup-node` version (7.1.0, not 5.0.0) than run
+#1 and failed at the exact same step with the exact same shape, and "Set
+up Node"/"Install" both succeeded in both runs. The real cause was a
+step-ordering bug in `widget.yml` itself: **"Unit tests" (`npm test`) was
+placed BEFORE "Build" (`npm run build`)**, but
+`loader/test/size-budget.test.mjs` asserts the real gzipped size of
+`dist/widget.js`, which only the Build step produces — on a clean
+checkout, `npm test` alone finds no `dist/` at all.
+
+This was invisible in every local verification run during Step 5.1's own
+close-out for a specific, identifiable reason: I manually ran `npm run
+build` immediately before `npm test`, every single time, as part of my
+own ad hoc verification sequencing — never once in the literal order the
+committed `widget.yml` actually specifies. Confirmed by direct
+reproduction: temporarily restoring the OLD (pre-fix) `widget.yml`
+against a clean `dist/` and running the steps in that file's own real
+order reproduces the exact CI failure, byte-for-byte the same assertion
+message (`dist/widget.js was not found -- run \`npm run build\` before
+\`npm test\``); restoring the fix and re-running end to end passes cleanly.
+
+**Fix**: reordered `widget.yml` to Install → Lint → Build → Unit tests →
+Size budget → Playwright install → e2e → Audit (Build moved before Unit
+tests; everything else unchanged).
+
+**New tool, so this class of bug cannot recur silently**:
+`widget/scripts/run-ci-locally.mjs` (stdlib only) reads the real
+`.github/workflows/widget.yml`, extracts the `widget` job's `run:` lines
+IN THEIR REAL COMMITTED ORDER, and executes each one with
+`cwd: widget/` (matching the workflow's own `defaults.run.working-directory`)
+— deliberately driven from the real file rather than a hand-written
+second copy of the step list, so a future reordering is caught by this
+same script automatically, not only by a parallel list someone has to
+remember to update. Wired as `npm run ci:local`. Proved it actually
+catches this exact bug (not just that it runs): pointed at the OLD
+`widget.yml` with a clean `dist/`, it reproduces the real failure
+character-for-character; pointed at the fixed file, it passes end to end
+(`npm ci` → lint → build → unit tests → size → Playwright install → e2e →
+audit, all real, all green).
+
+**New process rule** (written here and into PROJECT_SPEC.md §11.5 point
+6, per direct instruction): a brand-new workflow file is not "verified"
+or "passing" on my own say-so until its first REAL CI run is observed
+green — my previous report's "confirmed live... widget.yml... covered by
+test_ci_guard.py" language was true of the generic structural checks, but
+I should not have let that read as the workflow itself being proven; it
+wasn't, and in fact wasn't even correct. From here on such a claim is
+reported as "pending Felix's confirmation" until a real green run is
+seen (here, via the public Actions API — ``GET
+/repos/felixkipyego/SamoFlow/actions/workflows/385684958/runs`` — which I
+checked directly rather than assuming the fix is sufficient).
+
+**Status of this fix, stated precisely, not overclaimed**: the local
+`run-ci-locally.mjs` reproduction is strong evidence the ordering fix is
+correct, but it is run on my own machine, not GitHub's `ubuntu-24.04`
+runner — it does not by itself prove the real run will be green (a
+runner-specific issue, e.g. a resource constraint during the Playwright
+browser install, remains possible and was never the failure mode observed
+here anyway). **Pending Felix's confirmation that the real push's
+`widget.yml` run on `main` is green.**
+
 **Verified** (backend/, using the correct `/opt/miniconda3/envs/widgetplatform`
 Python 3.12.14 interpreter): `ruff check backend evals hooks.py` — all
 checks passed. `python -m pytest tests -q` — **1063 passed, 422 skipped**,

@@ -9,7 +9,8 @@
     "test": "node --test loader/test/*.test.mjs",
     "test:e2e": "playwright test",
     "lint": "eslint .",
-    "size": "node scripts/check-size.mjs"
+    "size": "node scripts/check-size.mjs",
+    "ci:local": "node scripts/run-ci-locally.mjs"
   },
   "devDependencies": {
     "@eslint/js": "10.0.1",
