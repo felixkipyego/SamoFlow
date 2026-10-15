@@ -37,7 +37,7 @@ UV_COMPILE = uv pip compile backend/pyproject.toml --universal --python-version 
 
 .DEFAULT_GOAL := help
 
-.PHONY: help env up down down-volumes migrate test test-db test-db-down test-qdrant test-qdrant-down test-all lint evals eval eval-answers eval-calibrate install lock lock-upgrade lock-check audit hooks
+.PHONY: help env up down down-volumes migrate test test-db test-db-down test-qdrant test-qdrant-down test-all lint evals eval eval-answers eval-calibrate install lock lock-upgrade lock-check audit hooks openapi
 
 help:
 	@echo "make env          create .env from .env.example if it does not exist yet"
@@ -62,6 +62,7 @@ help:
 	@echo "make lock-check   fail if the committed lockfiles are out of date"
 	@echo "make audit        pip-audit against both lockfiles"
 	@echo "make hooks        list TODO/ASSUMPTION/UNCERTAIN/NOTE markers (never fails)"
+	@echo "make openapi      regenerate docs/openapi.json (the locked API contract, §11.5)"
 
 # Never overwrites an existing .env. Every target below that touches
 # $(COMPOSE) depends on this.
@@ -193,6 +194,9 @@ install:
 # Regenerates both lockfiles with the same uv invocation as Task 1.1.o.b,
 # overwriting the committed files. No --upgrade: existing pins are kept
 # unless something about the dependency graph itself changed.
+openapi:
+	cd backend && python scripts/generate_openapi_schema.py
+
 lock:
 	$(UV_COMPILE) -o backend/requirements.lock
 	$(UV_COMPILE) --extra dev -c backend/requirements.lock -o backend/requirements-dev.lock

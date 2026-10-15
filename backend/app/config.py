@@ -381,12 +381,15 @@ class Settings(BaseSettings):
     chat_model_reasoning_effort: str | None = Field(default="low")
     # Task 2.6.e: identifies the crawler on every robots.txt/sitemap/page
     # request it makes, matching the Step 2.6 decision entry's own
-    # "Settings-configurable, not hardcoded" call -- a placeholder domain
-    # (samoflow.app), since the real production domain isn't decided yet;
-    # kept easy to change later rather than baked into a constant. Not a
-    # secret (no SecretStr): a User-Agent string is sent in plaintext on
-    # every outbound request by design, nothing to protect.
-    crawl_user_agent: str = Field(default="SamoFlowBot/1.0 (+https://samoflow.app/bot)")
+    # "Settings-configurable, not hardcoded" call. Kickoff decision #6
+    # (2026-10-15): the real domain is softwareske.com, replacing the
+    # samoflow.app placeholder this field carried while the domain was
+    # still undecided -- still Settings-configurable, not baked into a
+    # constant, per that same decision's own "every hostname comes from
+    # Settings... never hardcoded" rule. Not a secret (no SecretStr): a
+    # User-Agent string is sent in plaintext on every outbound request
+    # by design, nothing to protect.
+    crawl_user_agent: str = Field(default="SamoFlowBot/1.0 (+https://softwareske.com/bot)")
     # Task 2.6.e part 2: docs/SPEC.md §5.5 names "a delay" between
     # requests to the same host but gives no specific number (unlike the
     # fetch-limit numbers 2.3 owns, which §5.5 states exactly) -- same
