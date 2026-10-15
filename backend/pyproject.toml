@@ -240,6 +240,60 @@ dependencies = [
     # convention, unlike opentelemetry-api/-sdk themselves, which are
     # stable 1.x), not a stray pre-release accidentally picked up.
     "opentelemetry-instrumentation-fastapi==0.66b1",
+    # Step 6.1 [SECURITY]: docs/SPEC.md §12's own direct instruction --
+    # "use a maintained auth library rather than hand-rolling" -- and
+    # Felix's own 2026-10-15 correction naming the pick explicitly.
+    # fastapi-users is the maintained, actively-developed (15.0.5
+    # current, re-verified live on PyPI at this task's own build time)
+    # standard choice for a FastAPI+SQLAlchemy user/session stack: a
+    # real user table adapter (SQLAlchemyUserDatabase), a pluggable
+    # password-hashing layer already defaulting to argon2id, and a
+    # pluggable session-storage strategy (DatabaseStrategy -- server-
+    # side, revocable sessions, not JWT) this project extends (app/
+    # dashboard/auth_backend.py's own HashedDatabaseStrategy) rather
+    # than hand-rolls, for the two properties it does not provide out
+    # of the box: hashing the stored token (its own default stores the
+    # raw token, confirmed by reading DatabaseStrategy's own source
+    # before adopting it) and idle expiry (its own `lifetime_seconds`
+    # is absolute-only). The `[sqlalchemy]` extra pulls fastapi-users-
+    # db-sqlalchemy (>=7.0.0, resolves to 7.0.0, the real adapter this
+    # project's own Postgres-backed User/DashboardSession tables use).
+    # Alternatives considered: Authlib (OAuth/OIDC-focused, the wrong
+    # shape for a first-party email/password login); hand-rolling a
+    # second time with only argon2-cffi (the literal thing docs/SPEC.md
+    # §12 says not to do). Real, accepted footprint cost, not hidden:
+    # fastapi-users' own hard (non-extra-gated) dependencies pull in
+    # python-multipart and email-validator (used by its own OAuth2-
+    # form/EmailStr-schema machinery, which this project's own routes
+    # do not use -- see app/dashboard/routes.py's own header comment
+    # for why custom JSON routes are built instead of its generated
+    # routers) and, via its own `pyjwt[crypto]` requirement, a new
+    # `cryptography` transitive package (unused here -- this project's
+    # own widget JWT stays HS256-only via the already-pinned bare
+    # `pyjwt`, docs/SPEC.md §4.3; fastapi-users' own JWT strategy is
+    # never used, only its DatabaseStrategy).
+    "fastapi-users[sqlalchemy]==15.0.5",
+    # Pinned to the EXACT version fastapi-users==15.0.5 itself requires
+    # (pwdlib[argon2,bcrypt]==15.0.5's own Requires-Dist -- a hard
+    # `==0.3.0`, not a range, confirmed by reading that wheel's own
+    # METADATA before pinning here, not guessed) -- a real, direct
+    # `from pwdlib...import` exists in app/dashboard/passwords.py
+    # (configuring the real argon2id parameters explicitly), matching
+    # this project's own established "a real direct import earns its
+    # own explicit pin" rule (pyyaml's own precedent, Task 3.4.f) rather
+    # than relying on fastapi-users' own transitive pin alone.
+    "pwdlib==0.3.0",
+    # Step 6.1: argon2id password hashing (docs/SPEC.md §12), the
+    # engine pwdlib's own Argon2Hasher wraps. Version re-verified live
+    # on PyPI at this task's own build time (`pip index versions
+    # argon2-cffi` -> 25.1.0). app/dashboard/passwords.py passes its
+    # own parameters explicitly (time_cost=3, memory_cost=65536 KiB,
+    # parallelism=4, type=Type.ID) -- comfortably above OWASP's 2026
+    # minimum (memory>=19456 KiB, time>=2, parallelism>=1) -- rather
+    # than relying on either library's own unstated default, so a
+    # future upstream change cannot silently downgrade this project's
+    # own parameters without the explicit values here also changing.
+    "argon2-cffi==25.1.0",
 ]
 
 [project.optional-dependencies]

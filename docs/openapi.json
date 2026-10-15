@@ -122,6 +122,60 @@
         "title": "ConversationSummary",
         "type": "object"
       },
+      "DashboardSessionResponse": {
+        "properties": {
+          "tenant": {
+            "$ref": "#/components/schemas/DashboardTenant"
+          },
+          "user": {
+            "$ref": "#/components/schemas/DashboardUser"
+          }
+        },
+        "required": [
+          "user",
+          "tenant"
+        ],
+        "title": "DashboardSessionResponse",
+        "type": "object"
+      },
+      "DashboardTenant": {
+        "properties": {
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "name"
+        ],
+        "title": "DashboardTenant",
+        "type": "object"
+      },
+      "DashboardUser": {
+        "properties": {
+          "email": {
+            "title": "Email",
+            "type": "string"
+          },
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "email"
+        ],
+        "title": "DashboardUser",
+        "type": "object"
+      },
       "EscalationRequest": {
         "additionalProperties": false,
         "properties": {
@@ -195,6 +249,25 @@
           }
         },
         "title": "HTTPValidationError",
+        "type": "object"
+      },
+      "LoginRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "email": {
+            "title": "Email",
+            "type": "string"
+          },
+          "password": {
+            "title": "Password",
+            "type": "string"
+          }
+        },
+        "required": [
+          "email",
+          "password"
+        ],
+        "title": "LoginRequest",
         "type": "object"
       },
       "SessionRequest": {
@@ -298,6 +371,13 @@
         "title": "ValidationError",
         "type": "object"
       }
+    },
+    "securitySchemes": {
+      "APIKeyCookie": {
+        "in": "cookie",
+        "name": "__Host-session",
+        "type": "apiKey"
+      }
     }
   },
   "info": {
@@ -306,6 +386,78 @@
   },
   "openapi": "3.1.0",
   "paths": {
+    "/api/v1/admin/domains/{domain_id}/revoke": {
+      "post": {
+        "operationId": "revoke_domain_route_api_v1_admin_domains__domain_id__revoke_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "domain_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Domain Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Revoke Domain Route Api V1 Admin Domains  Domain Id  Revoke Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "APIKeyCookie": []
+          }
+        ],
+        "summary": "Revoke Domain Route"
+      }
+    },
+    "/api/v1/admin/me": {
+      "get": {
+        "operationId": "admin_whoami_api_v1_admin_me_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Admin Whoami Api V1 Admin Me Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "security": [
+          {
+            "APIKeyCookie": []
+          }
+        ],
+        "summary": "Admin Whoami"
+      }
+    },
     "/api/v1/chat": {
       "post": {
         "operationId": "create_chat_turn_api_v1_chat_post",
@@ -450,6 +602,94 @@
           }
         },
         "summary": "Get Conversation Messages"
+      }
+    },
+    "/api/v1/dashboard/auth/csrf": {
+      "get": {
+        "operationId": "issue_csrf_cookie_api_v1_dashboard_auth_csrf_get",
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Issue Csrf Cookie"
+      }
+    },
+    "/api/v1/dashboard/auth/login": {
+      "post": {
+        "operationId": "login_api_v1_dashboard_auth_login_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LoginRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DashboardSessionResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Login"
+      }
+    },
+    "/api/v1/dashboard/auth/logout": {
+      "post": {
+        "operationId": "logout_api_v1_dashboard_auth_logout_post",
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          }
+        },
+        "security": [
+          {
+            "APIKeyCookie": []
+          }
+        ],
+        "summary": "Logout"
+      }
+    },
+    "/api/v1/dashboard/auth/me": {
+      "get": {
+        "operationId": "me_api_v1_dashboard_auth_me_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DashboardSessionResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "security": [
+          {
+            "APIKeyCookie": []
+          }
+        ],
+        "summary": "Me"
       }
     },
     "/api/v1/session": {

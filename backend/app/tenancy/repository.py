@@ -53,7 +53,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import InstrumentedAttribute
 from sqlalchemy.sql import func
 
-from app.auth.secrets import hash_visitor_secret
+from app.auth.secrets import generate_visitor_secret, hash_visitor_secret
 from app.db import violated_constraint_name
 from app.tenancy.models import Conversation, SiteKey, Tenant, Visitor
 
@@ -77,6 +77,23 @@ async def create_tenant(session: AsyncSession, name: str, status: str) -> Tenant
     session.add(tenant)
     await session.flush()
     return tenant
+
+
+def generate_site_key() -> str:
+    """Step 6.1: the real `pk_live_...` generator this project's own §9
+    marker (recorded at the Step 1.4 breakdown, 2026-09-28) has named
+    since Task 1.2.b first defined the `site_keys.key` column -- no prior
+    task built one; test fixtures used hand-typed literal strings. A
+    plain `pk_live_` prefix (matching 1.2.b's own column comment, a
+    convention this value already follows in every existing test/
+    example) plus a real 256-bit random suffix, the SAME entropy and
+    primitive `generate_visitor_secret()` already uses (app.auth.secrets)
+    -- not reimplemented here as a second random-token function. The
+    prefix is cosmetic/identification only, never load-bearing for
+    uniqueness: `create_site_key()`'s own `ix_site_keys_key` unique index
+    still does the real work either way.
+    """
+    return f"pk_live_{generate_visitor_secret()}"
 
 
 async def get_site_key_by_key(session: AsyncSession, key: str) -> SiteKey | None:
@@ -172,6 +189,34 @@ class TenantScopedRepository:
                 raise
             await self.session.rollback()
             raise SiteKeyAlreadyExistsError(f"site key {key!r} already exists") from exc
+        return site_key
+
+    async def set_site_key_status(
+        self, site_key_id: uuid.UUID, status: str
+    ) -> SiteKey | None:
+        """Step 6.1: the platform-admin CLI's own `issue-site-key`/
+        `revoke-site-key` commands (app/dashboard/admin_cli.py) -- moves
+        a site key between its own closed vocabulary (draft/live/
+        suspended, ck_site_keys_status). No Python-side validation of
+        `status` here, matching claim_domain()'s own established
+        precedent for a closed-vocabulary column: the CHECK constraint
+        is the one place that vocabulary is enforced, an invalid value
+        fails loudly via IntegrityError rather than being silently
+        pre-rejected a second time. Returns None for a site_key_id that
+        does not exist or belongs to another tenant -- both look
+        identical, matching this repository's own established "wrong
+        tenant looks exactly like missing" philosophy.
+        """
+        result = await self.session.execute(
+            select(SiteKey).where(
+                SiteKey.id == site_key_id, SiteKey.tenant_id == self.tenant_id
+            )
+        )
+        site_key = result.scalar_one_or_none()
+        if site_key is None:
+            return None
+        site_key.status = status
+        await self.session.flush()
         return site_key
 
     async def get_visitor_by_id(self, vid: uuid.UUID) -> Visitor | None:

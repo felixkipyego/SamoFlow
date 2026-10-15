@@ -1,8 +1,9 @@
 # backend/tests/test_layout_placeholders.py
-# Task 1.1.l: widget/ and dashboard/ are placeholder folders (no build
-# tooling, no source code, no config) until their owning steps (5.1 and
-# 6.1) pick the bundler/tooling. This guards both properties: each README
-# still exists and names its owning step, and no other file has crept in.
+# Task 1.1.l: widget/ and dashboard/ were placeholder folders (no build
+# tooling, no source code, no config) until their owning steps (5.1/5.2
+# and 6.1) picked their own bundler/tooling. This guards two properties
+# for whichever of them is still a placeholder: each README still
+# exists and names its owning step, and no other file has crept in.
 #
 # Narrowed at Step 5.1 (per the Owner-5.1 §9 marker this test's own
 # original entry recorded): widget/ tooling is now chosen and real
@@ -11,8 +12,13 @@
 # widget/loader. Narrowed again at Step 5.2 (2026-10-15, the identical
 # §9 marker, same owning track): widget/chat/ now also has real tooling
 # (widget/chat/src/, widget/chat/test/), so both requirements are
-# dropped for it too. Only dashboard/ (6.1, not started; Owner-6.1
-# marker still open) remains guarded.
+# dropped for it too. Narrowed a third time at Step 6.1 (2026-10-15, the
+# dashboard track's own §9 marker): dashboard/ now also has real tooling
+# (Vite + React + TypeScript + shadcn/ui, per the 2026-09-28 decision
+# log entry's own "final decision... at the Step 6.1 breakdown") -- no
+# folder this test tracks is still a placeholder, but the mechanism
+# stays (rather than deleting this file outright) in case a later
+# folder ever needs the identical placeholder-guard shape again.
 from tests.conftest import REPO_ROOT
 
 _READMES = {
@@ -21,17 +27,9 @@ _READMES = {
     REPO_ROOT / "dashboard" / "README.md": "6.1",
 }
 
-_STILL_PLACEHOLDER_READMES = {
-    path: step
-    for path, step in _READMES.items()
-    if path
-    not in (
-        REPO_ROOT / "widget" / "loader" / "README.md",
-        REPO_ROOT / "widget" / "chat" / "README.md",
-    )
-}
+_STILL_PLACEHOLDER_READMES: dict = {}
 
-_PLACEHOLDER_ROOTS = (REPO_ROOT / "dashboard",)
+_PLACEHOLDER_ROOTS: tuple = ()
 
 
 def test_readmes_exist_and_are_non_empty():
@@ -52,7 +50,7 @@ def test_still_placeholder_readmes_say_placeholder():
         assert "placeholder" in text.lower(), f"{path} does not say it is a placeholder"
 
 
-def test_dashboard_contains_only_readmes_and_folders():
+def test_placeholder_roots_contain_only_readmes_and_folders():
     for root in _PLACEHOLDER_ROOTS:
         for path in root.rglob("*"):
             if path.is_dir():

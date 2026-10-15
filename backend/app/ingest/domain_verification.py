@@ -213,3 +213,28 @@ async def check_meta_tag_verification(domain: str, expected_token: str) -> bool:
     if tag is None:
         return False
     return tag.get("content", "").strip() == expected_token
+
+
+def normalize_domain(raw: str) -> str | None:
+    """Step 6.1: closes the other half of the §9 marker recorded at the
+    Step 1.4 breakdown (2026-09-28), extended to this column at Task
+    2.2.a -- "the same structural problem (a tenant-typed hostname), the
+    same owner, the same fix once Step 6 builds it". Unlike app.auth.
+    origin.normalize_origin() (allowed_origins, a full scheme://host[:
+    port] origin), a verified_domains.domain value is a bare hostname --
+    confirmed by reading claim_domain()'s own real callers and every
+    example in this codebase before writing this, not assumed. Rejects
+    (returns None for) anything containing a scheme, path, port,
+    whitespace, or wildcard character -- this function normalizes
+    CASE only, it does not try to extract a hostname out of a
+    caller-supplied URL (a dashboard field asking for "your domain" and
+    receiving a full URL is a user-input-shape question for Step 6.3's
+    own form validation to handle, not something to silently repair
+    here).
+    """
+    stripped = raw.strip()
+    if not stripped or any(ch.isspace() for ch in stripped):
+        return None
+    if any(ch in stripped for ch in ("*", "/", ":", "@")):
+        return None
+    return stripped.lower()

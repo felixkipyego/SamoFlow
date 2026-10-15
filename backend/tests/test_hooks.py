@@ -83,7 +83,7 @@ def _run_hooks(cwd) -> str:
     return result.stdout
 
 
-def test_the_real_repository_marker_count_is_67():
+def test_the_real_repository_marker_count_is_64():
     # The real, live regression this task's own exclusion exists for:
     # Task 3.7.d's own injection-detector constant and its test both
     # mirror real planted-injection text verbatim, which happens to
@@ -156,11 +156,30 @@ def test_the_real_repository_marker_count_is_67():
     # real removal, app/telemetry/service.py's own Step-1.1b-era stub
     # marker (the real init_tracing()/record_trace() replaced that
     # whole stub). No other marker moved.
+    # 67 -> 64 at Step 6.1 (2026-10-15), real, not accidental: diffed
+    # `python hooks.py` output before/after directly before re-pinning.
+    # Three real removals: app/admin/routes.py's own Step-1.1b-era stub
+    # comment (one of this scanner's own third trigger word, one of its
+    # fourth) was replaced wholesale when this task fixed its stale
+    # deferred-to-6.5 reference (the temporary admin-key mechanism it
+    # named is removed outright in this same task, not merely deferred);
+    # backend/tests/test_config_guard.py's own ALLOWED_ADMIN_API_KEY_
+    # CALLERS comment (the scanner's own fourth trigger word) is gone
+    # along with that allow-list (admin_api_key_str() no longer exists
+    # at all). Zero real additions: app/dashboard/ (this task's own new
+    # package) and app/admin/routes.py's own real new code carry none of
+    # this scanner's own four trigger words -- every other line-number
+    # shift in the diff is the same pre-existing instance moving because
+    # code was added above it in the same file, not a new one.
+    # (Deliberately avoids spelling any of the four trigger words
+    # literally anywhere in THIS comment, matching the established
+    # convention immediately above in this same file -- this file is
+    # itself scanned.)
     stdout = _run_hooks(REPO_ROOT)
     first_line = stdout.splitlines()[0]
     count = int(first_line.split()[0])
-    assert count == 67, (
-        f"expected 67 markers against the real repository, got {count} -- "
+    assert count == 64, (
+        f"expected 64 markers against the real repository, got {count} -- "
         f"either a real marker was added/removed, or the exclusion below "
         f"needs revisiting:\n{stdout}"
     )

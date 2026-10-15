@@ -1,0 +1,222 @@
+# backend/tests/test_dashboard_admin_cli.py
+# Step 6.1: app/dashboard/admin_cli.py -- the platform-admin CLI commands
+# (create-tenant, assign-plan, issue-site-key, revoke-site-key,
+# revoke-domain, seed-plans), against the live test database.
+import uuid
+from argparse import Namespace
+
+import pytest
+import sqlalchemy as sa
+
+from app.dashboard.admin_cli import (
+    AdminCliError,
+    cmd_assign_plan,
+    cmd_create_tenant,
+    cmd_issue_site_key,
+    cmd_revoke_domain,
+    cmd_revoke_site_key,
+    cmd_seed_plans,
+)
+from app.ingest.models import VerifiedDomain
+from app.plans.models import Plan
+from app.plans.schemas import PlanLimits
+from app.tenancy.models import SiteKey, Tenant
+from tests.conftest import db_session
+
+
+async def test_create_tenant_creates_a_real_active_tenant(reset_test_database):
+    await cmd_create_tenant(Namespace(name="Acme Inc"))
+
+    async with db_session() as session:
+        tenant = (
+            await session.execute(sa.select(Tenant).where(Tenant.name == "Acme Inc"))
+        ).scalar_one()
+        assert tenant.status == "active"
+
+
+async def test_seed_plans_creates_the_two_pilot_plans(reset_test_database):
+    await cmd_seed_plans(Namespace())
+
+    async with db_session() as session:
+        plans = (await session.execute(sa.select(Plan))).scalars().all()
+        names_to_quota = {p.name: PlanLimits.model_validate(p.limits) for p in plans}
+        assert names_to_quota["Starter"].ai_message_quota_per_month == 10_000
+        assert names_to_quota["Growth"].ai_message_quota_per_month == 25_000
+
+
+async def test_seed_plans_is_idempotent(reset_test_database):
+    await cmd_seed_plans(Namespace())
+    await cmd_seed_plans(Namespace())
+
+    async with db_session() as session:
+        count = (await session.execute(sa.select(sa.func.count()).select_from(Plan))).scalar_one()
+        assert count == 2
+
+
+async def test_assign_plan_sets_tenant_plan_id(reset_test_database):
+    await cmd_seed_plans(Namespace())
+    async with db_session() as session:
+        tenant = Tenant(name="Acme Inc", status="active")
+        session.add(tenant)
+        await session.flush()
+        tenant_id = tenant.id
+        plan = (await session.execute(sa.select(Plan).where(Plan.name == "Starter"))).scalar_one()
+        await session.commit()
+
+    await cmd_assign_plan(Namespace(tenant_id=tenant_id, plan_id=plan.id))
+
+    async with db_session() as session:
+        refreshed = (
+            await session.execute(sa.select(Tenant).where(Tenant.id == tenant_id))
+        ).scalar_one()
+        assert refreshed.plan_id == plan.id
+
+
+async def test_assign_plan_rejects_an_unknown_tenant(reset_test_database):
+    await cmd_seed_plans(Namespace())
+    async with db_session() as session:
+        plan = (await session.execute(sa.select(Plan).where(Plan.name == "Starter"))).scalar_one()
+    with pytest.raises(AdminCliError):
+        await cmd_assign_plan(Namespace(tenant_id=uuid.uuid4(), plan_id=plan.id))
+
+
+async def test_issue_site_key_creates_a_draft_key_with_normalized_origins(reset_test_database):
+    async with db_session() as session:
+        tenant = Tenant(name="Acme Inc", status="active")
+        session.add(tenant)
+        await session.commit()
+        tenant_id = tenant.id
+
+    await cmd_issue_site_key(
+        Namespace(
+            tenant_id=tenant_id,
+            allowed_origin=["HTTPS://Widget.Example:443/"],
+            environment="production",
+            status="draft",
+        )
+    )
+
+    async with db_session() as session:
+        site_key = (
+            await session.execute(sa.select(SiteKey).where(SiteKey.tenant_id == tenant_id))
+        ).scalar_one()
+        assert site_key.key.startswith("pk_live_")
+        assert site_key.allowed_origins == ["https://widget.example"]
+        assert site_key.status == "draft"
+
+
+async def test_issue_site_key_can_set_status_live_directly(reset_test_database):
+    async with db_session() as session:
+        tenant = Tenant(name="Acme Inc", status="active")
+        session.add(tenant)
+        await session.commit()
+        tenant_id = tenant.id
+
+    await cmd_issue_site_key(
+        Namespace(
+            tenant_id=tenant_id,
+            allowed_origin=["https://widget.example"],
+            environment="production",
+            status="live",
+        )
+    )
+
+    async with db_session() as session:
+        site_key = (
+            await session.execute(sa.select(SiteKey).where(SiteKey.tenant_id == tenant_id))
+        ).scalar_one()
+        assert site_key.status == "live"
+
+
+async def test_issue_site_key_rejects_a_wildcard_origin(reset_test_database):
+    async with db_session() as session:
+        tenant = Tenant(name="Acme Inc", status="active")
+        session.add(tenant)
+        await session.commit()
+        tenant_id = tenant.id
+
+    with pytest.raises(AdminCliError):
+        await cmd_issue_site_key(
+            Namespace(
+                tenant_id=tenant_id,
+                allowed_origin=["https://*.example"],
+                environment="production",
+                status="draft",
+            )
+        )
+
+
+async def test_revoke_site_key_suspends_it(reset_test_database):
+    async with db_session() as session:
+        tenant = Tenant(name="Acme Inc", status="active")
+        session.add(tenant)
+        await session.flush()
+        site_key = SiteKey(
+            tenant_id=tenant.id,
+            key="pk_live_test",
+            allowed_origins=["https://widget.example"],
+            environment="production",
+            status="live",
+        )
+        session.add(site_key)
+        await session.commit()
+        tenant_id, site_key_id = tenant.id, site_key.id
+
+    await cmd_revoke_site_key(Namespace(tenant_id=tenant_id, site_key_id=site_key_id))
+
+    async with db_session() as session:
+        refreshed = (
+            await session.execute(sa.select(SiteKey).where(SiteKey.id == site_key_id))
+        ).scalar_one()
+        assert refreshed.status == "suspended"
+
+
+async def test_revoke_site_key_rejects_another_tenants_key(reset_test_database):
+    async with db_session() as session:
+        tenant_a = Tenant(name="Tenant A", status="active")
+        tenant_b = Tenant(name="Tenant B", status="active")
+        session.add_all([tenant_a, tenant_b])
+        await session.flush()
+        site_key = SiteKey(
+            tenant_id=tenant_a.id,
+            key="pk_live_test",
+            allowed_origins=[],
+            environment="production",
+            status="live",
+        )
+        session.add(site_key)
+        await session.commit()
+        tenant_b_id, site_key_id = tenant_b.id, site_key.id
+
+    with pytest.raises(AdminCliError):
+        await cmd_revoke_site_key(Namespace(tenant_id=tenant_b_id, site_key_id=site_key_id))
+
+
+async def test_revoke_domain_revokes_a_real_domain(reset_test_database):
+    async with db_session() as session:
+        tenant = Tenant(name="Acme Inc", status="active")
+        session.add(tenant)
+        await session.flush()
+        domain = VerifiedDomain(
+            tenant_id=tenant.id,
+            domain="example.com",
+            status="verified",
+            method="dns",
+            verification_token="tok",  # noqa: S106 (test fixture value, not a real secret)
+        )
+        session.add(domain)
+        await session.commit()
+        domain_id = domain.id
+
+    await cmd_revoke_domain(Namespace(domain_id=domain_id, actor="admin@example.com"))
+
+    async with db_session() as session:
+        refreshed = (
+            await session.execute(sa.select(VerifiedDomain).where(VerifiedDomain.id == domain_id))
+        ).scalar_one()
+        assert refreshed.status == "revoked"
+
+
+async def test_revoke_domain_rejects_an_unknown_id(reset_test_database):
+    with pytest.raises(AdminCliError):
+        await cmd_revoke_domain(Namespace(domain_id=uuid.uuid4(), actor="admin@example.com"))
