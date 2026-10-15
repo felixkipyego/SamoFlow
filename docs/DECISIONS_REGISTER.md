@@ -48,7 +48,7 @@ APPROVED, CANDIDATE, or SUPERSEDED-by-`<id>`.
 | D-1.3-hnsw | 2026-09-28 | Multitenancy HNSW tuning | `hnsw_config.m=0` + per-tenant `payload_m`, recommended by Qdrant for multi-tenant scale — NOT built now | CANDIDATE | owner Phase 7 | :271, 6879 |
 | D-1.3-filter | 2026-09-28 | Hybrid isolation filter placement | Filter required in BOTH dense+sparse Prefetch (mandated); outer-query filter added as defense-in-depth (confirmed no behavior change) | APPROVED | 1.3→3.1 | :275-287 |
 | D-1.3-guard | 2026-09-28 | Qdrant read-path guard | Import-confinement (who can hold a client) is primary; method-name classification only applies within that allow-list; snapshot/recreate/delete methods forbidden everywhere | APPROVED | 1.3 | :293-295 |
-| D-shadcn | 2026-09-28 | Dashboard component library | shadcn/ui is the leading CANDIDATE only — final approval at Step 6.1; constraints pre-set (Vite not Next.js, one primitives library pinned, official registry only, a live strict-CSP test) | **CANDIDATE, unresolved** — see note below | owner 6.1 | :306 |
+| D-shadcn | 2026-09-28 / **APPROVED 2026-10-15 (Felix)** | Dashboard component library | shadcn/ui on Radix, built exactly to this row's own pre-set constraints (Vite not Next.js; Radix pinned as the one primitives library; official registry only; pinned CLI; generated diffs reviewed; a live strict-CSP Playwright test, extended at this alignment task to exact-shape tolerance, not a free-text phrase) | **APPROVED, SUPERSEDES D-113-dashboard-tooling** | 6.1 | :306; commit `29b444b`; docs/progress/dashboard.md |
 | D-npm-supply-chain | 2026-09-28 | npm supply chain | npm arrives with the widget bundler at 5.1, not 6.1; lockfile+`npm ci`, `npm audit`, a dependabot npm entry, SHA-pinned actions due at 5.1 | **RESOLVED** at Step 5.1 (confirmed live: `docs/progress/widget.md`) | 5.1 | :306 |
 | D-design-direction | 2026-09-28 | Widget/dashboard UX | Light-theme-only v1; stop-mid-stream mechanics; 100%-quota fallback messaging; Inbox escalation-fields-only v1; recent-auth scope; WCAG 2.1→2.2 AA superseded | APPROVED | docs/SPEC §11/§12 | :307 |
 | D-1.4-breakdown | 2026-09-28 | JWT/session design | PyJWT approved (rule 8); `JWT_SIGNING_KEY` required ≥32 chars + optional `_PREVIOUS` for rotation; `kid` = first-12-hex(sha256(key)); no refresh endpoint; a wrong secret behaves exactly like no secret (no oracle); byte-identical 403 across 4 failure causes; dynamic per-site-key CORS; `tenants.status` fixed to active/suspended | APPROVED | 1.4 | :308 |
@@ -151,7 +151,7 @@ APPROVED, CANDIDATE, or SUPERSEDED-by-`<id>`.
 | id | date | topic | decision | status | step(s) | source |
 |---|---|---|---|---|---|---|
 | D-113-widget-bundler | 2026-10-15 | 5.1 | esbuild for the widget bundler | APPROVED | 5.1 | :6265 |
-| D-113-dashboard-tooling | 2026-10-15 | 6.1 | Vite + React + CSS Modules, design tokens as CSS custom properties | **APPROVED, but does NOT cite or supersede D-shadcn** — see note below | 6.1 | :6266 |
+| D-113-dashboard-tooling | 2026-10-15 | 6.1 | Vite + React + CSS Modules, design tokens as CSS custom properties | **SUPERSEDED-by-D-shadcn (2026-10-15, Felix)** — Vite/React kept, CSS Modules replaced by shadcn/ui on Radix per D-shadcn's own pre-set constraints; §12's visual system (tokens as CSS custom properties, no hard-coded colours, light/dark from the first screen, self-hosted fonts, no third-party requests) still applies, just expressed through shadcn's own theme layer instead of hand-written CSS Modules | 6.1 | :6266; commit `29b444b` |
 | D-113-dashboard-auth-pilot | 2026-10-15 | 6.1 | Single-owner login for the pilot (feature-reduced, NOT security-reduced): argon2id, rate-limited lockouts, `HttpOnly`+`Secure`+`SameSite` cookies, CSRF protection, the one owner account seeded by a CLI command | APPROVED | 6.1 | :6267 |
 | D-113-email-postmark | 2026-10-15 | Email | Postmark SMTP relay behind the existing `send_email()`; a dedicated sending subdomain | APPROVED | Phase 7 | :6268 |
 | D-113-hosting-provider-agnostic | 2026-10-15 | Hosting | Standing constraint: any Ubuntu LTS VPS, no provider-specific APIs/services, ever | APPROVED, standing | all future deploy steps | :6269 |
@@ -159,6 +159,25 @@ APPROVED, CANDIDATE, or SUPERSEDED-by-`<id>`.
 | D-113-monitoring | 2026-10-15 | Monitoring | A hosted uptime checker + a cron disk/memory script via the existing `send_email()` | APPROVED | 7.3 | :6271 |
 | D-113-backups | 2026-10-15 | Backups | S3-compatible storage, encrypted before upload, keys backed up separately from the data | APPROVED | 7.3 | :6272 |
 | D-113-parallel-track-protocol | 2026-10-15 | Process | Two git worktrees (`track/widget`, `track/dashboard`) ratified; full protocol in §11.5 | APPROVED | 5.x/6.x | :6276 |
+
+### Step 6.1 close-out (2026-10-15)
+
+| id | date | topic | decision | status | step(s) | source |
+|---|---|---|---|---|---|---|
+| D-6.1-auth-library | 2026-10-15 | Auth library | fastapi-users (v15.0.5) selected as the maintained auth library docs/SPEC.md §12 requires (rule 8): its own `BaseUserManager`/`DatabaseStrategy`/`CookieTransport` building blocks are reused directly, extended for SHA-256-hashed + idle-expiring session tokens (the library's own default stores tokens raw and has no idle expiry) | APPROVED | 6.1 | commit `7519325`; docs/progress/dashboard.md |
+| D-6.1-admin | 2026-10-15 | Admin identity | The temporary `admin_api_key` mechanism (`app/admin/dependencies.py`) is removed outright, not extended; `platform_admin` is fastapi-users' own `is_superuser` flag on the same login system (no second, parallel admin-identity mechanism); `revoke_domain()` and every `/api/v1/admin` endpoint re-pointed at `current_platform_admin` sessions | APPROVED, RESOLVES the Task 2.2.f/2.2.g §9 markers (PROJECT_SPEC.md:6872, 6878) | 6.1 | commit `1202972` |
+| D-6.1-site-key-generator | 2026-10-15 | Site key generation | `generate_site_key()` (`app/tenancy/repository.py`) — a real, cryptographically secure `pk_live_…` generator (`secrets.token_urlsafe`), closing the Task 1.4.e marker naming no generator existed | APPROVED | 6.1 | commit `1202972` |
+| D-6.1-origin-domain-normalise | 2026-10-15 | Normalisation | `normalize_origin()` (`app/auth/origin.py`) / `normalize_domain()` (`app/ingest/domain_verification.py`) — `site_keys.allowed_origins` and `verified_domains.domain` normalised on save to `scheme://host[:port]`, lowercase, no path, no wildcard | APPROVED | 6.1 | commit `1202972` |
+| D-6.1-pilot-plans | 2026-10-15 | Pilot plan rows | `cmd_seed_plans` (`app/dashboard/admin_cli.py`) creates the two real pilot Plan rows (Starter 10,000 msgs/mo, Growth 25,000 msgs/mo), closing the "no Plan-row creation mechanism exists" gap (D-3.7i-quota-numbers' own owner) | APPROVED, RESOLVES D-3.7i-quota-numbers' Step-6.2 ownership early (built at 6.1, not deferred) | 6.1 | commit `1202972` |
+| D-6.1-cors-same-origin | 2026-10-15 | Dashboard/admin CORS | Same-origin SPA+API serving (dashboard SPA and `/api/v1/dashboard`, `/api/v1/admin` share one origin in production via Caddy) — no CORS middleware needed for either surface; `OPTIONS` continues to return 405, which is correct, not an open gap, since no cross-origin preflight for these endpoints ever occurs under this design | APPROVED, RESOLVES the CORS/OPTIONS §9 marker for the dashboard/admin half (PROJECT_SPEC.md:6882) — the widget's own dynamic per-site-key CORS (Task 1.4.g) is unrelated and untouched | 6.1 | commit `7519325` |
+| D-6.1-session-cookie-design | 2026-10-15 | Session/CSRF cookies | `__Host-session` (Secure, Path=/, no Domain, HttpOnly, SameSite=Strict) + `__Host-csrf` (same prefix, not HttpOnly, double-submit) — the `__Host-` prefix is the real defense against cookie tossing from a sibling subdomain, proven live (adversarial pass, Step 6.1) | APPROVED | 6.1 | commit `7519325` |
+| D-6.1-recent-auth | 2026-10-15 | Recent-auth dependency | `require_recent_auth(max_age_seconds=900.0)` (`app/dashboard/dependencies.py`) built now, consumed by no endpoint yet — later steps (delete tenant, change site keys/origins, replace DB credentials, team changes) wire it in as they're built, per docs/SPEC.md §12's own "recent authentication" requirement | APPROVED (built ahead of its first consumer, deliberately) | 6.1 | commit `7519325` |
+| D-6.1-session-field-na | 2026-10-15 | `/session` field renegotiation | The pre-existing 6.1 forward commitment "confirm/renegotiate the `/session` response's own field names before building the dashboard against them" (PROJECT_SPEC.md:6887) turned out not to apply: the dashboard's own auth system (`/api/v1/dashboard/auth/*`) is wholly separate from the widget's `/session` endpoint and never calls or depends on its field names | RESOLVED, NOT APPLICABLE — the widget-track contract check (D-shadcn's own sibling marker set) already separately verified `/session`'s own fields for the widget's use | 6.1 | commit `7519325` |
+| D-6.1-test-layout-placeholders | 2026-10-15 | `test_layout_placeholders.py` | Narrowed a second time (after the widget track's own two narrowings for `widget/loader`/`widget/chat`) to empty `_STILL_PLACEHOLDER_READMES`/`_PLACEHOLDER_ROOTS` — `dashboard/` now has real Vite+React+shadcn tooling too, so no folder this file tracks is still a placeholder | APPROVED, RESOLVES the Step 5.1/owner-6.1 §9 marker (PROJECT_SPEC.md:6897) for real | 6.1 | commits `a98cd09`, `195de3a`; rebase conflict resolved in `2295fa9` |
+| D-6.1-recent-auth-scope | 2026-10-15 | Auth feature scope | D-113-dashboard-auth-pilot's own named security floor (argon2id; rate-limited lockouts, both per-IP and per-account; `__Host-`-prefixed Secure+HttpOnly+SameSite=Strict cookies; double-submit CSRF on every state-changing route; a CLI-seeded owner account with no shipped default password, never logged) confirmed built exactly as specified, with a full adversarial pass (credential stuffing/lockout bypass, session fixation, CSRF, cookie scope/tossing, cross-tenant access, logout/revocation, argon2 parameter downgrade, seed-CLI password leakage) converted to committed regression tests | APPROVED, CONFIRMS D-113-dashboard-auth-pilot was built, not merely planned | 6.1 | commit `7519325`; docs/progress/dashboard.md |
+| D-6.1-exact-csp-tolerance | 2026-10-15 | CSP test tolerance (this alignment task) | The login/Dialog strict-CSP Playwright test's prior tolerance (a free-text regex, `/Applying inline style violates/i`) replaced with an exact structural match on the real `securitypolicyviolation` DOM event (`effectiveDirective === "style-src-elem"`, `blockedURI === "inline"`, `disposition === "enforce"`, `sourceFile` under the page's own `/assets/*.js`) — proven live with a deliberately injected, differently-shaped second violation (an external `<script src>`) that the new tolerance does NOT swallow | APPROVED | 6.1 (alignment) | commit (this task); `dashboard/e2e/csp.spec.ts` |
+| D-6.1-session-invalidation-hook | 2026-10-15 | Session invalidation on credential/role change (this alignment task) | `UserManager.on_after_update()` (`app/dashboard/auth_backend.py`) invalidates every one of a user's existing `DashboardSession` rows whenever an update changes `password` or `is_superuser` — hooked at `BaseUserManager.update()`, the one real path any future password-reset or platform_admin-removal CLI command would be built on, rather than three separate call sites in three commands that do not exist yet (building those three now would itself be new feature work, which this follow-up explicitly excludes) | APPROVED, with a named residual gap (see §9 marker below): a hand-edited database row (seed_cli.py's own documented workaround for an existing email) never calls `update()`, so this hook cannot close that specific path | 6.1 (alignment) | commit (this task); `app/dashboard/auth_backend.py`, `app/dashboard/repository.py`, `backend/tests/test_dashboard_auth_backend.py` |
+| D-6.1-fastapi-users-maintenance-mode | 2026-10-15 | Auth library maintenance status (this alignment task) | Checked live (PyPI + GitHub README + GitHub API, all dated 2026-10-15): fastapi-users is explicitly in **maintenance mode** per its own README — "we'll continue to provide security updates and dependency maintenance, no new features will be added"; a successor toolkit is in development with no name or date yet. Latest release v15.0.5 (2026-03-27, matches what this project pins); repo not archived, last pushed 2026-08-17; PyPI classifier `Development Status :: 5 - Production/Stable`. Not swapped in this task, per direct instruction | APPROVED (informational), re-check owner Phase 7 (§9 marker below) | 6.1 (alignment) | https://pypi.org/project/fastapi-users/ ; https://github.com/fastapi-users/fastapi-users (README) ; https://api.github.com/repos/fastapi-users/fastapi-users ; checked 2026-10-15 |
 
 ### Pilot-scope decisions (2026-10-15, this task)
 
@@ -171,6 +190,7 @@ APPROVED, CANDIDATE, or SUPERSEDED-by-`<id>`.
 | D-pilot-image-secret-scan | 2026-10-15 | Security scanning | Image secret scanning joins Step 7.2's full security and injection run | APPROVED, re-owns the Task 1.1.o marker | owner 7.2 | same |
 | D-pilot-onboarding-step | 2026-10-15 | New step | New Step 7.5 "Pilot onboarding": the pilot tenant's own golden set, plus re-checking the model choice, the 0.20 gate threshold, `retrieval_k=8` and the reranker-off decision on real content | APPROVED, new step; consolidates the Task 3.7.a/3.7.f/3.7.g/3.7.i "whoever onboards the first real pilot tenant" markers | owner 7.5 (new) | same |
 | D-postpilot-admin-overrides | 2026-10-15 | Admin screen scope | Per-tenant gate-threshold override, per-tenant model choice, and the async unsafe/abusive review are re-owned to POST-PILOT, bundled with 6.5 Platform admin | APPROVED, supersedes the "Phase 6's admin screen"/"Step 6.4" ownership on the Task 3.4.d/3.4.b-research/3.4.g markers | owner POST-PILOT / whoever onboards the second tenant (same as 6.5) | same |
+| D-postpilot-admin-no-tenant-shape | 2026-10-15 (found at Step 6.1; recorded at this alignment task) | Admin account shape | A real finding, found live while testing `POST /auth/login` (`test_admin_routes.py`): there is no "platform-admin-only, with no tenant membership at all" account shape today — `/auth/login` unconditionally requires a real `Membership` row to succeed, which is correct, intentional behaviour for the pilot (every real admin account `seed_cli.py --platform-admin` creates also gets a membership, so the one hand-picked pilot admin can always log in) | APPROVED, new POST-PILOT entry, bundled with 6.5 Platform admin | owner POST-PILOT / whoever onboards the second tenant or needs a non-tenant-owning admin (same as 6.5) | docs/progress/dashboard.md's "A second real bug found live" entry |
 
 ### Phase 5 continuation (5.3-5.6, 2026-10-15, this task)
 
@@ -186,10 +206,15 @@ APPROVED, CANDIDATE, or SUPERSEDED-by-`<id>`.
 register. The 2026-10-15 Phase 5-7 kickoff (D-113-dashboard-tooling) ratified "Vite + React +
 CSS Modules" for the dashboard without citing or superseding the still-open shadcn/ui
 CANDIDATE recorded 2026-09-28 (D-shadcn, owner Step 6.1) — exactly the silent-divergence
-failure PROJECT_SPEC.md §2 rule 20 now forbids. **D-shadcn remains open and unresolved.**
-Step 6.1 must explicitly resolve it one way or the other (adopt shadcn/ui on top of the
-Vite+React+CSS-Modules base per D-shadcn's own constraints, or formally supersede D-shadcn
-with a stated reason) — it must not be silently dropped a second time.
+failure PROJECT_SPEC.md §2 rule 20 now forbids. **RESOLVED at this alignment task (2026-10-15,
+Felix): D-shadcn is APPROVED, explicitly superseding D-113-dashboard-tooling, citing this
+supersession (rule 20) rather than silently diverging a second time** — built in commit
+`29b444b`: Vite + React + TypeScript (kept), shadcn/ui on Radix (replaces CSS Modules), every
+one of D-shadcn's own pre-set constraints honoured (official registry only, pinned CLI,
+generated diffs reviewed before commit, components added one at a time, never used in the
+widget, a live strict-CSP Playwright test — see docs/progress/dashboard.md's own "CSP and the
+Dialog scroll-lock" entry, and this alignment task's own exact-tolerance tightening of that
+same test, item 3 below).
 
 ---
 
@@ -281,6 +306,16 @@ is deliberately forward-only, matching its purpose.
   §9/register reconciliation this step performed.
 
 ### Backend contract gaps found by the widget track (owner: the dashboard track)
+**Ownership formally taken, and scheduled for Step 6.2's own build, at this alignment task
+(2026-10-15) — not built in this task itself (ALIGNMENT-ONLY, no 6.2 work).** Felix
+pre-authorises (a) and (b) below as additive, non-breaking changes to widget-facing
+responses — new OPTIONAL fields only, nothing renamed or removed from either `widget_config`
+or the `/chat` `done` event's existing shape; the widget's own already-shipped code reading
+these responses is unaffected by either addition landing. (c) needs no authorisation (a
+marker deletion only, once 6.2 actually touches `app/auth/schemas.py`). See the matching
+entries now also listed under "### 6.2 Tenant settings" below for discoverability from that
+step's own forward-commitments list.
+
 Three real, named gaps in the locked `backend/` contract, each found by the widget track
 while building against it (Steps 5.1/5.2) and each flagged rather than fixed, per the
 `backend/` edit restriction (PROJECT_SPEC.md §11.5 point 4) — the widget track cannot edit
@@ -328,28 +363,22 @@ check from here on should trace at least one real end-to-end flow (create → us
 for every endpoint it signs off on, not just confirm each message's own field names.
 
 ### 6.1 Dashboard authentication [SECURITY]
-- **D-shadcn remains unresolved** — see the note above the decisions table. Step 6.1 must
-  resolve it, citing supersession if it diverges. (PROJECT_SPEC.md:306)
-- Replace the temporary `admin_api_key` mechanism outright with the real `platform_admin`
-  role; every admin endpoint built against the temporary key in the meantime (only
-  `revoke_domain()`'s endpoint) must be re-pointed at the real role, not left running on the
-  key indefinitely. (PROJECT_SPEC.md:6856)
-- `site_keys.key` (`pk_live_…`) still has no real generator function — dashboard onboarding
-  is the first step that actually creates a production `site_keys` row and must add one. (PROJECT_SPEC.md:6868)
-- Normalize `site_keys.allowed_origins` and `verified_domains.domain` on save to the exact
-  form the origin-matching function expects (`scheme://host[:port]`, lowercase, no path, no
-  wildcard). (PROJECT_SPEC.md:6885)
-- Confirm/renegotiate the `/session` response's own field names (`session_token`,
-  `visitor_secret`, `test_mode`, `widget_config`) and the six public `tenants.config` key
-  names (`title`, `greeting`, `colors`, `logo_url`, `position`, `privacy_notice_url`) before
-  building the dashboard against them — these are 1.4.g's own reasonable choices, not a
-  spec-mandated wire contract. (PROJECT_SPEC.md:6887)
-- `test_layout_placeholders.py` update for `dashboard/` tooling — still genuinely open (no
-  dashboard-track progress file exists yet). (PROJECT_SPEC.md:6875)
-- CORS/OPTIONS handling for the dashboard and admin endpoints specifically — decide with the
-  Phase 6 work; today `OPTIONS` returns 405. (PROJECT_SPEC.md:6860)
+**RESOLVED in full at this alignment task (2026-10-15) — every item below is now built, not
+forward-only; see the "Step 6.1 close-out" decisions-table rows above for the exact
+commit/test citation for each.** Per this section's own stated convention (RESOLVED items are
+omitted here, kept only in the decisions table and PROJECT_SPEC.md §9), the original seven
+forward commitments are not re-listed; they map to D-shadcn, D-6.1-admin,
+D-6.1-site-key-generator, D-6.1-origin-domain-normalise, D-6.1-session-field-na,
+D-6.1-test-layout-placeholders and D-6.1-cors-same-origin respectively.
 
 ### 6.2 Tenant settings
+- **Three backend contract gaps, ownership taken by the dashboard track and Felix's additive
+  authorisation recorded at this alignment task (2026-10-15)** — full detail in the "Backend
+  contract gaps found by the widget track" section above, not duplicated here: (a) add
+  `verified_domains` to `widget_config` as a new optional field; (b) return `conversation_id`
+  on `POST /api/v1/chat`'s `done` event for a first turn, as a new optional field; (c) delete
+  the verified `SessionResponse` ASSUMPTION marker (`app/auth/schemas.py`). Not built in this
+  alignment task (no 6.2 work) — scheduled for Step 6.2's own build.
 - Add real, named support-details fields to `tenants.config` (email, phone, contact link,
   hours, optional message); build the real per-tenant fallback template; route the
   interpolated text through `_sanitize_answer_text()`'s existing call site. Also add
@@ -407,6 +436,11 @@ or the first non-Felix-operated one. The following join it by Felix's decision G
   tracks' own release cadence together for a non-essential feature). The pilot's own path is
   simpler and already fully supported: save the config via the dashboard, then open the real
   widget on a real test page to see it. (docs/SPEC.md:345, 347)
+- **A "platform-admin-only, no tenant membership at all" account shape** (found live at Step
+  6.1, recorded at this alignment task, 2026-10-15, D-postpilot-admin-no-tenant-shape) —
+  `/auth/login` today unconditionally requires a real `Membership`; correct for the pilot
+  (every real admin also owns a tenant), but a future platform-admin-only operator account
+  needs this built first.
 
 ### 6.6 Phase 6 acceptance
 - *(no open forward commitment found addressed specifically to this step)*
@@ -473,6 +507,25 @@ or the first non-Felix-operated one. The following join it by Felix's decision G
   real coverage today. (PROJECT_SPEC.md:5914, 6826)
 - Email deliverability must be tested against major mailbox providers (docs/SPEC.md §18's own
   Phase 7 accept line already names this).
+- **Remove the dashboard's one known, tolerated strict-CSP violation** (recorded at this
+  alignment task, 2026-10-15, D-6.1-exact-csp-tolerance's own named gap): react-remove-scroll-
+  bar's own inline `<style>` insertion for the Dialog's scrollbar-gap CSS. Two real options,
+  not yet actioned: a Caddy-issued per-response CSP nonce (needs dynamic HTML templating this
+  project has not built yet — Phase 7/Caddy is the natural point); or switching to a
+  scroll-lock approach that injects no `<style>` element at all (if one is found that still
+  preserves the Dialog's real functional scroll-lock and focus-trap). Not a hash-pin — the
+  violation's own CSS text embeds the real measured scrollbar-gap width, confirmed
+  platform/browser-dependent, so a hash would be brittle across environments in exactly the
+  way this project's CSP already rejects hash-pinning for. (`dashboard/e2e/csp.spec.ts`)
+- **Re-check fastapi-users' maintenance status before pilot go-live** (recorded at this
+  alignment task, 2026-10-15, D-6.1-fastapi-users-maintenance-mode): confirmed live (PyPI +
+  GitHub README + GitHub API, checked 2026-10-15) that the library is in maintenance mode —
+  security fixes and dependency maintenance continue, no new features, and a (currently
+  unnamed, undated) successor toolkit is in development. Not a reason to swap libraries now
+  (this project's security floor does not depend on new features), but re-check before pilot
+  go-live whether a CVE has landed unpatched, whether the successor has shipped with a
+  realistic migration path, or whether the project's own Python/FastAPI/SQLAlchemy versions
+  have drifted past what a maintenance-mode (not actively-developed) library still supports.
 
 ### 7.5 Pilot onboarding (new step — Felix decision F, D-pilot-onboarding-step)
 - Build the pilot tenant's own real golden set, replacing/extending the two stand-in corpora.
@@ -533,6 +586,11 @@ Every marker whose owner is "no task scheduled," "to be scheduled," or "whoever 
   state field) — no task owner. (PROJECT_SPEC.md:6932)
 - Quota numbers (10,000 / 25,000) must be re-derived from real per-tenant traffic composition
   once it exists — the golden-set category mix is only a stated approximation. (PROJECT_SPEC.md:5912, 6031, 6825)
+- Whoever next builds a real password-reset or platform_admin-removal path must build it on
+  `UserManager.update()` (not a raw `UPDATE` statement) to inherit the session-invalidation
+  hook `on_after_update()` already provides (D-6.1-session-invalidation-hook) — a hand-edited
+  database row (seed_cli.py's own documented workaround today) bypasses it entirely.
+  (this alignment task, 2026-10-15; PROJECT_SPEC.md §9, end of section)
 
 ---
 
@@ -600,12 +658,16 @@ contract check):
 **5.1** — none found beyond the pre-relayed list. (The bundler choice and npm supply-chain
 setup are both already relayed and already RESOLVED per `docs/progress/widget.md`.)
 
-**6.1**:
+**6.1** (point-in-time snapshot as this register's own "missed decision" audit, taken before
+Step 6.1 shipped — kept verbatim below for the historical record of what was still open at
+that moment; **all three items are now RESOLVED, confirmed at this alignment task,
+2026-10-15**):
 1. **D-shadcn remains unresolved** (PROJECT_SPEC.md:306) — the 2026-10-15 kickoff ratified
    "Vite + React + CSS Modules" (D-113-dashboard-tooling) for dashboard tooling without
    citing or superseding the still-open shadcn/ui CANDIDATE. This is the exact gap this whole
    task was commissioned to fix structurally; Step 6.1 must resolve it explicitly, not treat
    the kickoff's silence on shadcn as an implicit rejection.
+   **RESOLVED — see D-shadcn in the decisions table, commit `29b444b`.**
 2. **The single-owner dashboard-auth-scope decision and its named security floor**
    (D-113-dashboard-auth-pilot, PROJECT_SPEC.md:6267): self-signup/email-verification/team-
    invites are dropped as a FEATURE reduction only — the real floor (argon2id, rate-limited
@@ -613,11 +675,15 @@ setup are both already relayed and already RESOLVED per `docs/progress/widget.md
    account, no shipped default password) is a concrete, non-obvious scope decision for 6.1
    that is not covered by "the maintained auth library" alone (that item is about which
    library; this is about which features and what security floor).
+   **RESOLVED — built and adversarially tested exactly as specified; see D-6.1-recent-auth-scope
+   in the decisions table, commit `7519325`.**
 3. **Dashboard/admin CORS and OPTIONS handling is still explicitly undecided**
    (PROJECT_SPEC.md:6860) beyond whatever the "via same-origin" pre-relay already told Felix —
    if same-origin serving is the real plan, Step 6.1 should record that as the actual
    decision (with a register/§9 update) rather than leave the marker's own "decide with the
    widget and admin work" wording unresolved.
+   **RESOLVED — same-origin recorded as the actual decision; see D-6.1-cors-same-origin in
+   the decisions table, commit `7519325`.**
 
 ---
 
