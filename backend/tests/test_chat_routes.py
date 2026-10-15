@@ -987,6 +987,87 @@ async def test_list_conversations_returns_only_this_visitors_own_conversations(
     assert other_body["conversations"][0]["title"] == "not mine"
 
 
+async def test_a_real_turn_advances_last_message_at_and_reorders_previous_chats(
+    monkeypatch, _seeded
+):
+    # [SECURITY-adjacent] Task 4.2 adversarial follow-up: a real bug
+    # found while attacking the retention sweep -- `last_message_at`
+    # had NO writer anywhere in this codebase (confirmed by reading
+    # every call site directly), frozen at a conversation's own
+    # CREATION time forever. Proof, through the real endpoint, not the
+    # repository directly: an OLDER conversation (by creation order)
+    # that receives a real new turn must become the MOST recently
+    # active one in "previous chats" -- the exact ordering a visitor
+    # would see break if this bug were still present.
+    chunks = build_fake_answer_arg_chunks(
+        can_answer=True, used_chunk_ids=["c1"], answer="A fixed test answer."
+    )
+    fake_model = FakeAnswerToolChatModel(arg_chunks=chunks)
+    app = await _build_app(monkeypatch, chat_model=fake_model, retrieve_chunks=_answer_chunks())
+    token = _token_for(_seeded)
+
+    async with db_session() as session:
+        repo = TenantScopedRepository(tenant_id=_seeded["tenant"], session=session)
+        older = await repo.create_conversation(vid=_seeded["visitor"], title="older")
+        await session.commit()
+        older_cid = older.cid
+        older_last_message_at_before = older.last_message_at
+
+    async with await http_client(app) as client:
+        async with client.stream(
+            "POST",
+            "/api/v1/chat",
+            json={
+                "message": "hello again",
+                "client_message_id": str(uuid.uuid4()),
+                "conversation_id": str(older_cid),
+            },
+            headers={"Authorization": f"Bearer {token}", "Origin": ORIGIN},
+        ) as response:
+            await response.aread()
+        assert response.status_code == 200
+
+        list_response = await client.get(
+            "/api/v1/conversations",
+            headers={"Authorization": f"Bearer {token}", "Origin": ORIGIN},
+        )
+
+    body = list_response.json()
+    assert body["conversations"][0]["conversation_id"] == str(older_cid)
+    assert body["conversations"][0]["last_message_at"] != older_last_message_at_before.isoformat()
+
+
+async def test_list_conversations_respects_the_real_configured_cap(monkeypatch, _seeded):
+    # [SECURITY-adjacent] Task 4.2 adversarial follow-up: the real
+    # finding (no cap at all) is fixed at the repository layer
+    # (test_tenancy_repository.py's own dedicated test proves the
+    # ordering/cap logic itself) -- this proves the REAL endpoint
+    # actually threads `Settings.conversation_list_max_results` through,
+    # not a hardcoded or forgotten default. get_settings.cache_clear()
+    # required here, the identical already-established reason as
+    # test_eleventh_message_in_a_minute_is_rate_limited_with_retry_
+    # after's own comment above: `_seeded` already cached Settings
+    # before this env override runs.
+    set_valid_env(monkeypatch, VALID_ENV, CONVERSATION_LIST_MAX_RESULTS="2")
+    get_settings.cache_clear()
+    app = create_app()
+    token = _token_for(_seeded)
+    async with db_session() as session:
+        repo = TenantScopedRepository(tenant_id=_seeded["tenant"], session=session)
+        for _ in range(3):
+            await repo.create_conversation(vid=_seeded["visitor"])
+        await session.commit()
+
+    async with await http_client(app) as client:
+        response = await client.get(
+            "/api/v1/conversations",
+            headers={"Authorization": f"Bearer {token}", "Origin": ORIGIN},
+        )
+
+    assert len(response.json()["conversations"]) == 2
+    get_settings.cache_clear()
+
+
 async def test_get_messages_for_another_tenants_conversation_returns_404(monkeypatch, _seeded):
     app = create_app()
     token = _token_for(_seeded)
@@ -1028,6 +1109,70 @@ async def test_get_messages_for_another_tenants_conversation_returns_404(monkeyp
             headers={"Authorization": f"Bearer {token}", "Origin": ORIGIN},
         )
     assert response.status_code == 404
+
+
+async def test_get_messages_for_another_visitors_conversation_same_tenant_returns_404(
+    monkeypatch, _seeded
+):
+    # [SECURITY] Task 4.2 adversarial follow-up: the SAME-tenant half of
+    # the cross-tenant test directly above -- a real gap this file had
+    # no test for at all (only POST /chat had the equivalent cross-
+    # visitor proof; this GET endpoint did not). `other_visitor` is the
+    # SAME tenant as the real caller, which is exactly the case docs/
+    # SPEC.md §16's own "Visitor A can't read or resume visitor B's
+    # conversation, even within the same tenant" names.
+    app = create_app()
+    token = _token_for(_seeded)
+    async with db_session() as session:
+        repo = TenantScopedRepository(tenant_id=_seeded["tenant"], session=session)
+        other_conversation = await repo.create_conversation(vid=_seeded["other_visitor"])
+        await session.commit()
+        other_cid = other_conversation.cid
+
+    async with await http_client(app) as client:
+        response = await client.get(
+            f"/api/v1/conversations/{other_cid}/messages",
+            headers={"Authorization": f"Bearer {token}", "Origin": ORIGIN},
+        )
+    assert response.status_code == 404
+
+
+async def test_get_messages_404_is_indistinguishable_for_nonexistent_vs_someone_elses_cid(
+    monkeypatch, _seeded
+):
+    # [SECURITY] Task 4.2 adversarial follow-up: "a cid that doesn't
+    # exist vs one that belongs to someone else -- the responses must
+    # be indistinguishable (same status and body shape, no timing-
+    # relevant extra query)". A real, direct side-by-side comparison --
+    # not three separate tests each independently asserting "404" and
+    # trusting they happen to match. `get_conversation_by_id(cid,
+    # vid=...)` (app/tenancy/repository.py) already filters by tenant_id
+    # AND vid in the SAME query, so a nonexistent cid, another tenant's
+    # cid, and another visitor's cid all take the identical one-query
+    # code path in app/chat/routes.py's own get_conversation_messages()
+    # -- confirmed here by comparing the real responses, not by reading
+    # the code and assuming it.
+    app = create_app()
+    token = _token_for(_seeded)
+    async with db_session() as session:
+        repo = TenantScopedRepository(tenant_id=_seeded["tenant"], session=session)
+        other_visitor_conversation = await repo.create_conversation(vid=_seeded["other_visitor"])
+        await session.commit()
+        real_but_not_mine_cid = other_visitor_conversation.cid
+    nonexistent_cid = uuid.uuid4()
+
+    async with await http_client(app) as client:
+        nonexistent_response = await client.get(
+            f"/api/v1/conversations/{nonexistent_cid}/messages",
+            headers={"Authorization": f"Bearer {token}", "Origin": ORIGIN},
+        )
+        not_mine_response = await client.get(
+            f"/api/v1/conversations/{real_but_not_mine_cid}/messages",
+            headers={"Authorization": f"Bearer {token}", "Origin": ORIGIN},
+        )
+
+    assert nonexistent_response.status_code == not_mine_response.status_code == 404
+    assert nonexistent_response.json() == not_mine_response.json()
 
 
 async def test_get_messages_returns_the_real_completed_turn(monkeypatch, _seeded):

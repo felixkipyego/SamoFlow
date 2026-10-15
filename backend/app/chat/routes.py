@@ -237,11 +237,33 @@ async def _acquire_lease(
     independent proof that a lease can never be acquired against another
     tenant's row, even if a future caller ever reached this function
     without that earlier check.
+
+    [SECURITY-adjacent, Task 4.2 adversarial follow-up]: also sets
+    `last_message_at = now()` -- a REAL bug found here, not merely
+    reasoned about: this column had NO other writer anywhere in this
+    codebase (confirmed by reading every call site directly), so it sat
+    frozen at a conversation's own CREATION time forever, for its whole
+    life. Two real consequences, both found live: "previous chats"
+    (`list_conversations()`, ordered by this column) sorted by creation
+    order, not actual recent activity; and the nightly retention sweep
+    (`list_expired_conversations()`) would delete a conversation --
+    checkpoint thread and all -- based on how long ago it was FIRST
+    created, not how long it had actually been idle, meaning a
+    conversation a visitor chats in every day could still be deleted
+    out from under them the moment it crossed the tenant's own
+    `retention_days` since creation. Fixed here, in the SAME single
+    UPDATE already running on every turn (no new round trip): on EVERY
+    lease acquisition, successful or not (an attempted turn, even one
+    that later times out or fails, is still real, recent visitor
+    activity) -- the one point in this request's own lifecycle that
+    already proves a real visitor is actively using this exact
+    conversation right now.
     """
     result = await session.execute(
         text(
             "UPDATE conversations "
-            "SET lease_until = now() + make_interval(secs => :secs), lease_token = :token "
+            "SET lease_until = now() + make_interval(secs => :secs), lease_token = :token, "
+            "last_message_at = now() "
             "WHERE cid = :cid AND tenant_id = :tenant_id "
             "AND (lease_until IS NULL OR lease_until < now()) "
             "RETURNING cid"
@@ -744,7 +766,9 @@ async def list_conversations_endpoint(
     session: AsyncSession = Depends(get_db_session),  # noqa: B008
 ) -> ConversationListResponse:
     repo = TenantScopedRepository(tenant_id=identity.tenant_id, session=session)
-    conversations = await repo.list_conversations(identity.vid)
+    conversations = await repo.list_conversations(
+        identity.vid, max_results=get_settings().conversation_list_max_results
+    )
     return ConversationListResponse(
         conversations=[
             ConversationSummary(

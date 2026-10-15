@@ -229,7 +229,7 @@ class TenantScopedRepository:
         await self.session.flush()
         return conversation
 
-    async def list_conversations(self, vid: uuid.UUID) -> list[Conversation]:
+    async def list_conversations(self, vid: uuid.UUID, *, max_results: int) -> list[Conversation]:
         """Task 4.2: `GET /api/v1/conversations` -- "previous chats"
         (docs/SPEC.md §10). Scoped to BOTH `self.tenant_id` (the class's
         own standing invariant) AND `vid` (never another visitor's own
@@ -238,11 +238,20 @@ class TenantScopedRepository:
         Most-recently-active first (`last_message_at` DESC) -- the natural
         "previous chats" ordering, matching how every real messaging UI
         this feature is modeled on already orders its own thread list.
+
+        [SECURITY-adjacent] Task 4.2 adversarial follow-up: `max_results`
+        is REQUIRED (no default here -- the caller, app/chat/routes.py,
+        passes `Settings.conversation_list_max_results`), closing a real
+        finding: this method originally had no cap at all, returning
+        every conversation a visitor has ever had in one response.
+        Combined with `ORDER BY last_message_at DESC`, capping here
+        keeps the MOST recently active ones, never an arbitrary subset.
         """
         result = await self.session.execute(
             select(Conversation)
             .where(Conversation.tenant_id == self.tenant_id, Conversation.vid == vid)
             .order_by(Conversation.last_message_at.desc())
+            .limit(max_results)
         )
         return list(result.scalars().all())
 
@@ -259,11 +268,29 @@ class TenantScopedRepository:
         project's own established `DateTimeClock` convention elsewhere
         (app/db.py) rather than calling `datetime.now()` inside the
         query itself.
+
+        [SECURITY-adjacent, Task 4.2 adversarial follow-up]: excludes
+        any conversation with a currently ACTIVE lease
+        (`lease_until`, real wall-clock `now()` -- the one comparison
+        in this method that is deliberately NOT the injected `cutoff`,
+        since `cutoff` is `retention_days` in the PAST and a lease's own
+        `lease_until` is always a few seconds in the FUTURE; comparing
+        a future timestamp against a past one would never exclude
+        anything). A real, named defense-in-depth layer, not the only
+        fix for the underlying gap (see `_acquire_lease()`'s own
+        updated comment, app/chat/routes.py, for the real root cause --
+        `last_message_at` now updates on every lease acquisition, so a
+        conversation with an active lease normally never reaches this
+        query's own `last_message_at < cutoff` filter at all) -- kept
+        anyway because a future change to WHEN `last_message_at`
+        updates should not silently reopen "delete a conversation
+        mid-active-turn" as a possibility.
         """
         result = await self.session.execute(
             select(Conversation).where(
                 Conversation.tenant_id == self.tenant_id,
                 Conversation.last_message_at < cutoff,
+                (Conversation.lease_until.is_(None)) | (Conversation.lease_until < func.now()),
             )
         )
         return list(result.scalars().all())

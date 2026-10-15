@@ -609,6 +609,21 @@ class Settings(BaseSettings):
     # only together with smtp_host (see app/notifications/service.py's
     # own is_smtp_configured() for the real "configured" definition).
     smtp_from_address: str | None = Field(default=None)
+    # [SECURITY-adjacent] Task 4.2 adversarial follow-up: a REAL finding,
+    # not a speculative hardening -- `GET /api/v1/conversations`
+    # (`TenantScopedRepository.list_conversations()`) had NO limit at
+    # all, confirmed by reading the query directly: every conversation
+    # a visitor has ever had was fetched and returned in one response,
+    # unbounded. No number is named anywhere in docs/SPEC.md for this
+    # ("previous chats" is described, no cap given), so this is an
+    # internal safety ceiling, the identical "generous but bounded, no
+    # corresponding spec number" treatment as `crawl_page_cap`/
+    # `docx_max_part_size_bytes` -- 100 is generous for a real "previous
+    # chats" panel in a small widget (no real UI shows more at once),
+    # while bounding the worst case for a visitor (or a buggy/malicious
+    # client hammering conversation creation) with an unusually large
+    # history.
+    conversation_list_max_results: int = Field(default=100, gt=0)
     # Task 3.1.c: retrieve()'s own final result count -- the `k` in
     # `retrieve(client_id, query, k)` (docs/SPEC.md §6.3), made
     # Settings-configurable rather than hardcoded so it can be retuned

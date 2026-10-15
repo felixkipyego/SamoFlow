@@ -261,7 +261,7 @@ async def test_list_conversations_returns_only_this_visitors_own_rows(_seeded_te
         )
         await session.commit()
         repo = TenantScopedRepository(tenant_id=ids["tenant_a"], session=session)
-        results = await repo.list_conversations(ids["visitor_a"])
+        results = await repo.list_conversations(ids["visitor_a"], max_results=100)
 
     assert [c.cid for c in results] == [ids["conversation_a"]]
 
@@ -280,9 +280,38 @@ async def test_list_conversations_orders_most_recently_active_first(_seeded_tena
         )
         await session.commit()
         repo = TenantScopedRepository(tenant_id=ids["tenant_a"], session=session)
-        results = await repo.list_conversations(ids["visitor_a"])
+        results = await repo.list_conversations(ids["visitor_a"], max_results=100)
 
     assert [c.cid for c in results] == [newer_id, ids["conversation_a"]]
+
+
+async def test_list_conversations_max_results_caps_and_keeps_the_most_recent(_seeded_tenants):
+    # [SECURITY-adjacent] Task 4.2 adversarial follow-up: a real finding,
+    # not a speculative test -- this method originally had no cap at
+    # all. Three more conversations beyond the cap, each strictly newer
+    # than the one before and all newer than the seeded fixture's own
+    # `conversation_a` -- `max_results=2` must return exactly the two
+    # MOST recently active, never an arbitrary/unordered subset.
+    ids = _seeded_tenants
+    newest_ids = [uuid.uuid4() for _ in range(3)]
+    now = datetime.now(UTC)
+    async with db_session() as session:
+        session.add_all(
+            [
+                Conversation(
+                    cid=cid,
+                    tenant_id=ids["tenant_a"],
+                    vid=ids["visitor_a"],
+                    last_message_at=now + timedelta(days=offset + 1),
+                )
+                for offset, cid in enumerate(newest_ids)
+            ]
+        )
+        await session.commit()
+        repo = TenantScopedRepository(tenant_id=ids["tenant_a"], session=session)
+        results = await repo.list_conversations(ids["visitor_a"], max_results=2)
+
+    assert [c.cid for c in results] == [newest_ids[2], newest_ids[1]]
 
 
 async def test_list_expired_conversations_is_tenant_scoped_and_cutoff_based(_seeded_tenants):
@@ -306,6 +335,38 @@ async def test_list_expired_conversations_is_tenant_scoped_and_cutoff_based(_see
     assert old_id in expired_ids
     assert ids["conversation_a"] not in expired_ids  # fresh, not expired
     assert ids["conversation_b"] not in expired_ids  # a different tenant entirely
+
+
+async def test_list_expired_conversations_excludes_an_actively_leased_conversation(
+    _seeded_tenants,
+):
+    # [SECURITY-adjacent] Task 4.2 adversarial follow-up: "a conversation
+    # with an active lease must be handled safely" -- a conversation
+    # that is old by `last_message_at` (stale from before this task's
+    # own `_acquire_lease()` fix existed, or simply a row some other
+    # path left behind) but currently mid-turn (a real, non-expired
+    # `lease_until`) must never be reported as expired -- deleting it
+    # would delete a conversation, and prune its checkpoint thread, out
+    # from under a visitor's own live, in-flight turn.
+    ids = _seeded_tenants
+    leased_id = uuid.uuid4()
+    cutoff = datetime.now(UTC) - timedelta(days=30)
+    async with db_session() as session:
+        session.add(
+            Conversation(
+                cid=leased_id,
+                tenant_id=ids["tenant_a"],
+                vid=ids["visitor_a"],
+                last_message_at=cutoff - timedelta(days=1),  # old by activity...
+                lease_until=datetime.now(UTC) + timedelta(seconds=30),  # ...but mid-turn RIGHT NOW
+                lease_token=uuid.uuid4(),
+            )
+        )
+        await session.commit()
+        repo = TenantScopedRepository(tenant_id=ids["tenant_a"], session=session)
+        expired = await repo.list_expired_conversations(cutoff)
+
+    assert leased_id not in {c.cid for c in expired}
 
 
 async def test_delete_conversation_only_deletes_this_tenants_own_row(_seeded_tenants):
