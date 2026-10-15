@@ -9,15 +9,41 @@ import {
   DialogTitle,
   DialogTrigger,
 } from "@/components/ui/dialog";
+import { Sidebar } from "@/components/Sidebar";
 import { logout, type DashboardSessionResponse } from "@/lib/api";
+import { InboxScreen } from "@/screens/InboxScreen";
+import { OverviewScreen } from "@/screens/OverviewScreen";
+import type { ScreenKey } from "@/screens/screens";
+import { SettingsScreen } from "@/screens/SettingsScreen";
+import { SourcesScreen } from "@/screens/SourcesScreen";
+import { UsageScreen } from "@/screens/UsageScreen";
+import { WidgetScreen } from "@/screens/WidgetScreen";
 
 interface DashboardShellProps {
   session: DashboardSessionResponse;
   onLoggedOut: () => void;
 }
 
+function ActiveScreen({ screen }: { screen: ScreenKey }) {
+  switch (screen) {
+    case "overview":
+      return <OverviewScreen />;
+    case "widget":
+      return <WidgetScreen />;
+    case "sources":
+      return <SourcesScreen />;
+    case "inbox":
+      return <InboxScreen />;
+    case "usage":
+      return <UsageScreen />;
+    case "settings":
+      return <SettingsScreen />;
+  }
+}
+
 export function DashboardShell({ session, onLoggedOut }: DashboardShellProps) {
   const [loggingOut, setLoggingOut] = useState(false);
+  const [screen, setScreen] = useState<ScreenKey>("overview");
 
   async function handleConfirmLogout() {
     setLoggingOut(true);
@@ -35,7 +61,7 @@ export function DashboardShell({ session, onLoggedOut }: DashboardShellProps) {
   }
 
   return (
-    <div className="min-h-screen bg-background">
+    <div className="flex min-h-screen flex-col bg-background">
       <header className="flex items-center justify-between border-b border-border px-6 py-4">
         <div>
           <p className="text-sm font-medium text-foreground">{session.tenant.name}</p>
@@ -69,11 +95,12 @@ export function DashboardShell({ session, onLoggedOut }: DashboardShellProps) {
           </DialogContent>
         </Dialog>
       </header>
-      <main className="p-6">
-        <p className="text-muted-foreground">
-          Tenant settings, sources and the escalation inbox land in Steps 6.2-6.4.
-        </p>
-      </main>
+      <div className="flex flex-1">
+        <Sidebar active={screen} onNavigate={setScreen} openEscalationCount={null} />
+        <main className="flex-1 p-6">
+          <ActiveScreen screen={screen} />
+        </main>
+      </div>
     </div>
   );
 }

@@ -41,7 +41,7 @@ export async function ensureCsrfCookie(): Promise<void> {
   });
 }
 
-async function apiFetch<T>(
+export async function apiFetch<T>(
   path: string,
   options: { method?: string; body?: unknown } = {},
 ): Promise<T> {
