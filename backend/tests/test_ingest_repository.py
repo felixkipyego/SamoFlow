@@ -27,7 +27,7 @@ from app.config import get_settings
 from app.ingest import repository as repository_module
 from app.ingest import upload_storage
 from app.ingest.extract_html import extract_html
-from app.ingest.models import AuditLog, Document, Job, Source, VerifiedDomain
+from app.ingest.models import AuditLog, DbConnection, Document, Job, Source, VerifiedDomain
 from app.ingest.qdrant_writer import HIDDEN_FIELD, embed_and_upsert, finish_ingest
 from app.ingest.queue import claim_next_job
 from app.ingest.repository import (
@@ -1886,3 +1886,196 @@ async def test_delete_and_disable_source_never_touch_a_different_sources_content
     assert len(records_b) >= 1
     assert all(record.payload["source_id"] == str(source_b_id) for record in records_b)
     assert all(HIDDEN_FIELD not in record.payload for record in records_b)
+
+
+# --- Step 6.3 fix: update_source() url-list staleness --------------------
+
+
+async def test_update_source_removing_a_url_deletes_its_document_and_qdrant_points(
+    _seeded_tenants, live_test_services, monkeypatch
+):
+    patch_embed_dense(monkeypatch)
+    ids = _seeded_tenants
+    _, client, collection_name = live_test_services
+    await qdrant.ensure_collection(client, collection_name)
+
+    kept_url = "https://url-staleness-proof.example/keep"
+    dropped_url = "https://url-staleness-proof.example/drop"
+    source_id = await _create_source(
+        ids["tenant_a"], config={"urls": [kept_url, dropped_url]}
+    )
+
+    content = extract_html(
+        "<html><head><title>T</title></head><body>"
+        "<p>real content, long enough to chunk</p></body></html>"
+    )
+    async with db_session() as session:
+        for url in (kept_url, dropped_url):
+            await finish_ingest(
+                session,
+                client,
+                collection_name,
+                content,
+                tenant_id=ids["tenant_a"],
+                source_id=source_id,
+                source_type="urls",
+                url=url,
+                file_name=None,
+                embedding_version="v1",
+            )
+        await session.commit()
+
+    async with db_session() as session:
+        docs_before = (
+            await session.execute(sa.select(Document).where(Document.source_id == source_id))
+        ).scalars().all()
+    assert {d.url for d in docs_before} == {kept_url, dropped_url}
+    dropped_doc_id = next(d.id for d in docs_before if d.url == dropped_url)
+
+    # The real fix: update_source() with `dropped_url` removed from the
+    # list, given a real client/collection_name.
+    async with db_session() as session:
+        repo = IngestRepository(tenant_id=ids["tenant_a"], session=session)
+        await repo.update_source(
+            source_id,
+            config={"urls": [kept_url]},
+            client=client,
+            collection_name=collection_name,
+        )
+        await session.commit()
+
+    async with db_session() as session:
+        docs_after = (
+            await session.execute(sa.select(Document).where(Document.source_id == source_id))
+        ).scalars().all()
+    assert {d.url for d in docs_after} == {kept_url}
+
+    # The dropped URL's own Qdrant points are gone...
+    records, _ = await client.scroll(
+        collection_name=collection_name,
+        scroll_filter=qdrant.Filter(
+            must=[
+                qdrant.FieldCondition(
+                    key="doc_id", match=qdrant.MatchValue(value=str(dropped_doc_id))
+                )
+            ]
+        ),
+        limit=20,
+    )
+    assert records == []
+
+    # ...but the KEPT url's own points survive untouched.
+    kept_records, _ = await client.scroll(
+        collection_name=collection_name,
+        scroll_filter=qdrant.tenant_filter(ids["tenant_a"]),
+        limit=20,
+    )
+    assert len(kept_records) >= 1
+    assert all(r.payload["source_url"] == kept_url for r in kept_records)
+
+
+async def test_update_source_without_client_does_not_attempt_cleanup(
+    _seeded_tenants,
+):
+    # The refresh_interval-only call shape (no client/collection_name) --
+    # confirmed to still work exactly as before this fix, never
+    # attempting the new cleanup logic (which would crash without a
+    # real client).
+    ids = _seeded_tenants
+    source_id = await _create_source(
+        ids["tenant_a"], config={"urls": ["https://example.com/a", "https://example.com/b"]}
+    )
+    async with db_session() as session:
+        repo = IngestRepository(tenant_id=ids["tenant_a"], session=session)
+        updated = await repo.update_source(source_id, config={"urls": ["https://example.com/a"]})
+        await session.commit()
+    assert updated.config == {"urls": ["https://example.com/a"]}
+
+
+# --- Step 6.3 (Felix decision B): delete_source() db_connections cleanup --
+
+
+async def test_delete_source_cleans_up_its_own_unreferenced_db_connection(
+    _seeded_tenants, live_test_services
+):
+    ids = _seeded_tenants
+    _, client, collection_name = live_test_services
+    await qdrant.ensure_collection(client, collection_name)
+    async with db_session() as session:
+        repo = IngestRepository(tenant_id=ids["tenant_a"], session=session)
+        db_connection = await repo.create_db_connection(
+            host="db.example.internal",
+            credentials={"database": "d", "user": "u", "password": "p"},  # noqa: S106
+        )
+        await session.flush()
+        source = Source(
+            tenant_id=ids["tenant_a"],
+            type="database",
+            config={"db_connection_id": str(db_connection.id)},
+            refresh_interval="daily",
+            enabled=True,
+            status="active",
+        )
+        session.add(source)
+        await session.commit()
+        source_id, db_connection_id = source.id, db_connection.id
+
+    async with db_session() as session:
+        repo = IngestRepository(tenant_id=ids["tenant_a"], session=session)
+        await repo.delete_source(source_id, client=client, collection_name=collection_name)
+        await session.commit()
+
+    async with db_session() as session:
+        remaining = (
+            await session.execute(
+                sa.select(DbConnection).where(DbConnection.id == db_connection_id)
+            )
+        ).scalar_one_or_none()
+    assert remaining is None
+
+
+async def test_delete_source_keeps_a_db_connection_still_referenced_by_another_source(
+    _seeded_tenants, live_test_services
+):
+    ids = _seeded_tenants
+    _, client, collection_name = live_test_services
+    await qdrant.ensure_collection(client, collection_name)
+    async with db_session() as session:
+        repo = IngestRepository(tenant_id=ids["tenant_a"], session=session)
+        db_connection = await repo.create_db_connection(
+            host="db.example.internal",
+            credentials={"database": "d", "user": "u", "password": "p"},  # noqa: S106
+        )
+        await session.flush()
+        source_a = Source(
+            tenant_id=ids["tenant_a"],
+            type="database",
+            config={"db_connection_id": str(db_connection.id)},
+            refresh_interval="daily",
+            enabled=True,
+            status="active",
+        )
+        source_b = Source(
+            tenant_id=ids["tenant_a"],
+            type="database",
+            config={"db_connection_id": str(db_connection.id)},
+            refresh_interval="daily",
+            enabled=True,
+            status="active",
+        )
+        session.add_all([source_a, source_b])
+        await session.commit()
+        source_a_id, db_connection_id = source_a.id, db_connection.id
+
+    async with db_session() as session:
+        repo = IngestRepository(tenant_id=ids["tenant_a"], session=session)
+        await repo.delete_source(source_a_id, client=client, collection_name=collection_name)
+        await session.commit()
+
+    async with db_session() as session:
+        remaining = (
+            await session.execute(
+                sa.select(DbConnection).where(DbConnection.id == db_connection_id)
+            )
+        ).scalar_one_or_none()
+    assert remaining is not None

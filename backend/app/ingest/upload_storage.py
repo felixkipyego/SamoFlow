@@ -40,13 +40,15 @@
 # matching Open marker). Rejected input is never written to disk at all.
 import uuid
 from pathlib import Path
+from typing import Protocol
 
 
 class UploadTooLargeError(Exception):
-    """Raised by save() when `data` exceeds `max_size_bytes`. Matches this
-    project's own plain-Exception-subclass precedent (e.g. safe_fetch.py's
-    UnsafeFetchError) -- not a ValueError, since this is a policy/limit
-    rejection, not a malformed-input error."""
+    """Raised by save()/save_streaming() when an upload exceeds
+    `max_size_bytes`. Matches this project's own plain-Exception-subclass
+    precedent (e.g. safe_fetch.py's UnsafeFetchError) -- not a
+    ValueError, since this is a policy/limit rejection, not a
+    malformed-input error."""
 
 
 def _path_for(storage_dir: Path, storage_id: uuid.UUID) -> Path:
@@ -73,6 +75,55 @@ def save(data: bytes, *, storage_dir: Path, max_size_bytes: int) -> uuid.UUID:
     storage_dir.mkdir(parents=True, exist_ok=True)
     storage_id = uuid.uuid4()
     _path_for(storage_dir, storage_id).write_bytes(data)
+    return storage_id
+
+
+# Step 6.3: read in bounded 1MiB chunks, never the whole body at once --
+# the real streaming-size-enforcement fix this task's own adversarial
+# pass names ("the size cap is enforced while streaming, not after the
+# whole file is buffered"). save() above (Step 2.7) is still correct and
+# still used wherever bytes are already fully in hand; this is a SECOND
+# primitive, specifically for the new dashboard upload endpoint's own
+# live network read, where "streamed-oversized" is a real attacker shape
+# (slow-drip a body far past the cap, forcing the server to hold or
+# buffer all of it before rejecting).
+_STREAM_CHUNK_SIZE = 1024 * 1024
+
+
+class _AsyncReadable(Protocol):
+    async def read(self, size: int) -> bytes: ...
+
+
+async def save_streaming(
+    upload: _AsyncReadable, *, storage_dir: Path, max_size_bytes: int
+) -> uuid.UUID:
+    """Like save(), but for a live, not-yet-fully-received upload
+    (`upload`: anything with an async `read(size)` -- FastAPI's own
+    `UploadFile`, duck-typed rather than imported, so this module stays
+    free of any web-framework dependency). Writes each chunk to disk as
+    it arrives and ABORTS the moment the running total exceeds
+    `max_size_bytes` -- the partial file is deleted and
+    `UploadTooLargeError` raised immediately, without reading any
+    further chunks from the client. Never holds more than one chunk in
+    memory at a time.
+    """
+    storage_dir.mkdir(parents=True, exist_ok=True)
+    storage_id = uuid.uuid4()
+    destination = _path_for(storage_dir, storage_id)
+    total = 0
+    try:
+        with destination.open("wb") as handle:
+            while True:
+                chunk = await upload.read(_STREAM_CHUNK_SIZE)
+                if not chunk:
+                    break
+                total += len(chunk)
+                if total > max_size_bytes:
+                    raise UploadTooLargeError(f"upload exceeds the {max_size_bytes}-byte limit")
+                handle.write(chunk)
+    except UploadTooLargeError:
+        destination.unlink(missing_ok=True)
+        raise
     return storage_id
 
 
