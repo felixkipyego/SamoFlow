@@ -443,3 +443,241 @@ Pushed straight to `main` (rule 4): `6eea542..195de3a`, five commits —
 `7519325` (Part A), `1202972` (Part B), `a98cd09` (Part C), `29b444b`
 (Part D), `195de3a` (Part E). Not rejected; `origin/main` had not moved
 again since the rebase base, so only one push attempt was needed.
+
+## Alignment task (2026-10-15, no 6.2 work)
+
+Re-read CLAUDE.md (including the new "Sync before work" rule),
+PROJECT_SPEC.md §2 rules 19-22 and §11.5, and the full
+docs/DECISIONS_REGISTER.md, per direct instruction, before touching
+anything. `git fetch origin && git rebase origin/main` was a no-op —
+`origin/main` had not moved since Step 6.1's own push (`2295fa9`).
+
+### Prior decisions applied (rule 19 sweep)
+
+- D-shadcn (CANDIDATE, unresolved as of the register's own last sweep)
+  and D-113-dashboard-tooling (ratified without citing/superseding
+  D-shadcn) — both already resolved by Step 6.1's own prior work
+  (`29b444b`), but the register itself was never updated to say so.
+  Resolved in the register now, citing supersession (rule 20) rather
+  than leaving the gap the register's own prior note already flagged.
+- D-6.1-admin, D-6.1-site-key-generator, D-6.1-origin-domain-normalise,
+  D-6.1-cors-same-origin, D-6.1-test-layout-placeholders,
+  D-6.1-session-field-na, D-6.1-recent-auth, D-6.1-recent-auth-scope,
+  D-6.1-pilot-plans — all newly recorded rows for work Step 6.1 already
+  built but the register never carried forward (the register was built
+  2026-10-15, BEFORE Step 6.1 shipped later the same day; this is the
+  first sweep since).
+- §11.5 point 4 ("neither track edits `backend/`, except through a
+  stop condition") — re-confirmed this alignment task's own backend
+  changes (the session-invalidation hook, item 5 below) fall under
+  Step 6.1's own already-granted exception (§11.2's own corrected
+  scope: Step 6.1 may edit `backend/`), not a new stop condition.
+- §11.5 point 6 (a new workflow file is unproven until its first real
+  CI run is green) and point 7 (zero failing tests before any push) —
+  both apply directly to this task's own push gate; see Verified,
+  below. No `gh` CLI is available in this environment to check Actions
+  runs directly — Felix is told exactly which runs to check in the
+  final report instead of this track claiming to have confirmed green.
+
+### 1. Per-worktree Python environment
+
+Already built at Step 6.1 (`.venv/`, pinned Python 3.12 from
+`/opt/miniconda3/envs/widgetplatform`, gitignored). Re-confirmed this
+task: `pip install -e backend` plus both lockfiles re-run clean;
+`python -c "import app, os; print(os.path.dirname(app.__file__))"`
+resolves to this worktree's own `backend/app`, not the shared conda
+env. No change needed.
+
+### 2. Register updates
+
+docs/DECISIONS_REGISTER.md updated in the same commit as this report:
+D-shadcn APPROVED (supersedes D-113-dashboard-tooling); a new "Step 6.1
+close-out" decisions-table section (12 rows) covering every item Step
+6.1 actually built; the stale "6.1" forward-commitments list (§2) and
+the "In-flight (5.1, 6.1)" audit (§5) both annotated RESOLVED, citing
+commits, per the file's own "RESOLVED items live in the decisions
+table, not repeated as forward-only" convention; ownership of the
+three widget-track-found backend contract gaps formally taken and
+scheduled for Step 6.2, with Felix's own additive-authorisation for
+(a) `verified_domains` in `widget_config` and (b) `conversation_id` on
+`/chat`'s `done` event recorded explicitly; a new POST-PILOT entry
+(D-postpilot-admin-no-tenant-shape) for the "platform-admin-only, no
+tenant" account-shape gap found live during Step 6.1's own adversarial
+pass. Matching PROJECT_SPEC.md §9 markers resolved in place (the
+admin-key-replacement, `revoke_domain()`-endpoint, CORS/OPTIONS, and
+`test_layout_placeholders.py` markers) and four new §9 markers appended
+(the two below, the POST-PILOT account-shape gap, and the
+session-invalidation residual gap, item 5 below) — not touching §4/§5/
+§7, per §11.5 point 3's own "not touched while either track is in
+flight" rule; §9 itself is append-safe (the widget track already
+appended there mid-flight, confirmed by reading its own 6991-6993
+entries before deciding this was safe).
+
+### 3. CSP tolerance made exact
+
+The prior tolerance (`dashboard/e2e/csp.spec.ts`) matched a free-text
+console regex (`/Applying inline style violates/i`) — too loose: it
+would have silently swallowed ANY future inline-style violation
+anywhere in the app, not just the one known, investigated case.
+
+Captured the real violation's exact shape live (a throwaway debug
+script, not committed, deleted after use) via the browser's own
+structured `securitypolicyviolation` DOM event rather than the
+free-text console message. Confirmed the message DOES carry a SHA-256
+hash (`sha256-nzTgYzXYDNe6BAHiiI7NNlfK8n/auuOAhh2t92YvuXo=` in this
+run), but deliberately did NOT match on it: the hash is computed over
+react-style-singleton's own injected CSS text, which embeds the real
+MEASURED scrollbar-gap width — platform/browser dependent (this file's
+own prior entry already names macOS-overlay-scrollbars-measure-0 vs
+Windows as a concrete case) — so a hash-based match would pass locally
+and silently fail to match in CI's own different Chromium/OS
+combination, for the identical reason this project's CSP already
+rejects hash-pinning as non-portable.
+
+The new tolerance (`isKnownScrollLockViolation()`) matches instead on
+structural fields that do NOT depend on the gap width at all:
+`effectiveDirective === "style-src-elem"`, `blockedURI === "inline"`,
+`disposition === "enforce"`, and `sourceFile` under the page's own
+`/assets/*.js` (same-origin bundle, not a specific content-hashed
+filename, so it survives the next build). The authenticated-shell test
+also now asserts the known violation fires EXACTLY once per Dialog
+open (not zero — which would mean the library stopped doing this and
+the tolerance should be deleted — and not more than one).
+
+**Proof, committed as a permanent regression test**: a new test
+deliberately injects a SECOND, differently-shaped violation (an
+external `<script src="https://example.invalid/...">`, nowhere near
+the Dialog/scroll-lock code path) on the plain login screen, and
+asserts it IS reported as unexpected — `effectiveDirective ===
+"script-src-elem"`, a different blocked URI. If the exact tolerance
+above ever regressed into something broader, this test would start
+failing. Verified live: `make dashboard-e2e` against the real backend
+stack — 5/5 passing (the 3 original login-screen tests, the new proof
+test, and the authenticated-shell/Dialog test with the new structural
+matcher).
+
+### 4. fastapi-users maintenance status (checked live, 2026-10-15)
+
+- PyPI (`https://pypi.org/project/fastapi-users/`, and
+  `https://pypi.org/pypi/fastapi-users/json` for the machine-readable
+  form): latest release v15.0.5, published 2026-03-27 (matches this
+  project's own pin exactly); classifier `Development Status :: 5 -
+  Production/Stable`.
+- GitHub README (`https://raw.githubusercontent.com/fastapi-users/
+  fastapi-users/master/README.md`), quoted verbatim: *"This project is
+  now in maintenance mode. While we'll continue to provide security
+  updates and dependency maintenance, no new features will be added.
+  We encourage you to explore the project and use it as-is, knowing it
+  will remain stable and secure. We're currently working on a new
+  Python authentication toolkit that will ultimately supersede FastAPI
+  Users. Stay tuned for updates!"*
+- GitHub API (`https://api.github.com/repos/fastapi-users/
+  fastapi-users`): not archived; last pushed 2026-08-17 (after the
+  maintenance-mode announcement — consistent with "we'll continue to
+  provide security updates"); 10 open issues.
+
+**Conclusion, stated plainly**: in maintenance mode means security
+fixes and dependency-compatibility updates continue; no new features
+will land, and an unnamed, undated successor project is in
+development. This does not change this task's own library choice —
+the security floor this project needs does not depend on new library
+features — but it is a real fact Felix should know, not a detail
+buried in a dependency comment. Not swapped in this task, per direct
+instruction. Register entry + §9 marker recorded, owner Phase 7
+(re-check before pilot go-live).
+
+### 5. Session invalidation on credential/role change
+
+**Challenged the prompt's own literal wording first, per CLAUDE.md's
+senior-engineer-judgment rule**: the task named three CLI commands —
+"a password reset, an owner re-seed, or removing platform_admin
+through the CLI" — as the triggers requiring session invalidation.
+None of those three commands exist anywhere in this codebase
+(`app/dashboard/admin_cli.py`'s own command list is create-tenant/
+assign-plan/issue-or-revoke-site-key/revoke-domain/seed-owner/
+seed-plans only; `seed_cli.py`'s own `seed_owner()` explicitly REFUSES
+to reset an existing account: *"this command does not reset an
+existing password or promote an existing account — use a direct
+database update for that"*). Building three new, unrequested CLI
+commands to satisfy this literally would itself be new feature work —
+the same sentence in the prompt explicitly rules that out ("not new
+features").
+
+**What was built instead**: the real, generic mechanism underneath all
+three named cases. `UserManager.on_after_update()`
+(`app/dashboard/auth_backend.py`) now invalidates every one of a
+user's existing `DashboardSession` rows whenever an update changes
+`password` or `is_superuser` — hooked at `BaseUserManager.update()`,
+the one real path any future password-reset or platform_admin-removal
+command would be built on, matching `admin_cli.py`'s/`seed_cli.py`'s
+own established "built on the real path, not a second one" precedent
+(see those modules' own header comments). The new primitive,
+`invalidate_all_sessions_for_user()` (`app/dashboard/repository.py`), is
+a plain bulk `DELETE`, matching this module's own existing
+flush-not-commit convention (caller commits).
+
+The real payoff: whichever future step builds a real password-reset or
+platform_admin-removal CLI command inherits this invalidation
+automatically the moment it calls `UserManager.update()`, with zero
+code of its own — not three separate call sites each having to
+remember it individually.
+
+**Named residual gap, not silently solved**: `seed_cli.py`'s own
+documented workaround ("use a direct database update for that") never
+calls `update()` at all, so a hand-edited database row bypasses this
+hook entirely. Flagged plainly in both the register and a new §9
+marker — no amount of application-layer code can close that specific
+path; only a real password-reset/admin-removal command, built the
+right way, removes the need for that workaround in the first place.
+
+**Logout invalidates the session server-side, not only the cookie**:
+already true and already covered by an existing committed test
+(`test_dashboard_routes.py::test_logout_revokes_the_session_and_
+subsequent_requests_are_401` — replays the exact, now-revoked raw
+token from a FRESH client, confirms 401, and confirms the
+`DashboardSession` row count is 0). Re-confirmed, not re-built.
+
+**A small, pre-existing inconsistency found and fixed along the way**:
+`test_dashboard_repository.py`'s own header comment already claimed
+user/session persistence is "exercised via test_dashboard_routes.py
+and test_dashboard_auth_backend.py instead" — but `test_dashboard_
+auth_backend.py` did not exist until this task created it. The
+comment was aspirational, not accurate, from Step 6.1 onward; it is
+accurate now.
+
+**Verified live, 3 consecutive runs** (new test file `backend/tests/
+test_dashboard_auth_backend.py`, 4 tests, plus the existing logout
+test): all 5 passed identically on each of 3 runs against the real
+test database (no flakes, no ordering dependency).
+
+### Duplication check
+
+Counter: this task's own code-changing sub-steps are items 3 (CSP test
+rewrite) and 5 (session-invalidation hook + new test file) — 2 total,
+below the n=4 trigger (rule 9). Item 2 (register bookkeeping) and item
+4 (a live library-maintenance check, no code) are documentation-only,
+per rule 9's own "does not count" carve-out. No duplication check run;
+none due.
+
+### Verified (final, authoritative pass)
+
+- `make lint`: clean.
+- Offline suite + `make test-all` (real test-db/test-qdrant): **1572
+  passed, 0 failed** (1568 + 4 new tests in `test_dashboard_auth_
+  backend.py`).
+- `make hooks`: unchanged marker shape.
+- `make lock-check`: clean (no new dependency added).
+- `make audit`: 0 known vulnerabilities.
+- Image job: fresh `docker build` of `backend/`, `deploy/
+  smoke-image.sh` — all 8 checks PASS (re-run this task, since
+  `backend/` changed).
+- `dashboard/`: lint/test/build/audit all clean (no dashboard source
+  changed except `e2e/csp.spec.ts`, which has no lint/build/audit
+  surface of its own beyond the suite itself).
+- `dashboard/e2e`: **5/5 passing**, including the new exact-tolerance
+  proof test, against a real backend stack (`make up`/`make migrate`,
+  a real seeded owner via piped stdin).
+- OpenAPI additive-only proof: unchanged this task (no endpoint shape
+  touched) — `docs/openapi.json` not regenerated, confirmed no drift.
+- `git status --short`: clean after commit; `.env` confirmed present
+  only as an ignored (`!!`) local file, never staged.
