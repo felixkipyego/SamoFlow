@@ -328,3 +328,80 @@ passed every time. `git status --short` cross-checked: no `.env`; no
 scoped to exactly the one Felix-authorized file
 (`git diff --stat -- backend/ docs/openapi.json` shows only
 `test_layout_placeholders.py`, `docs/openapi.json` untouched).
+
+## Part C — contract check for Step 5.2 (2026-10-15)
+
+**Field names, read from the real locked contract, not assumed**:
+`docs/openapi.json`'s `SessionResponse` = `session_token`, `visitor_secret`
+(nullable), `test_mode`, `widget_config` (loosely typed
+`additionalProperties: true` — a dict, so its real keys live in code, not
+the schema). Read `backend/app/auth/routes.py` directly for those real
+keys: `_PUBLIC_WIDGET_CONFIG_FIELDS = (title, greeting, colors, logo_url,
+position, privacy_notice_url)`, built by `_public_widget_config()` picking
+named keys one at a time from `tenant.config` (never a raw spread — a
+private key structurally cannot leak). **Confirmed adequate for Step
+5.2's own needs**: `title`/`greeting`/`colors` are consumed directly by
+the Chat UI built below; `logo_url` by its header; `position`/
+`privacy_notice_url` belong to later steps (5.1 launcher placement, 5.4
+escalation panel) but are harmless to have now. Recorded as a new §9
+marker (PROJECT_SPEC.md) that this VERIFIES — does not merely carry
+forward — `SessionResponse`'s own 1.4.g ASSUMPTION marker; the actual
+marker-comment deletion in `backend/app/auth/schemas.py` is left for
+whoever next legitimately touches that file, per the `backend/` edit
+restriction (§11.5 point 4) — not made unilaterally here.
+
+**Verified domains: confirmed ABSENT from the contract.** `grep`-ed the
+whole backend for `verified_domain`: the `verified_domains` table (Task
+2.2) is real, but is used only by ingestion's own domain-verification/
+crawl-safety path — never read by `_public_widget_config()` or anywhere
+in `/session`'s response. Per direct instruction, this does NOT stop the
+task: Step 5.2's renderer (below) allows a link only when it is `https`
+AND is one of THIS TURN's own real citation URLs
+(`app/agent/graph.py`'s `Citation.url`, round-tripped through the
+`citations` SSE event as `{items: [{n, title, url}]}` —
+`app/chat/routes.py::_build_citations_event()`) — narrower AND safer
+than a domain allowlist (a citation is a specific page SamoFlow itself
+just retrieved and cited for this exact answer; a domain match would
+allow any path on that domain, retrieved or not). New §9 marker added,
+owner the dashboard track (which owns the real `tenants.config` write
+path, Step 6.2): add `verified_domains` to `widget_config` ADDITIVELY —
+a new key, never a replacement of the existing six or a change to
+`_public_widget_config()`'s own allow-list mechanism — so Step 5.2's
+shipped renderer needs no shape change to later adopt it as a second,
+separately-gated allow rule.
+
+**The rest of the real contract, read directly from code (not
+documented in `docs/openapi.json`, which cannot express SSE streams or
+dynamically-raised status codes) — needed to build Part D against real
+behavior, not assumption**:
+- Auth: `Authorization: Bearer <session_token>`, plus the real `Origin`
+  header must appear exactly once and match the token's own origin claim
+  (`get_current_visitor`, `app/auth/dependencies.py`) — satisfied
+  automatically by `fetch()`, no special widget-side handling needed.
+- SSE event vocabulary, all four read from `app/chat/routes.py`:
+  `token` (`{text}`, an incremental append — NOT guaranteed one LLM token
+  per event), `citations` (`{items: [{n, title, url}]}`, emitted once,
+  after the full answer), `done` (`{message_id, usage, offer_escalation}`),
+  `error` (`{code, message}`, three fixed codes: `model_error`, `timeout`,
+  and a declared-but-currently-never-emitted `dependency_unavailable` —
+  the widget handles all three defensively regardless).
+- Fixed HTTP failure shapes, all real, all with a fixed `{"detail": ...}`
+  body: `413` message-too-long; `429` rate-limited (+`Retry-After`,
+  per-IP and per-visitor, separate limiters); `503` twice (quota-counter
+  startup not ready, +`Retry-After: 5`; a DB pool-checkout timeout, no
+  `Retry-After`); `409` three times (another stream already in progress
+  for this visitor; this conversation's lease is held elsewhere; this
+  `client_message_id` was already answered/is stale); `401` (missing/
+  invalid/origin-mismatched token, structurally prior to all of the
+  above). The quota-exhausted reply is NOT a distinct HTTP/SSE shape at
+  all — Task 4.3's own design streams it through the exact same
+  `token`/`citations`/`done` sequence as any other answer, with a fixed
+  tenant-support-details message and no mention of quota, by deliberate
+  server-side design (docs/SPEC.md §11) — so the widget needs no special
+  quota detection, only the same calm, fixed-text treatment for the
+  handful of real error/busy statuses above.
+
+**No other contract gap found; no stop condition (a) raised.** Everything
+Step 5.2 needs (session creation, streaming chat, citation URLs for
+link-gating, a complete fixed error vocabulary) already exists in the
+locked contract.
