@@ -26,7 +26,7 @@ fail() {
 
 # Shared by the api and worker checks below; word-splitting each
 # "-e NAME=value" token is safe since none contain whitespace.
-APP_ENV_ARGS="-e APP_ENV=development -e DATABASE_URL=postgresql+psycopg://widgetplatform:change-me@postgres:5432/widgetplatform -e QDRANT_URL=http://qdrant:6333 -e QDRANT_API_KEY=smoke-test-key -e QDRANT_READ_ONLY_API_KEY=smoke-test-readonly-key -e JWT_SIGNING_KEY=smoke-test-jwt-signing-key-32-chars-ok -e DB_CONNECTION_ENCRYPTION_KEY=smoke-test-db-connection-key-32-chars-ok -e ADMIN_API_KEY=smoke-test-admin-key-32-chars-ok-ok -e OPENAI_API_KEY=smoke-test-openai-key -e API_HOST=0.0.0.0 -e API_PORT=8000"
+APP_ENV_ARGS="-e APP_ENV=development -e DATABASE_URL=postgresql+psycopg://widgetplatform:change-me@postgres:5432/widgetplatform -e QDRANT_URL=http://qdrant:6333 -e QDRANT_API_KEY=smoke-test-key -e QDRANT_READ_ONLY_API_KEY=smoke-test-readonly-key -e JWT_SIGNING_KEY=smoke-test-jwt-signing-key-32-chars-ok -e DB_CONNECTION_ENCRYPTION_KEY=smoke-test-db-connection-key-32-chars-ok -e OPENAI_API_KEY=smoke-test-openai-key -e API_HOST=0.0.0.0 -e API_PORT=8000"
 
 stop_and_time() {
     # $1 = container id; fails unless docker stop exits 0 within 10s.
@@ -66,7 +66,7 @@ rc=$?
 set -e
 [ "$rc" -eq 2 ] || fail "bogus mode exited $rc, expected 2"
 case "$out" in
-    *"Usage: entrypoint.sh {api|worker|migrate}"*) : ;;
+    *"Usage: entrypoint.sh {api|worker|migrate|seed-owner|admin}"*) : ;;
     *) fail "bogus mode did not print the usage line: $out" ;;
 esac
 echo "PASS: bogus mode exits 2 with the usage line"

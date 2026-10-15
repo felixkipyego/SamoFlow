@@ -6,9 +6,7 @@
 # app/auth/tokens.py; Task 2.1.a extends it to
 # db_connection_encryption_key_str(), starting
 # ALLOWED_DB_CONNECTION_ENCRYPTION_KEY_CALLERS with its one real caller,
-# app/ingest/repository.py; Task 2.2.f extends it to admin_api_key_str(),
-# starting ALLOWED_ADMIN_API_KEY_CALLERS with its one real caller,
-# app/admin/dependencies.py; duplication check after 2.1.a/b moves the
+# app/ingest/repository.py; duplication check after 2.1.a/b moves the
 # secret-accessor allow-list check itself into a shared
 # check_call_allowlist() helper, tests/conftest.py, reused by
 # test_ingest_repository_guard.py -- the Settings()/errors() checks below
@@ -18,11 +16,14 @@
 # anthropic_api_key_str(), starting ALLOWED_ANTHROPIC_API_KEY_CALLERS with
 # its one real caller, app/agent/chat_model.py -- which also joins
 # ALLOWED_OPENAI_API_KEY_CALLERS as a second real caller, the chat model's
-# own primary provider): parses every .py file under backend/app and
+# own primary provider; Step 6.1 REMOVES admin_api_key_str() entirely,
+# along with its own ALLOWED_ADMIN_API_KEY_CALLERS entry below --
+# app/admin/dependencies.py (its one real caller) is deleted in the same
+# task, replaced by platform_admin sessions (app/dashboard/auth_backend.py)
+# -- not merely emptied, since Settings.admin_api_key itself no longer
+# exists): parses every .py file under backend/app and
 # backend/alembic with ast (not text search, so comments/strings never
-# trigger it) and enforces nine rules from PROJECT_SPEC.md's decisions log
-# (corrected from a stale "five" here -- there were already six distinct
-# rules below before Task 2.5.a added the seventh, not five):
+# trigger it) and enforces eight rules from PROJECT_SPEC.md's decisions log:
 #   - only app/config.py may construct Settings() directly;
 #   - nothing calls a method named errors() (that leaks raw input, see
 #     config.py's model_config comment);
@@ -35,8 +36,6 @@
 #     app/config.py;
 #   - only files listed in ALLOWED_DB_CONNECTION_ENCRYPTION_KEY_CALLERS may
 #     call db_connection_encryption_key_str() outside app/config.py;
-#   - only files listed in ALLOWED_ADMIN_API_KEY_CALLERS may call
-#     admin_api_key_str() outside app/config.py;
 #   - only files listed in ALLOWED_OPENAI_API_KEY_CALLERS may call
 #     openai_api_key_str() outside app/config.py;
 #   - only files listed in ALLOWED_ANTHROPIC_API_KEY_CALLERS may call
@@ -75,10 +74,6 @@ ALLOWED_JWT_KEY_CALLERS: tuple[str, ...] = ("app/auth/tokens.py",)
 ALLOWED_DB_CONNECTION_ENCRYPTION_KEY_CALLERS: tuple[str, ...] = ("app/ingest/repository.py",)
 
 # NOTE: adding a file here is a deliberate decision: it means that file
-# receives the real temporary admin key (Task 2.2.f). Review it by hand.
-ALLOWED_ADMIN_API_KEY_CALLERS: tuple[str, ...] = ("app/admin/dependencies.py",)
-
-# NOTE: adding a file here is a deliberate decision: it means that file
 # receives the real OpenAI API key (Task 2.5.a). Review it by hand. Task
 # 3.4.a adds app/agent/chat_model.py -- the chat model's own primary
 # provider, a second real caller alongside the embedding primitive.
@@ -109,7 +104,6 @@ _SECRET_ACCESSOR_ALLOW_LISTS: dict[str, tuple[str, ...]] = {
     "jwt_signing_key_str": ALLOWED_JWT_KEY_CALLERS,
     "jwt_signing_key_previous_str": ALLOWED_JWT_KEY_CALLERS,
     "db_connection_encryption_key_str": ALLOWED_DB_CONNECTION_ENCRYPTION_KEY_CALLERS,
-    "admin_api_key_str": ALLOWED_ADMIN_API_KEY_CALLERS,
     "openai_api_key_str": ALLOWED_OPENAI_API_KEY_CALLERS,
     "anthropic_api_key_str": ALLOWED_ANTHROPIC_API_KEY_CALLERS,
 }

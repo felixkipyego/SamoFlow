@@ -47,8 +47,28 @@ case "$mode" in
         python -m app.agent.checkpointer
         exec python -m app.qdrant
         ;;
+    seed-owner)
+        # Step 6.1: one-off operator command, never part of `up` --
+        #   docker compose --env-file .env -f deploy/docker-compose.yml \
+        #     run --rm migrate seed-owner --email ... --tenant-name "..."
+        # The password is prompted interactively (app/dashboard/
+        # seed_cli.py's own getpass.getpass() call), never a CLI argument
+        # -- "$@" below carries only --email/--tenant-name/--platform-admin,
+        # never a password.
+        shift
+        exec python -m app.dashboard.seed_cli "$@"
+        ;;
+    admin)
+        # Step 6.1: the platform-admin CLI (app/dashboard/admin_cli.py) --
+        # create-tenant, assign-plan, issue-site-key, revoke-site-key,
+        # revoke-domain, seed-plans. Same one-off `docker compose run`
+        # shape as seed-owner above, reusing the identical `migrate`
+        # service wiring.
+        shift
+        exec python -m app.dashboard.admin_cli "$@"
+        ;;
     *)
-        echo "Usage: entrypoint.sh {api|worker|migrate}" >&2
+        echo "Usage: entrypoint.sh {api|worker|migrate|seed-owner|admin}" >&2
         exit 2
         ;;
 esac

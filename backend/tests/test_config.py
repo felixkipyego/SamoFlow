@@ -27,7 +27,6 @@ def test_valid_environment_loads_with_correct_types_and_values(monkeypatch):
     assert settings.qdrant_read_only_api_key_str() == VALID_ENV["QDRANT_READ_ONLY_API_KEY"]
     assert settings.jwt_signing_key_str() == VALID_ENV["JWT_SIGNING_KEY"]
     assert settings.jwt_signing_key_previous_str() is None
-    assert settings.admin_api_key_str() == VALID_ENV["ADMIN_API_KEY"]
     assert settings.openai_api_key_str() == VALID_ENV["OPENAI_API_KEY"]
     assert settings.api_host == "127.0.0.1"
     assert settings.api_port == 8000
@@ -79,12 +78,6 @@ def test_missing_required_variable_raises_and_names_field(monkeypatch, missing):
         {"DB_CONNECTION_ENCRYPTION_KEY": "a" * 20 + " " + "a" * 20},
         {"DB_CONNECTION_ENCRYPTION_KEY": "a" * 20 + "\t" + "a" * 20},
         {"DB_CONNECTION_ENCRYPTION_KEY": "a" * 20 + "\n" + "a" * 20},
-        {"ADMIN_API_KEY": ""},
-        {"ADMIN_API_KEY": "short"},
-        {"ADMIN_API_KEY": "a" * 31},  # one character short of the minimum
-        {"ADMIN_API_KEY": "a" * 20 + " " + "a" * 20},
-        {"ADMIN_API_KEY": "a" * 20 + "\t" + "a" * 20},
-        {"ADMIN_API_KEY": "a" * 20 + "\n" + "a" * 20},
         {"OPENAI_API_KEY": ""},
         {"OPENAI_API_KEY": "has a space"},
         {"OPENAI_API_KEY": "has\ttab"},
@@ -337,40 +330,6 @@ def test_settings_error_chain_never_carries_the_db_connection_encryption_key(
     assert err.__context__ is None
 
 
-@pytest.mark.parametrize(
-    ("value", "distinctive_substring"),
-    [
-        ("distinctive-adminkey 123", "distinctive-adminkey"),
-        ("distinctive-short", "distinctive-short"),
-    ],
-)
-def test_get_settings_raises_settings_error_on_malformed_admin_api_key(
-    monkeypatch, value, distinctive_substring
-):
-    set_valid_env(monkeypatch, VALID_ENV, ADMIN_API_KEY=value)
-    with pytest.raises(SettingsError):
-        get_settings()
-
-
-@pytest.mark.parametrize(
-    ("value", "distinctive_substring"),
-    [
-        ("distinctive-adminkey 123", "distinctive-adminkey"),
-        ("distinctive-short", "distinctive-short"),
-    ],
-)
-def test_settings_error_chain_never_carries_the_admin_api_key(
-    monkeypatch, value, distinctive_substring
-):
-    set_valid_env(monkeypatch, VALID_ENV, ADMIN_API_KEY=value)
-    with pytest.raises(SettingsError) as exc_info:
-        get_settings()
-    err = exc_info.value
-    assert_secret_not_in_exception_chain(err, distinctive_substring)
-    assert err.__cause__ is None
-    assert err.__context__ is None
-
-
 def test_jwt_signing_key_previous_unset_defaults_to_none(monkeypatch):
     set_valid_env(monkeypatch, VALID_ENV)
     monkeypatch.delenv("JWT_SIGNING_KEY_PREVIOUS", raising=False)
@@ -465,6 +424,54 @@ def test_rate_limit_field_overridable_via_its_own_env_var(monkeypatch, env_var, 
 @pytest.mark.parametrize(("env_var", "attr"), RATE_LIMIT_FIELDS)
 @pytest.mark.parametrize("bad_value", ["0", "-1"])
 def test_rate_limit_field_rejects_zero_and_negative(monkeypatch, env_var, attr, bad_value):
+    set_valid_env(monkeypatch, VALID_ENV, **{env_var: bad_value})
+    with pytest.raises(ValidationError) as exc_info:
+        Settings()
+    assert env_var.lower() in str(exc_info.value)
+
+
+# Step 6.1: the six new dashboard-login/session Settings fields, same
+# "env var name is field_name.upper()" shape RATE_LIMIT_FIELDS above
+# already established -- a new, separately-named tuple rather than
+# widening that one (RATE_LIMIT_FIELDS' own header comment scopes it to
+# "the four rate-limit Settings fields" from Task 1.5.b specifically).
+DASHBOARD_FIELDS = (
+    ("DASHBOARD_LOGIN_RATE_LIMIT_PER_IP", "dashboard_login_rate_limit_per_ip"),
+    (
+        "DASHBOARD_LOGIN_RATE_LIMIT_PER_IP_WINDOW_SECONDS",
+        "dashboard_login_rate_limit_per_ip_window_seconds",
+    ),
+    ("DASHBOARD_LOGIN_RATE_LIMIT_PER_ACCOUNT", "dashboard_login_rate_limit_per_account"),
+    (
+        "DASHBOARD_LOGIN_RATE_LIMIT_PER_ACCOUNT_WINDOW_SECONDS",
+        "dashboard_login_rate_limit_per_account_window_seconds",
+    ),
+    ("DASHBOARD_SESSION_IDLE_SECONDS", "dashboard_session_idle_seconds"),
+    ("DASHBOARD_SESSION_ABSOLUTE_SECONDS", "dashboard_session_absolute_seconds"),
+)
+
+
+def test_dashboard_fields_default_values(monkeypatch):
+    set_valid_env(monkeypatch, VALID_ENV)
+    settings = Settings()
+    assert settings.dashboard_login_rate_limit_per_ip == 20
+    assert settings.dashboard_login_rate_limit_per_ip_window_seconds == 300.0
+    assert settings.dashboard_login_rate_limit_per_account == 10
+    assert settings.dashboard_login_rate_limit_per_account_window_seconds == 900.0
+    assert settings.dashboard_session_idle_seconds == 1800.0
+    assert settings.dashboard_session_absolute_seconds == 43200.0
+
+
+@pytest.mark.parametrize(("env_var", "attr"), DASHBOARD_FIELDS)
+def test_dashboard_field_overridable_via_its_own_env_var(monkeypatch, env_var, attr):
+    set_valid_env(monkeypatch, VALID_ENV, **{env_var: "7"})
+    settings = Settings()
+    assert getattr(settings, attr) == 7
+
+
+@pytest.mark.parametrize(("env_var", "attr"), DASHBOARD_FIELDS)
+@pytest.mark.parametrize("bad_value", ["0", "-1"])
+def test_dashboard_field_rejects_zero_and_negative(monkeypatch, env_var, attr, bad_value):
     set_valid_env(monkeypatch, VALID_ENV, **{env_var: bad_value})
     with pytest.raises(ValidationError) as exc_info:
         Settings()

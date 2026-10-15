@@ -292,7 +292,6 @@ VALID_ENV = {
     "QDRANT_READ_ONLY_API_KEY": "test-qdrant-readonly-key",  # noqa: S105 (test fixture value, not a real secret)
     "JWT_SIGNING_KEY": "test-jwt-signing-key-at-least-32-chars",  # noqa: S105
     "DB_CONNECTION_ENCRYPTION_KEY": "test-db-connection-key-at-least-32-chars",  # noqa: S105
-    "ADMIN_API_KEY": "test-admin-key-at-least-32-characters-long",  # noqa: S105
     "OPENAI_API_KEY": "test-openai-key",  # noqa: S105 (test fixture value, not a real secret)
     "API_HOST": "127.0.0.1",
     "API_PORT": "8000",
@@ -680,6 +679,12 @@ EXPECTED_TABLES = {
     "usage_events",
     "email_log",
     "escalations",
+    # Step 6.1: "user" (singular, fastapi-users' own convention, kept
+    # deliberately -- see app/dashboard/models.py's own header comment)
+    # plus this project's own memberships/dashboard_sessions.
+    "user",
+    "memberships",
+    "dashboard_sessions",
 }
 
 EXPECTED_PK_COLUMNS = {
@@ -697,6 +702,14 @@ EXPECTED_PK_COLUMNS = {
     "usage_events": "id",
     "email_log": "id",
     "escalations": "id",
+    # Step 6.1: "memberships" is this project's own table (a real
+    # gen_random_uuid() PK, matching every table above). "user" and
+    # "dashboard_sessions" are deliberately NOT listed here -- see
+    # test_models.py's own test_dashboard_pk_shapes_deviate_deliberately
+    # for why (fastapi-users' own User.id uses a client-side Python
+    # default, not a server-side one; DashboardSession's own PK is its
+    # token column, not a UUID at all).
+    "memberships": "id",
 }
 
 # tenant_id columns cascade from tenants (PROJECT_SPEC.md decision: DB-level
@@ -728,6 +741,13 @@ CASCADE_FK_COLUMNS = {
     # Step 4.4: escalations.tenant_id -- the identical already-established
     # rule (docs/SPEC.md §7: "tenant deletion cascades").
     ("escalations", "tenant_id"): "tenants",
+    # Step 6.1: memberships cascades from BOTH its parents -- deleting
+    # either the user or the tenant removes the membership row linking
+    # them; dashboard_sessions cascades from the user (a deleted account
+    # cannot be left with live sessions).
+    ("memberships", "tenant_id"): "tenants",
+    ("memberships", "user_id"): "user",
+    ("dashboard_sessions", "user_id"): "user",
 }
 
 # Step 4.4: escalations.conversation_id is the FIRST column in this
@@ -796,6 +816,9 @@ EXPECTED_STATUS_CHECK_CONSTRAINTS = {
         ("ck_email_log_status", frozenset({"sent", "failed", "skipped_not_configured"})),
         ("ck_email_log_threshold", frozenset({"80", "100"})),
     ],
+    # Step 6.1: v1 is single-owner only (§11.3 kickoff decision #3) -- a
+    # one-value closed vocabulary, same treatment as every one above.
+    "memberships": [("ck_memberships_role", frozenset({"owner"}))],
 }
 
 # Composite unique indexes, keyed by table -- same (name, value) shape as
