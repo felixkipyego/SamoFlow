@@ -57,6 +57,7 @@ from app.auth.secrets import generate_visitor_secret, hash_visitor_secret
 from app.config import get_settings
 from app.dashboard.models import DashboardSession, User
 from app.dashboard.passwords import password_helper
+from app.dashboard.repository import invalidate_all_sessions_for_user
 from app.db import get_db_session
 
 SESSION_COOKIE_NAME = "__Host-session"
@@ -76,6 +77,42 @@ class UserManager(UUIDIDMixin, BaseUserManager[User, uuid.UUID]):
             raise exceptions.InvalidPasswordException(
                 reason=f"password must be at least {MIN_PASSWORD_LENGTH} characters"
             )
+
+    async def on_after_update(self, user: User, update_dict: dict, request=None) -> None:
+        # Alignment task (2026-10-15), a named security follow-up: "a
+        # password reset, an owner re-seed, or removing platform_admin
+        # through the CLI must invalidate ALL of that user's existing
+        # sessions immediately." None of those three CLI commands exist
+        # yet (admin_cli.py's own command list, Felix's 2026-10-15
+        # correction, names create-tenant/assign-plan/issue-or-revoke-
+        # site-key/revoke-domain/seed-owner only -- never a password
+        # reset or a platform_admin removal) -- building three new,
+        # unrequested CLI surfaces to satisfy this would itself be new
+        # feature work this same task explicitly rules out ("not new
+        # features"). Hooked here instead, at BaseUserManager's own
+        # `update()` -- the one real path this project's own admin_cli.py/
+        # seed_cli.py precedent already builds every mutation on top of
+        # (see those modules' own header comments) -- so whichever future
+        # command resets a password or grants/revokes platform_admin
+        # inherits this invalidation automatically the moment it calls
+        # `UserManager.update()`, with no code of its own, rather than
+        # three separate call sites each having to remember it
+        # individually. `update_dict` carries the RAW requested fields
+        # (fastapi_users.manager.BaseUserManager.update()'s own source,
+        # confirmed by reading it directly: `user_update.
+        # create_update_dict()`/`..._superuser()`, built BEFORE password
+        # hashing) -- "password" here means a new password was requested,
+        # not that `hashed_password` already changed.
+        #
+        # Does NOT close seed_cli.py's own named gap ("a user with email
+        # ... already exists; this command does not reset an existing
+        # password... use a direct database update for that") -- a
+        # hand-edited database row never calls update() at all, so no
+        # amount of code here can enforce this invariant for that
+        # specific documented workaround; flagged plainly, not silently
+        # assumed solved.
+        if "password" in update_dict or "is_superuser" in update_dict:
+            await invalidate_all_sessions_for_user(self.user_db.session, user.id)
 
 
 async def get_user_db(session: AsyncSession = Depends(get_db_session)):  # noqa: B008

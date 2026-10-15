@@ -11,10 +11,10 @@
 # object exists yet at the point they are called).
 import uuid
 
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.dashboard.models import Membership
+from app.dashboard.models import DashboardSession, Membership
 
 
 async def create_membership(
@@ -41,3 +41,19 @@ async def get_membership_for_user(session: AsyncSession, user_id: uuid.UUID) -> 
         .limit(1)
     )
     return result.scalar_one_or_none()
+
+
+async def invalidate_all_sessions_for_user(session: AsyncSession, user_id: uuid.UUID) -> int:
+    # Alignment task (2026-10-15): a password reset, an owner re-seed, or
+    # a platform_admin grant/revoke must not leave a stolen or
+    # now-wrong-privilege session usable until it idles out on its own --
+    # see app/dashboard/auth_backend.py's own UserManager.on_after_update
+    # override, the one real caller of this function today. A bulk
+    # DELETE, not a loop over get_by_token()/delete() pairs: this needs
+    # every one of a user's sessions gone in one statement, not just the
+    # single token a normal logout already handles (destroy_token()).
+    result = await session.execute(
+        delete(DashboardSession).where(DashboardSession.user_id == user_id)
+    )
+    await session.flush()
+    return result.rowcount
