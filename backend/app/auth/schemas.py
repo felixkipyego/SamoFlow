@@ -17,10 +17,12 @@ class SessionRequest(BaseModel):
 
 
 class SessionResponse(BaseModel):
-    # ASSUMPTION: docs/SPEC.md §4.2 names what the session response carries
-    # (a JWT, the visitor secret on first visit, test_mode, and the public
-    # widget config) but never fixes the JSON field names themselves --
-    # these are this task's own choice, not a spec-mandated wire contract.
+    # VERIFIED at Step 5.1 Part C (2026-10-15, docs/DECISIONS_REGISTER.md's
+    # "Backend contract gaps" / D-6.1-session-field-na): the widget track,
+    # the first real consumer, confirmed all four fields here and all six
+    # _PUBLIC_WIDGET_CONFIG_FIELDS keys are exactly what Step 5.2 needs --
+    # this is no longer an unverified assumption, per rule 10 ("verify then
+    # remove ASSUMPTION").
     # visitor_secret is None on a return visit (docs/SPEC.md §4.2: "do NOT
     # return a new secret") -- present in the JSON body as `null`, per
     # Pydantic's default serialization of an Optional field, not omitted.

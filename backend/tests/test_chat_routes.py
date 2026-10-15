@@ -1250,3 +1250,65 @@ async def test_get_messages_drops_a_trailing_incomplete_turn(monkeypatch, _seede
 
     assert messages_response.status_code == 200
     assert messages_response.json()["messages"] == []
+
+
+# --- Step 6.2, additive: `done`'s own new `conversation_id` field -----------
+
+
+async def test_done_event_carries_the_real_new_conversation_id_on_a_first_turn(
+    monkeypatch, _seeded
+):
+    app = await _build_app(monkeypatch)
+    token = _token_for(_seeded)
+    async with await http_client(app) as client:
+        async with client.stream(
+            "POST",
+            "/api/v1/chat",
+            json={"message": "hi there", "client_message_id": str(uuid.uuid4())},
+            headers={"Authorization": f"Bearer {token}", "Origin": ORIGIN},
+        ) as response:
+            body = await response.aread()
+    events = _parse_sse(body.decode())
+    done_events = [e for e in events if e["event"] == "done"]
+    assert len(done_events) == 1
+    returned_cid = done_events[0]["conversation_id"]
+
+    async with db_session() as session:
+        rows = (await session.execute(Conversation.__table__.select())).fetchall()
+    assert len(rows) == 1
+    assert returned_cid == str(rows[0].cid)
+
+
+async def test_done_event_carries_conversation_id_on_a_replayed_message_too(monkeypatch, _seeded):
+    app = await _build_app(monkeypatch)
+    token = _token_for(_seeded)
+    client_message_id = str(uuid.uuid4())
+    async with await http_client(app) as client:
+        async with client.stream(
+            "POST",
+            "/api/v1/chat",
+            json={"message": "hi there", "client_message_id": client_message_id},
+            headers={"Authorization": f"Bearer {token}", "Origin": ORIGIN},
+        ) as first:
+            first_body = await first.aread()
+        first_cid = [e for e in _parse_sse(first_body.decode()) if e["event"] == "done"][0][
+            "conversation_id"
+        ]
+
+        # The exact same client_message_id again, same conversation --
+        # the idempotent-replay path (a SEPARATE code path from a real
+        # turn, confirmed by this file's own existing tests) must carry
+        # the identical real conversation_id too, not omit it.
+        async with client.stream(
+            "POST",
+            "/api/v1/chat",
+            json={
+                "message": "hi there",
+                "client_message_id": client_message_id,
+                "conversation_id": first_cid,
+            },
+            headers={"Authorization": f"Bearer {token}", "Origin": ORIGIN},
+        ) as second:
+            second_body = await second.aread()
+    second_done = [e for e in _parse_sse(second_body.decode()) if e["event"] == "done"][0]
+    assert second_done["conversation_id"] == first_cid

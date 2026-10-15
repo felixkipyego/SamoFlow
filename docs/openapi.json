@@ -1,6 +1,55 @@
 {
   "components": {
     "schemas": {
+      "AlertEmailsUpdate": {
+        "additionalProperties": false,
+        "properties": {
+          "alert_email": {
+            "anyOf": [
+              {
+                "format": "email",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Alert Email"
+          },
+          "escalation_email": {
+            "anyOf": [
+              {
+                "format": "email",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Escalation Email"
+          }
+        },
+        "title": "AlertEmailsUpdate",
+        "type": "object"
+      },
+      "AllowedOriginsUpdate": {
+        "additionalProperties": false,
+        "properties": {
+          "allowed_origins": {
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 20,
+            "title": "Allowed Origins",
+            "type": "array"
+          }
+        },
+        "required": [
+          "allowed_origins"
+        ],
+        "title": "AllowedOriginsUpdate",
+        "type": "object"
+      },
       "ChatRequest": {
         "additionalProperties": false,
         "properties": {
@@ -251,6 +300,31 @@
         "title": "HTTPValidationError",
         "type": "object"
       },
+      "InstallSnippetResponse": {
+        "properties": {
+          "base_url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Base Url"
+          },
+          "site_key": {
+            "title": "Site Key",
+            "type": "string"
+          }
+        },
+        "required": [
+          "site_key",
+          "base_url"
+        ],
+        "title": "InstallSnippetResponse",
+        "type": "object"
+      },
       "LoginRequest": {
         "additionalProperties": false,
         "properties": {
@@ -268,6 +342,29 @@
           "password"
         ],
         "title": "LoginRequest",
+        "type": "object"
+      },
+      "RetentionUpdate": {
+        "additionalProperties": false,
+        "properties": {
+          "escalation_retention_months": {
+            "maximum": 24.0,
+            "minimum": 1.0,
+            "title": "Escalation Retention Months",
+            "type": "integer"
+          },
+          "retention_days": {
+            "maximum": 90.0,
+            "minimum": 1.0,
+            "title": "Retention Days",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "retention_days",
+          "escalation_retention_months"
+        ],
+        "title": "RetentionUpdate",
         "type": "object"
       },
       "SessionRequest": {
@@ -331,6 +428,275 @@
         "title": "SessionResponse",
         "type": "object"
       },
+      "SiteKeyResponse": {
+        "properties": {
+          "allowed_origins": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Allowed Origins",
+            "type": "array"
+          },
+          "environment": {
+            "title": "Environment",
+            "type": "string"
+          },
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
+          "key": {
+            "title": "Key",
+            "type": "string"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "key",
+          "allowed_origins",
+          "environment",
+          "status"
+        ],
+        "title": "SiteKeyResponse",
+        "type": "object"
+      },
+      "SupportDetailsUpdate": {
+        "additionalProperties": false,
+        "properties": {
+          "support_contact_link": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Support Contact Link"
+          },
+          "support_email": {
+            "anyOf": [
+              {
+                "format": "email",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Support Email"
+          },
+          "support_hours": {
+            "anyOf": [
+              {
+                "maxLength": 200,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Support Hours"
+          },
+          "support_message": {
+            "anyOf": [
+              {
+                "maxLength": 1000,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Support Message"
+          },
+          "support_phone": {
+            "anyOf": [
+              {
+                "maxLength": 40,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Support Phone"
+          }
+        },
+        "title": "SupportDetailsUpdate",
+        "type": "object"
+      },
+      "TenantConfigResponse": {
+        "properties": {
+          "alert_email": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Alert Email"
+          },
+          "colors": {
+            "additionalProperties": true,
+            "title": "Colors",
+            "type": "object"
+          },
+          "escalation_email": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Escalation Email"
+          },
+          "escalation_retention_months": {
+            "title": "Escalation Retention Months",
+            "type": "integer"
+          },
+          "greeting": {
+            "title": "Greeting",
+            "type": "string"
+          },
+          "logo_url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Logo Url"
+          },
+          "position": {
+            "title": "Position",
+            "type": "string"
+          },
+          "privacy_notice_url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Privacy Notice Url"
+          },
+          "retention_days": {
+            "title": "Retention Days",
+            "type": "integer"
+          },
+          "support_contact_link": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Support Contact Link"
+          },
+          "support_email": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Support Email"
+          },
+          "support_hours": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Support Hours"
+          },
+          "support_message": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Support Message"
+          },
+          "support_phone": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Support Phone"
+          },
+          "title": {
+            "title": "Title",
+            "type": "string"
+          },
+          "trace_text_enabled": {
+            "title": "Trace Text Enabled",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "support_email",
+          "support_phone",
+          "support_contact_link",
+          "support_hours",
+          "support_message",
+          "alert_email",
+          "escalation_email",
+          "title",
+          "greeting",
+          "colors",
+          "logo_url",
+          "position",
+          "privacy_notice_url",
+          "retention_days",
+          "escalation_retention_months",
+          "trace_text_enabled"
+        ],
+        "title": "TenantConfigResponse",
+        "type": "object"
+      },
+      "TraceTextUpdate": {
+        "additionalProperties": false,
+        "properties": {
+          "trace_text_enabled": {
+            "title": "Trace Text Enabled",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "trace_text_enabled"
+        ],
+        "title": "TraceTextUpdate",
+        "type": "object"
+      },
       "ValidationError": {
         "properties": {
           "ctx": {
@@ -369,6 +735,78 @@
           "type"
         ],
         "title": "ValidationError",
+        "type": "object"
+      },
+      "WidgetColors": {
+        "additionalProperties": false,
+        "properties": {
+          "primary": {
+            "title": "Primary",
+            "type": "string"
+          }
+        },
+        "required": [
+          "primary"
+        ],
+        "title": "WidgetColors",
+        "type": "object"
+      },
+      "WidgetLookUpdate": {
+        "additionalProperties": false,
+        "properties": {
+          "colors": {
+            "$ref": "#/components/schemas/WidgetColors"
+          },
+          "greeting": {
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Greeting",
+            "type": "string"
+          },
+          "logo_url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Logo Url"
+          },
+          "position": {
+            "enum": [
+              "left",
+              "right"
+            ],
+            "title": "Position",
+            "type": "string"
+          },
+          "privacy_notice_url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Privacy Notice Url"
+          },
+          "title": {
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Title",
+            "type": "string"
+          }
+        },
+        "required": [
+          "title",
+          "greeting",
+          "colors",
+          "position"
+        ],
+        "title": "WidgetLookUpdate",
         "type": "object"
       }
     },
@@ -690,6 +1128,370 @@
           }
         ],
         "summary": "Me"
+      }
+    },
+    "/api/v1/dashboard/tenant": {
+      "get": {
+        "operationId": "get_tenant_config_api_v1_dashboard_tenant_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TenantConfigResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "security": [
+          {
+            "APIKeyCookie": []
+          }
+        ],
+        "summary": "Get Tenant Config"
+      }
+    },
+    "/api/v1/dashboard/tenant/alert-emails": {
+      "patch": {
+        "operationId": "update_alert_emails_api_v1_dashboard_tenant_alert_emails_patch",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AlertEmailsUpdate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TenantConfigResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "APIKeyCookie": []
+          }
+        ],
+        "summary": "Update Alert Emails"
+      }
+    },
+    "/api/v1/dashboard/tenant/install-snippet": {
+      "get": {
+        "operationId": "get_install_snippet_api_v1_dashboard_tenant_install_snippet_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InstallSnippetResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "security": [
+          {
+            "APIKeyCookie": []
+          }
+        ],
+        "summary": "Get Install Snippet"
+      }
+    },
+    "/api/v1/dashboard/tenant/retention": {
+      "patch": {
+        "operationId": "update_retention_api_v1_dashboard_tenant_retention_patch",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RetentionUpdate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TenantConfigResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "APIKeyCookie": []
+          }
+        ],
+        "summary": "Update Retention"
+      }
+    },
+    "/api/v1/dashboard/tenant/site-keys": {
+      "get": {
+        "operationId": "list_site_keys_api_v1_dashboard_tenant_site_keys_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/SiteKeyResponse"
+                  },
+                  "title": "Response List Site Keys Api V1 Dashboard Tenant Site Keys Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "security": [
+          {
+            "APIKeyCookie": []
+          }
+        ],
+        "summary": "List Site Keys"
+      },
+      "post": {
+        "operationId": "create_site_key_api_v1_dashboard_tenant_site_keys_post",
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SiteKeyResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "security": [
+          {
+            "APIKeyCookie": []
+          }
+        ],
+        "summary": "Create Site Key"
+      }
+    },
+    "/api/v1/dashboard/tenant/site-keys/{site_key_id}/origins": {
+      "patch": {
+        "operationId": "update_site_key_origins_api_v1_dashboard_tenant_site_keys__site_key_id__origins_patch",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "site_key_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Site Key Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AllowedOriginsUpdate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SiteKeyResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "APIKeyCookie": []
+          }
+        ],
+        "summary": "Update Site Key Origins"
+      }
+    },
+    "/api/v1/dashboard/tenant/support-details": {
+      "patch": {
+        "operationId": "update_support_details_api_v1_dashboard_tenant_support_details_patch",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SupportDetailsUpdate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TenantConfigResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "APIKeyCookie": []
+          }
+        ],
+        "summary": "Update Support Details"
+      }
+    },
+    "/api/v1/dashboard/tenant/trace-text": {
+      "patch": {
+        "operationId": "update_trace_text_api_v1_dashboard_tenant_trace_text_patch",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TraceTextUpdate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TenantConfigResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "APIKeyCookie": []
+          }
+        ],
+        "summary": "Update Trace Text"
+      }
+    },
+    "/api/v1/dashboard/tenant/widget-look": {
+      "patch": {
+        "operationId": "update_widget_look_api_v1_dashboard_tenant_widget_look_patch",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WidgetLookUpdate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TenantConfigResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "APIKeyCookie": []
+          }
+        ],
+        "summary": "Update Widget Look"
       }
     },
     "/api/v1/session": {

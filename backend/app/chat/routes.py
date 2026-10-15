@@ -496,7 +496,12 @@ async def _stream_turn(
             yield _sse_event(
                 event_id,
                 "done",
-                {"message_id": str(uuid.uuid4()), "usage": None, "offer_escalation": False},
+                {
+                    "message_id": str(uuid.uuid4()),
+                    "usage": None,
+                    "offer_escalation": False,
+                    "conversation_id": str(conversation_id),
+                },
             )
             return
 
@@ -594,6 +599,16 @@ async def _stream_turn(
                     else None
                 ),
                 "offer_escalation": last_node in _ESCALATION_OFFERED_NODES,
+                # Step 6.2, additive (Felix's own pre-authorisation,
+                # docs/DECISIONS_REGISTER.md "Backend contract gaps found
+                # by the widget track"): a NEW key on the existing `done`
+                # payload, present on every turn (not only the first) --
+                # the widget's own CURRENT workaround
+                # (ChatController._discoverConversationIdIfUnknown(),
+                # widget/chat/src/chat-controller.js) keeps working
+                # unchanged; it simply has a cheaper, direct way to learn
+                # this value available once it chooses to read it.
+                "conversation_id": str(conversation_id),
             },
         )
     finally:
