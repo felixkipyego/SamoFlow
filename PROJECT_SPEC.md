@@ -6276,7 +6276,7 @@ Current: Step 4.3 (Usage, quotas and alert emails — `PlanLimits` typed schema 
 This same task also ran Part A (fixed the real `make test-all`/CI-red failures — the eval-collection collision, the lifespan health-check regression, and a module-identity test bug, all found with evidence; see the Part A decision-log entry, §5) and Part B [SECURITY] (an adversarial pass on Step 4.2's conversation reads and the retention sweep — three real findings fixed: no cap on `list_conversations()`, `last_message_at` never updating, the retention sweep not excluding an actively-leased conversation; see the Part B decision-log entry, §5). Stop condition (d) applied under its THEN-current wording — the batch ended there.
 
 A second batched prompt (2026-10-15) ran Part A (refined stop condition (d) so a fixed-in-scope [SECURITY] finding no longer stops a batch; added `pytest-timeout`, 60s global, confirmed live; the n=4 duplication check, no new findings), **Part B [SECURITY] — Step 4.4 (Escalation) — Done**: real YAML phrase/pattern detection (`config/escalation_phrases.yaml`, `app/agent/escalation_phrases.py`) plus the structural "two fallbacks in a row" signal; the real `_coordinator_node`; the real `POST /api/v1/conversations/{cid}/escalate` endpoint (`app/handoff/routes.py`) with a new `escalations` table (migration `8837877f0360`); the shared markdown-unescape helper (`app/text_escaping.py`, kickoff decision #13); HTML-escaped email delivery (`send_email()`'s new `subtype="html"`); per-visitor rate limiting, one-open-per-conversation, a per-tenant hourly email cap; a fifth self-perpetuating retention-sweep job type. Full adversarial pass held every named case, converted to committed regression tests — see the Part B decision-log entry, §5, for the full list. REFINED stop condition (d) applied correctly: work continued to Part C since every finding was fixed in scope.
-Next: Step 4.5 (Phoenix tracing) — per docs/SPEC.md §18's own Phase 4 step list (4.1 Done; 4.2 Done; 4.3 Done; 4.4 Done; 4.5 Phoenix tracing; 4.6 Phase 4 acceptance). Not started this task.
+Next: Step 4.5 (Phoenix tracing) — per docs/SPEC.md §18's own Phase 4 step list (4.1 Done; 4.2 Done; 4.3 Done; 4.4 Done; 4.5 Phoenix tracing; 4.6 Phase 4 acceptance). Not started — Part C of the second batched prompt was documentation-only planning (§11), covering 4.5 onward through Phase 7; see that section for the full remaining-steps inventory, batch plan, kickoff decisions and estimate.
 Do not modify (completed tasks): 1.1.a, 1.1.b, 1.1.c, 1.1.d, 1.1.e, 1.1.f, 1.1.g, 1.1.h, 1.1.i, 1.1.j, 1.1.k, 1.1.l, 1.1.m, 1.1.n, 1.1.o.a, 1.1.o.b, 1.1.o.c, 1.1.o.d, 1.1.o.e, 1.1.o.f, 1.1.o.g, 1.1.o.h, 1.1b, 1.1c, 1.2.a, 1.2.b, 1.2.c, 1.2.d, 1.2.e, 1.2.f, 1.3.a1, 1.3.a2, 1.3.b, 1.3.c, 1.3.d, 1.3.e, 1.3.f, 1.4.a, 1.4.b, 1.4.c, 1.4.d, 1.4.e, 1.4.f, 1.4.g, 1.4.h, 1.4.i, 1.4.j, 1.4.k, 1.4.l, 1.5.a, 1.5.b, 1.5.c, 1.5.d, 1.5.e, 1.5.f, 1.6.a, 1.6.b, 1.6.c, 1.6.d, 1.6.e, 2.1.a, 2.1.b, 2.1.c, 2.1.d, 2.1.e, 2.1.f, 2.1.g, 2.1.h, 2.2.a, 2.2.b, 2.2.c, 2.2.d, 2.2.e, 2.2.f, 2.2.g, 2.2.h, 2.2.i, 2.3.a, 2.3.b, 2.3.c, 2.3.d, 2.3.e, 2.4.a, 2.4.b, 2.4.c, 2.4.d, 2.4.e, 2.4.f, 2.4.g, 2.5.a, 2.5.b, 2.5.c, 2.5.d, 2.5.e, 2.5.f, 2.6.a, 2.6.b, 2.6.c, 2.6.d, 2.6.e, 2.6.f, 2.7.a, 2.7.b, 2.7.c, 2.7.d, 2.7.e, 2.7.f, 2.8.a, 2.8.b, 2.8.c, 2.8.d, 2.8.e, 2.8.f, 2.9.a, 2.9.b, 2.9.c, 2.9.d, 2.9.e, 2.9.f, 2.9.g, 2.10.a, 2.10.b, 2.10.c, 3.1.a, 3.1.b, 3.1.c, 3.1.d, 3.1.e, 3.1.f, 3.2.a, 3.2.b, 3.2.c, 3.2.d, 3.3.a, 3.3.b, 3.3.c, 3.3.d, 3.4.a, 3.4.b, 3.4.c, 3.4.d, 3.4.e, 3.4.f, 3.4.g, 3.5.a, 3.5.b, 3.5.c, 3.5.d, 3.5.e, 3.7.a, 3.7.b, 3.7.c, 3.7.d, 3.7.e, 3.7.f, 3.7.g, 3.7.h, 3.7.i, 3.8, 4.1, 4.2, 4.3, 4.4.
 
 ### Step 1.1 task list (approved)
@@ -6917,3 +6917,82 @@ Every open decision Phase 4 needs, drawn from docs/SPEC.md §7/§9/§10/§13/§1
 11. `usage_events` columns (Step 4.3) — recommend the 7-column shape above.
 12. Escalation detection/reply (Step 4.4) — already decided, build the named YAML mechanism.
 13. Markdown-unescape helper (Step 4.4) — recommend building it once now, shared forward with Step 6.4.
+
+## 11. Phase 5–7 planning and kickoff decisions (recorded 2026-10-15, Step 4.4 close-out)
+
+Part C of the same batched prompt that built Step 4.4 — documentation only, no code. Covers everything remaining after 4.4: the rest of Phase 4, and Phases 5–7 in full, drawn from docs/SPEC.md §12/§14/§17/§18 and this project's own real architecture as it stands today (4.1–4.4 done).
+
+### 11.1 Remaining-steps inventory
+
+Judged against **what a first paying pilot tenant actually needs** — not every documented feature, and not what Felix-as-operator might separately want. Where the spec already decides something (mechanism named, just unbuilt), that is stated plainly rather than re-opened.
+
+| Step | Delivers | [SECURITY]? | Pilot bar | Dependencies |
+|---|---|---|---|---|
+| 4.5 Phoenix tracing | Self-hosted request/turn tracing, 30-day text retention with the per-tenant auto-switch-off rule | No | **PILOT-MUST** — fully prescriptive (§13), cheap, and needed to debug a real paying tenant's production issues at all | 4.1–4.4 |
+| 4.6 Phase 4 acceptance | Verifies 4.1–4.5 together | No | **PILOT-MUST** — administrative close-out, trivial once 4.1–4.5 ship | 4.1–4.5 |
+| 5.1 Loader and shadow DOM shell | `widget.js`, the embeddable loader | No | **PILOT-MUST** — no widget, no product | 4.1 |
+| 5.2 Chat UI core [SECURITY] | The real Preact chat UI: streaming, sanitized rendering, link/image restrictions | **Yes** | **PILOT-MUST** — the actual visitor-facing chat experience | 5.1, 4.1 |
+| 5.3 Conversations UI | "Previous chats" list, retry button | No | **PILOT-MUST** — `GET /conversations` (4.2) was built specifically for this; shipping the backend with no UI wastes already-built work and a real customer expects chat history | 5.2 |
+| 5.4 Escalation panel and fallback UI | The "Talk to a person" button, consent panel, support-details fallback display | No (SECURITY-adjacent: consent/contact fields) | **PILOT-MUST** — Step 4.4's own real endpoint has no caller without this | 5.2, 4.4 |
+| 5.5 Theming, accessibility and CSP | Tenant branding (colors/logo/greeting), WCAG 2.2 AA, strict-CSP compatibility | No | **PILOT-MUST for basic theming** (a paying tenant needs its own branding on day one); full WCAG-depth polish can harden post-pilot once a real tenant is live | 5.1 |
+| 5.6 Phase 5 acceptance | Verifies 5.1–5.5 | No | **PILOT-MUST** — administrative | 5.1–5.5 |
+| 6.1 Dashboard authentication [SECURITY] | Real tenant login, replacing the temporary admin key | **Yes** | **PILOT-MUST, SCOPED DOWN** — see kickoff decision #1 below: a single-owner login now, not the full team-invite/2FA/email-verification system §12 eventually wants | none (independent of the widget track) |
+| 6.2 Tenant settings | Support details, escalation email, retention controls, widget theme editing | No | **PILOT-MUST** — the tenant must configure these themselves, not via Felix hand-editing JSONB | 6.1 |
+| 6.3 Sources screens | Add/manage content sources, domain verification UI | SECURITY-adjacent (domain verification) | **PILOT-MUST** — ongoing content management without Felix hand-seeding every update | 6.1 |
+| 6.4 Escalation inbox and usage | The real dashboard view of 4.4's escalations, plus the usage meter | No | **PILOT-MUST** — email alone is a notification, not a workflow; this is also where the deferred unsafe/abusive-input async review (the Task 3.4.g marker) eventually lands | 6.1, 4.4, 4.3 |
+| 6.5 Platform admin | Felix's own tenant/plan management screen | No | **POST-PILOT** — the existing temporary admin-key API already does this for a single hand-picked pilot tenant; a UI here has no tenant-facing value yet. §9 marker: owner — whoever onboards the second tenant or the first non-Felix-operated one | 6.1 |
+| 6.6 Phase 6 acceptance | Verifies 6.1–6.4 | No | **PILOT-MUST** — administrative | 6.1–6.4 |
+| 7.1 Load tests | k6 streaming load test | No | **PILOT-MUST, SCOPED DOWN** — a lighter test matching real pilot-scale traffic, not the full 200-concurrent-stream target (§17's own target matters once scaling past one pilot, not before) | 4.1–4.4, 5.1–5.4 |
+| 7.2 Full security and injection run [SECURITY] | The full adversarial/injection suite, end to end | **Yes** | **PILOT-MUST** — a paying tenant's data deserves this before launch; §18's own explicit go-live gate | everything else |
+| 7.3 Backups, restore drill and monitoring | Nightly backups, a real restore drill, uptime/disk/memory alerts | No (data-durability-critical) | **PILOT-MUST** — a tenant's content and escalations must be durable from day one | deploy target chosen (kickoff decision #4) |
+| 7.4 Go-live checklist and spec reconciliation | Final sign-off | No | **PILOT-MUST** — administrative gate | everything else |
+
+**POST-PILOT, tracked**: only 6.5 (Platform admin) — see its own §9 marker above. Nothing else in the PILOT-MUST path above is silently dropped.
+
+### 11.2 Batch plan
+
+[SECURITY] steps run alone (rule 14); plumbing batches. **8 prompts** cover the full PILOT-MUST path:
+
+1. **4.5 + 4.6** (plumbing, batched) — Phoenix tracing wiring, Phase 4 acceptance close-out.
+2. **5.1** (plumbing) — Loader and shadow DOM shell. *Widget track starts here.*
+3. **5.2** [SECURITY], alone — Chat UI core.
+4. **5.3 + 5.4 + 5.5 + 5.6** (plumbing, batched) — Conversations UI, escalation panel, theming/a11y/CSP, Phase 5 acceptance. *Widget track ends here.*
+5. **6.1** [SECURITY], alone — Dashboard authentication. *Dashboard track starts here.*
+6. **6.2 + 6.3 + 6.4 + 6.6** (plumbing, batched) — Tenant settings, sources screens, escalation inbox/usage, Phase 6 acceptance. *Dashboard track ends here.*
+7. **7.1 + 7.3 + 7.4** (plumbing/ops, batched) — Scoped load test, backups/restore drill/monitoring, go-live checklist.
+8. **7.2** [SECURITY], alone — Full security and injection run (the final gate).
+
+**Parallel-worktree opportunity**: the backend API contract (every endpoint the widget and dashboard both consume — `/session`, `/chat`, `/conversations`, `/conversations/{cid}/escalate`) is effectively LOCKED as of this task's own close-out — 4.5/4.6 add tracing and acceptance, no new endpoints. **Prompts 2–4 (widget, Phase 5) and prompts 5–6 (dashboard, Phase 6) touch fully disjoint directories (`widget/` vs `dashboard/`) and depend only on that already-frozen contract, never on each other's own code** — they can run as two parallel git worktrees once prompt 1 lands. Prompts 7–8 (Phase 7) depend on BOTH tracks being done (real end-to-end load/security testing needs the real UI) and stay strictly sequential after the two tracks rejoin.
+
+### 11.3 Kickoff decision list
+
+Ordered by which prompt each one blocks. Genuinely open questions only — widget auth/embed (docs/SPEC.md §4) and the dashboard's own screen list (§12) are **already decided by the spec**, not reopened here.
+
+**Blocks Prompt 2 (5.1, Loader):**
+
+1. **Widget bundler/build tooling.** Question: docs/SPEC.md names the size budgets (§17: loader ~4KB gzipped, chat UI ~60KB gzipped) but no build tool. Options: (a) esbuild; (b) Vite in library mode; (c) Rollup directly. **Recommended: (a) esbuild** — the least tooling overhead for the tightest budget, matching this project's own "smallest standard mechanism" discipline (rule 11).
+
+**Blocks Prompt 5 (6.1, Dashboard authentication) — and, via the parallel track, can be answered concurrently with #1 above:**
+
+2. **Dashboard component/CSS tooling.** docs/SPEC.md §12 names "React SPA" but explicitly defers the rest ("chosen at the Step 6.1 breakdown under rule 8"). Options: (a) Vite + React + CSS Modules, design tokens as CSS custom properties (matching §12's own "Visual system" bullet exactly); (b) a component library (e.g. Radix/shadcn) on top. **Recommended: (a)** — no new runtime dependency risk, fastest dev loop, and §12 already specifies the token-based visual system directly; a component library can be layered in later without a rewrite.
+3. **Dashboard auth scope for the pilot.** Question: build docs/SPEC.md §12's full system now (signup, mandatory email verification, team invites, argon2id, rate-limited login/lockouts) or a scoped-down version. Options: (a) the full system, exactly as spec'd; (b) a single-owner login only (argon2id password login, Felix seeds the one pilot tenant's owner account directly, no self-signup/email-verification/team-invites yet). **Recommended: (b)** — a single hand-picked pilot tenant does not need self-signup or team invites; building the full multi-user system now is unused mechanism ahead of real need (rule 11), and widening it later (once there's a second tenant, or the pilot tenant wants to add a teammate) is a contained, well-scoped follow-up, not a rewrite.
+
+**Blocks Prompt 6 (6.4's inbox) and, as a hard gate, Prompt 8 (7.2's own go-live acceptance names it explicitly):**
+
+4. **Real SMTP / email deliverability.** No real SMTP credentials exist anywhere in this environment today (confirmed: no `smtp_*` value in any `.env`), and docs/SPEC.md §14 names real requirements (SPF/DKIM/DMARC, reverse DNS, and — its own stated caveat — many hosts block outbound port 25). Options: (a) the hosting provider's own outbound mail, if allowed; (b) a transactional email provider's SMTP relay (Postmark, SES, Mailgun) sitting behind this project's own already-built provider-neutral `send_email()` interface — zero code change, only real `SMTP_*` Settings values. **Recommended: (b)** — sidesteps the port-25-blocking risk entirely; the architecture (§14: "our own SMTP server behind a provider-neutral interface") already anticipated exactly this swap.
+
+**Blocks Prompt 7 (7.3, backups/monitoring need a real server to target):**
+
+5. **Deploy target and hosting provider.** docs/SPEC.md §14 names the architecture (one Ubuntu server, Docker Compose, Caddy or Nginx) but not the provider or which of the two proxies. Options: (a) a provider Felix already has an account/billing relationship with, if any; (b) Hetzner Cloud (cheap, generous bandwidth); (c) DigitalOcean (pricier, strong docs/support). **Recommended: (a) if one exists** — fastest path to a running pilot; otherwise (b), matching the modest ~4 vCPU/8 GB starting size (§17). Proxy: **Caddy specifically** — automatic TLS via Let's Encrypt with zero manual certificate handling, a meaningfully smaller ops burden than Nginx + certbot for a one-person-operated pilot.
+6. **Domains/TLS.** Question: which domain(s) serve the pilot tenant's widget/dashboard/API. Options: (a) a subdomain of a domain Felix already owns; (b) register a new dedicated domain now. **Recommended: (a) if one exists** — no new registration/DNS-propagation delay blocking the pilot; a dedicated product domain can follow once there's a name/brand to commit to.
+7. **Monitoring tool.** docs/SPEC.md §14 names WHAT to monitor (uptime, disk, memory, the §9 spike alert) but not which tool. Options: (a) a hosted uptime checker (UptimeRobot/Better Uptime) plus the provider's own built-in resource alerts; (b) self-hosted Prometheus+Grafana. **Recommended: (a)** — a single server serving one pilot tenant does not yet justify operating a second monitoring stack; revisit at the same §17 scale-out triggers that would add a second API instance.
+8. **Backup storage target.** docs/SPEC.md §14 says backups are "stored off the server" but not where. Options: (a) the hosting provider's own snapshot feature (already required regardless) plus a cheap S3-compatible bucket (Backblaze B2, or the provider's own object storage) for nightly `pg_dump`/Qdrant snapshot files; (b) a second physical/VPS location. **Recommended: (a)** — standard, cheap, well-supported, no new infrastructure to operate.
+
+### 11.4 Prompt count and calendar estimate
+
+**8 prompts** (§11.2), 3 of them [SECURITY]-alone (5.2, 6.1, 7.2 — each carries its own adversarial pass and live-3x verification, the same rigor Step 4.4 just did) and 5 plumbing/batched.
+
+Rough estimate only — a starting point to revise from real pace, the same treatment docs/SPEC.md's own §20 gives every other estimate in this project:
+- Sequential effort if run one prompt at a time: roughly 10–13 working sessions (the three [SECURITY] prompts run longer, matching this project's own observed Step 4.1/4.2/4.4 pace; plumbing prompts run shorter).
+- **With the parallel-worktree split (§11.2)**: the widget track (prompts 2–4) and dashboard track (prompts 5–6) run concurrently, so the critical path is prompt 1, then max(widget track, dashboard track), then prompts 7–8 — roughly **8–10 working sessions** end to end rather than the full sequential sum.
+- In calendar time, accounting for review/iteration and this project's own real cadence so far (roughly one Phase every 1–2 calendar weeks): **call it 3–4 calendar weeks to pilot-ready**, assuming the kickoff decisions above are answered promptly (none of them is itself a multi-day blocker — the slowest is likely #5/#6, hosting/domain setup, which can start in parallel with prompt 1 rather than waiting for it).
