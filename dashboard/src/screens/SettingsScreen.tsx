@@ -10,7 +10,6 @@
 // "permission denied" risks disagreeing with the server's own
 // taxonomy later).
 import { useCallback, useState } from "react";
-import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -21,7 +20,8 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Switch } from "@/components/ui/switch";
 import { Textarea } from "@/components/ui/textarea";
 import { DataView } from "@/components/DataView";
-import { ApiError } from "@/lib/api";
+import { SaveError } from "@/components/SaveError";
+import { errorMessageFor } from "@/lib/error-messages";
 import {
   createSiteKey,
   getTenantConfig,
@@ -35,26 +35,6 @@ import {
   type TenantConfig,
 } from "@/lib/tenant-api";
 import { useAsyncData } from "@/lib/use-async-data";
-
-function SaveError({ message }: { message: string | null }) {
-  if (!message) return null;
-  return (
-    <Alert variant="destructive" className="mt-3">
-      <AlertTitle>Could not save</AlertTitle>
-      <AlertDescription>{message}</AlertDescription>
-    </Alert>
-  );
-}
-
-function errorMessageFor(err: unknown, fallback: string): string {
-  if (err instanceof ApiError && err.status === 422) {
-    return "Please check the values above and try again.";
-  }
-  if (err instanceof ApiError && (err.status === 401 || err.status === 403)) {
-    return "You do not have permission to do this. Try signing in again.";
-  }
-  return fallback;
-}
 
 function SupportDetailsCard({
   config,

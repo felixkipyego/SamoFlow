@@ -19,18 +19,12 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Skeleton } from "@/components/ui/skeleton";
 import { DataView } from "@/components/DataView";
-import { ApiError } from "@/lib/api";
+import { SaveError } from "@/components/SaveError";
+import { errorMessageFor } from "@/lib/error-messages";
 import { getInstallSnippet, getTenantConfig, updateWidgetLook, type TenantConfig } from "@/lib/tenant-api";
 import { useAsyncData } from "@/lib/use-async-data";
 
 const HEX_COLOR_PATTERN = /^#[0-9a-fA-F]{6}$/;
-
-function errorMessageFor(err: unknown, fallback: string): string {
-  if (err instanceof ApiError && err.status === 422) {
-    return "Please check the values above — colors must be a hex value like #4f46e5, and URLs must start with https://.";
-  }
-  return fallback;
-}
 
 function WidgetLookCard({ config, onSaved }: { config: TenantConfig; onSaved: () => void }) {
   const [title, setTitle] = useState(config.title);
@@ -129,12 +123,7 @@ function WidgetLookCard({ config, onSaved }: { config: TenantConfig; onSaved: ()
             onChange={(e) => setPrivacyNoticeUrl(e.target.value)}
           />
         </div>
-        {error && (
-          <Alert variant="destructive">
-            <AlertTitle>Could not save</AlertTitle>
-            <AlertDescription>{error}</AlertDescription>
-          </Alert>
-        )}
+        <SaveError message={error} />
         <Button onClick={handleSave} disabled={saving || !colorIsValidHex} className="self-start">
           {saving ? "Saving…" : "Save"}
         </Button>
