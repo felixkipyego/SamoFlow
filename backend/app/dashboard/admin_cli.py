@@ -16,11 +16,21 @@
 # tool, not a public endpoint: no CSRF, no rate limiting, no session --
 # whoever can run `docker compose run` on the production host already
 # has full database access.
+#
+# Alignment task (2026-10-15): reset-password/set-platform-admin/
+# unset-platform-admin added -- the real replacement for seed_cli.py's
+# own former "use a direct database update for that" workaround, each
+# built on fastapi-users' own `UserManager.update()` (never a raw
+# `UPDATE` statement) so the session-invalidation hook
+# (`UserManager.on_after_update()`, app/dashboard/auth_backend.py)
+# fires automatically on every one of them.
 import argparse
 import asyncio
 import sys
 import uuid
 
+from fastapi_users import exceptions, schemas
+from fastapi_users.db import SQLAlchemyUserDatabase
 from sqlalchemy import select
 
 # For the side effect of registering every domain's tables on Base.
@@ -30,6 +40,10 @@ from sqlalchemy import select
 from app import all_models  # noqa: F401
 from app.auth.origin import normalize_origin
 from app.cli import configure_cli_logging
+from app.dashboard.auth_backend import UserManager
+from app.dashboard.models import User
+from app.dashboard.passwords import password_helper
+from app.dashboard.seed_cli import SeedOwnerError, _prompt_for_password
 from app.db import _session_factory
 from app.ingest.repository import revoke_domain
 from app.plans.models import Plan
@@ -155,6 +169,72 @@ async def cmd_seed_plans(args: argparse.Namespace) -> None:  # noqa: ARG001
         print("no plans seeded -- both pilot plan names already exist")
 
 
+class _UserUpdate(schemas.BaseUserUpdate):
+    pass
+
+
+async def _get_user_by_email(user_db: SQLAlchemyUserDatabase, email: str) -> User:
+    user = await user_db.get_by_email(email)
+    if user is None:
+        raise AdminCliError(f"no user with email {email!r}")
+    return user
+
+
+async def cmd_reset_password(args: argparse.Namespace) -> None:
+    """Alignment task (2026-10-15): the real replacement for seed_cli.py's
+    own "use a direct database update for that" workaround -- that line
+    is removed from this project now that a real command exists. Built
+    on `UserManager.update()` (fastapi_users.manager.BaseUserManager),
+    the SAME path `seed_cli.py`'s own `seed_owner()` and this module's
+    other commands already build every mutation on top of -- NOT a raw
+    `UPDATE` statement -- so the session-invalidation hook
+    (`UserManager.on_after_update()`, app/dashboard/auth_backend.py,
+    this alignment task's own earlier fix) fires automatically: every
+    one of this account's existing sessions is invalidated the moment
+    this command runs, with no extra code here.
+    """
+    try:
+        new_password = _prompt_for_password()
+    except SeedOwnerError as exc:
+        raise AdminCliError(str(exc)) from exc
+
+    async with _session_factory()() as session:
+        user_db = SQLAlchemyUserDatabase(session, User)
+        user = await _get_user_by_email(user_db, args.email)
+        manager = UserManager(user_db, password_helper)
+        try:
+            await manager.update(_UserUpdate(password=new_password), user, safe=False)
+        except exceptions.InvalidPasswordException as exc:
+            raise AdminCliError(str(exc.reason)) from exc
+        await session.commit()
+    print(f"password reset for {args.email!r}")
+
+
+async def _set_platform_admin(email: str, *, is_superuser: bool) -> None:
+    # Shared by set-platform-admin/unset-platform-admin below -- same
+    # UserManager.update() path as cmd_reset_password above, for the
+    # identical reason: on_after_update() invalidates every existing
+    # session for this account the moment either a grant OR a revoke
+    # goes through, so a just-demoted platform_admin's own still-open
+    # browser tab cannot keep using admin-only endpoints.
+    async with _session_factory()() as session:
+        user_db = SQLAlchemyUserDatabase(session, User)
+        user = await _get_user_by_email(user_db, email)
+        manager = UserManager(user_db, password_helper)
+        await manager.update(_UserUpdate(is_superuser=is_superuser), user, safe=False)
+        await session.commit()
+
+
+async def cmd_set_platform_admin(args: argparse.Namespace) -> None:
+    await _set_platform_admin(args.email, is_superuser=True)
+    print(f"granted platform_admin to {args.email!r}")
+
+
+async def cmd_unset_platform_admin(args: argparse.Namespace) -> None:
+    await _set_platform_admin(args.email, is_superuser=False)
+    print(f"revoked platform_admin from {args.email!r}")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -197,6 +277,18 @@ def main() -> None:
 
     seed_plans_parser = subparsers.add_parser("seed-plans")
     seed_plans_parser.set_defaults(handler=cmd_seed_plans)
+
+    reset_password_parser = subparsers.add_parser("reset-password")
+    reset_password_parser.add_argument("--email", required=True)
+    reset_password_parser.set_defaults(handler=cmd_reset_password)
+
+    set_platform_admin_parser = subparsers.add_parser("set-platform-admin")
+    set_platform_admin_parser.add_argument("--email", required=True)
+    set_platform_admin_parser.set_defaults(handler=cmd_set_platform_admin)
+
+    unset_platform_admin_parser = subparsers.add_parser("unset-platform-admin")
+    unset_platform_admin_parser.add_argument("--email", required=True)
+    unset_platform_admin_parser.set_defaults(handler=cmd_unset_platform_admin)
 
     args = parser.parse_args()
     configure_cli_logging()
