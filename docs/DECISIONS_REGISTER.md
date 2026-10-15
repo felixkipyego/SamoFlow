@@ -305,6 +305,20 @@ is deliberately forward-only, matching its purpose.
   for the full clause-by-clause check of docs/SPEC.md §18's own Phase 5 accept line and the
   §9/register reconciliation this step performed.
 
+### Widget track close-out (2026-10-15, this task) — forward commitment for Phase 6
+- **Consume `verified_domains` and the first-turn `conversation_id` once the dashboard track
+  adds them in Step 6.2.** Both are additive contract gaps the widget track found and worked
+  around (Step 5.1 Part C and Step 5.2 Part D, both above; also §9 markers,
+  PROJECT_SPEC.md:7099 and the `conversation_id` marker). Once 6.2 lands: remove the
+  `GET /conversations`-ordered-most-recently-active-first workaround for `conversation_id` and
+  read it directly off the first turn's own response/SSE event instead; widen the answer-text
+  link allowlist to also allow a link whose URL's domain is one of the tenant's own
+  `verified_domains`, alongside the existing citation-URL-only rule (additive, never a
+  replacement — a verified-domain match stays a SEPARATE, wider allowance next to the
+  narrower, already-shipped citation rule, not a loosening of it). Owner: whichever session
+  picks this up after 6.2 lands — not pre-assigned to a specific track, since by then the
+  widget track itself may not still be an open worktree.
+
 ### Backend contract gaps found by the widget track (owner: the dashboard track)
 **Ownership formally taken, and scheduled for Step 6.2's own build, at this alignment task
 (2026-10-15) — not built in this task itself (ALIGNMENT-ONLY, no 6.2 work).** Felix
@@ -503,6 +517,13 @@ or the first non-Felix-operated one. The following join it by Felix's decision G
 - **Rejecting placeholder secrets when `APP_ENV=production` is a mandatory go-live gate**
   (Felix decision D, D-pilot-placeholder-secrets-gate) — `QDRANT_API_KEY`, `JWT_SIGNING_KEY`,
   `DB_CONNECTION_ENCRYPTION_KEY`, `QDRANT_READ_ONLY_API_KEY` all in scope. (this task)
+- **Manual screen-reader pass with VoiceOver, by Felix.** Added at the widget track's own
+  close-out (2026-10-15). Step 5.6 (Phase 5 acceptance) deliberately did not round this up:
+  its own "screen-reader pass" evidence is an automated proxy only (a zero-serious-finding axe
+  scan, plus the decoupled live region proven to announce exactly once per completed turn) —
+  not a real pass with a real screen reader, which this environment has no way to run. A real
+  VoiceOver pass over the widget (launcher, panel open/close, streaming answer, citations,
+  conversations list, escalation panel, Esc/Tab behavior) is still owed before go-live.
 - Chat-model fallback (a verified Anthropic secondary, or retry-before-first-token) — zero
   real coverage today. (PROJECT_SPEC.md:5914, 6826)
 - Email deliverability must be tested against major mailbox providers (docs/SPEC.md §18's own

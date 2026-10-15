@@ -1,8 +1,9 @@
 # docs/progress/widget.md
 
+**Folded into PROJECT_SPEC.md §4/§5/§7 on 2026-10-15 at the widget track's own close-out.** This file is now archived detail only — kept, not removed, per §11.5 point 3's own instruction. PROJECT_SPEC.md §5 (the Phase 5 closure) is the current record; nothing below should be edited further.
+
 Track: `track/widget`. Shape per PROJECT_SPEC.md §11.5 point 3 (dated entries:
-what was built, what was verified). Folded into PROJECT_SPEC.md §4/§5/§7/§9
-and removed when this track merges.
+what was built, what was verified).
 
 Duplication counter (rule 9, this track's own, starting at n=0), kept
 current across this whole session: Step 5.1 → n=1; Part A (widget.yml
