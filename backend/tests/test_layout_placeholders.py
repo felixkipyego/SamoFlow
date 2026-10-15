@@ -8,9 +8,11 @@
 # original entry recorded): widget/ tooling is now chosen and real
 # (widget/package.json, widget/loader/src/, ...), so the "only a README"
 # guard and the "says placeholder" requirement no longer apply to
-# widget/loader -- they still apply to widget/chat (5.2-5.5, not started)
-# and to the whole of dashboard/ (6.1, not started; Owner-6.1 marker still
-# open, unchanged by this edit).
+# widget/loader. Narrowed again at Step 5.2 (2026-10-15, the identical
+# §9 marker, same owning track): widget/chat/ now also has real tooling
+# (widget/chat/src/, widget/chat/test/), so both requirements are
+# dropped for it too. Only dashboard/ (6.1, not started; Owner-6.1
+# marker still open) remains guarded.
 from tests.conftest import REPO_ROOT
 
 _READMES = {
@@ -22,10 +24,14 @@ _READMES = {
 _STILL_PLACEHOLDER_READMES = {
     path: step
     for path, step in _READMES.items()
-    if path != REPO_ROOT / "widget" / "loader" / "README.md"
+    if path
+    not in (
+        REPO_ROOT / "widget" / "loader" / "README.md",
+        REPO_ROOT / "widget" / "chat" / "README.md",
+    )
 }
 
-_PLACEHOLDER_ROOTS = (REPO_ROOT / "widget" / "chat", REPO_ROOT / "dashboard")
+_PLACEHOLDER_ROOTS = (REPO_ROOT / "dashboard",)
 
 
 def test_readmes_exist_and_are_non_empty():
@@ -46,7 +52,7 @@ def test_still_placeholder_readmes_say_placeholder():
         assert "placeholder" in text.lower(), f"{path} does not say it is a placeholder"
 
 
-def test_widget_chat_and_dashboard_contain_only_readmes_and_folders():
+def test_dashboard_contains_only_readmes_and_folders():
     for root in _PLACEHOLDER_ROOTS:
         for path in root.rglob("*"):
             if path.is_dir():

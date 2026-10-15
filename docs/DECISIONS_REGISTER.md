@@ -193,7 +193,14 @@ is deliberately forward-only, matching its purpose.
 ### 5.1 Loader and shadow DOM shell
 - Widget bundler/build tooling decided (esbuild, D-113-widget-bundler) and the npm
   supply-chain setup — **RESOLVED**, confirmed live in `docs/progress/widget.md`.
-- `test_layout_placeholders.py` update for `widget/` tooling — **RESOLVED** (same source).
+- `test_layout_placeholders.py` update for `widget/` tooling — **RESOLVED, but corrected
+  (2026-10-15): the prior line here overstated the fix's own scope.** Step 5.1's own fix
+  covered `widget/loader` only; `widget/chat/` still had no real tooling at the time and
+  remained guarded on purpose (5.2 hadn't started). Step 5.2 (commit `84aa984`) gave
+  `widget/chat/` real tooling too, which re-triggered the identical guard for the identical
+  reason; a follow-up commit (this task) narrowed the test a second time, down to
+  `dashboard/` alone — **RESOLVED for real now**, confirmed live (`backend` offline suite via
+  `.venv`, zero failures).
 
 ### 5.2 Chat UI core [SECURITY]
 - The widget's own message renderer must independently enforce: images disabled outright,
@@ -202,6 +209,17 @@ is deliberately forward-only, matching its purpose.
   client-side regardless of what the server already escaped. Must also confirm the renderer
   does not Unicode-normalise text before markdown-parsing it (a concrete bypass: a fullwidth
   Unicode look-alike construct folds to live ASCII after NFKC normalisation). (PROJECT_SPEC.md:6959)
+  **RESOLVED at commit `84aa984`** (`widget/chat/src/render.js`, `markdown.js`,
+  `url-safety.js`): every one of these five properties is built and has its own committed
+  adversarial regression test (`widget/chat/test/markdown-render-adversarial.test.mjs`),
+  asserted directly against the rendered Preact vnode tree. **One real, named gap, not
+  silently absorbed into "RESOLVED"**: `widget_config` carries no verified-domains field
+  today (the Step 5.1 Part C contract check, PROJECT_SPEC.md:6991) — the renderer therefore
+  restricts links to the turn's own citation URLs ONLY; it does not yet also allow the
+  tenant's verified domains, because the contract does not give it that list. Widening the
+  allow-list to include verified domains once `widget_config` carries them (PROJECT_SPEC.md:6991,
+  owner the dashboard track, see the new entry below) needs no renderer redesign — it is a
+  second, additive allow-list rule, not a rewrite of this one.
 
 ### 5.3 Conversations UI
 - *(no open forward commitment found addressed specifically to this step)*
@@ -214,6 +232,53 @@ is deliberately forward-only, matching its purpose.
 
 ### 5.6 Phase 5 acceptance
 - *(no open forward commitment found addressed specifically to this step)*
+
+### Backend contract gaps found by the widget track (owner: the dashboard track)
+Three real, named gaps in the locked `backend/` contract, each found by the widget track
+while building against it (Steps 5.1/5.2) and each flagged rather than fixed, per the
+`backend/` edit restriction (PROJECT_SPEC.md §11.5 point 4) — the widget track cannot edit
+`backend/` outside a stop condition, so all three are owned by the dashboard track, the one
+track currently allowed to touch it during the parallel-track period. Each is also a §9
+marker (rule 22); all three are additive fixes, needing no shape change on the widget's own
+already-shipped side.
+- **Add `verified_domains` to `widget_config`, additively.** `_public_widget_config()`
+  (`app/auth/routes.py`) never surfaces the tenant's verified domains to the widget — the
+  widget's own renderer (5.2, `84aa984`) works around this safely by restricting links to the
+  turn's own citation URLs only (narrower and safer than a domain allow-list), but cannot
+  widen to verified domains until this field exists. A new key alongside the existing six,
+  never a replacement. (PROJECT_SPEC.md:6991)
+- **Return `conversation_id` on `POST /api/v1/chat`'s `done` event for a first turn,
+  additively.** Confirmed by reading every `_sse_event()` call site directly: no SSE event, no
+  response header, and no line in docs/SPEC.md §10's own event table carries it today — a
+  real contract gap (spec-level, not just implementation), found only while building Step
+  5.2's `chat-controller.js`, not caught by the Step 5.1 Part C contract check itself (see the
+  process-lesson note below). The widget's own CURRENT workaround (`ChatController
+  ._discoverConversationIdIfUnknown()`, `widget/chat/src/chat-controller.js`): one extra
+  `GET /api/v1/conversations` call, made only on a session's first turn (while
+  `conversation_id` is still unknown; cached for every later turn), relying on that endpoint's
+  own most-recently-active-first ordering (`last_message_at DESC`, touched at lease-acquire
+  time, before the stream even starts) to reliably read back `conversations[0]` as the
+  conversation that exact turn just created. Real, working, zero-backend-change today — but a
+  real added request on every session's first turn, which the recommended fix (a new
+  `conversation_id` field on the existing `done` payload) removes entirely once built.
+  (PROJECT_SPEC.md:6993)
+- **Delete the verified `SessionResponse` ASSUMPTION marker.** `backend/app/auth/schemas.py`'s
+  own marker ("these are this task's own choice, not a spec-mandated wire contract") is now
+  independently VERIFIED by the widget track, the contract's first real consumer — all four
+  response fields and all six `_PUBLIC_WIDGET_CONFIG_FIELDS` keys are exactly what Step 5.2
+  needs. Per PROJECT_SPEC.md §2 rule 10 ("verify then remove ASSUMPTION") the marker should be
+  deleted; the widget track confirmed it but does not make the `backend/` edit itself.
+  (PROJECT_SPEC.md:6992)
+
+**Process lesson (2026-10-15), recorded so the next contract check doesn't repeat it**: the
+Step 5.1 Part C contract check audited the `/session` response's SCHEMAS (field names, the
+six `widget_config` keys) but not a full REQUEST/RESPONSE ROUND TRIP for every endpoint the
+widget actually drives — the `conversation_id` gap above is exactly the kind of thing a
+schema-only audit misses, since nothing about `ChatRequest`'s or the `done` event's own
+*declared* shape looks wrong in isolation; the gap only appears when you ask "how does the
+caller actually get back what it just sent/created, across a real multi-turn flow." A contract
+check from here on should trace at least one real end-to-end flow (create → use → re-use)
+for every endpoint it signs off on, not just confirm each message's own field names.
 
 ### 6.1 Dashboard authentication [SECURITY]
 - **D-shadcn remains unresolved** — see the note above the decisions table. Step 6.1 must

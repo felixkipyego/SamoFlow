@@ -5,13 +5,25 @@ what was built, what was verified). Folded into PROJECT_SPEC.md §4/§5/§7/§9
 and removed when this track merges.
 
 Duplication counter (rule 9, this track's own, starting at n=0), kept
-current across this whole session rather than left at its first value:
-Step 5.1 → n=1; Part A (widget.yml fix + run-ci-locally.mjs, real code)
-→ n=2; Part B (per-worktree `.venv`, no tracked-repo code change) does
-not count; Part C (contract check, documentation/markers only) does not
-count; Part D (Step 5.2 Chat UI core, real code) → **n=3**. Not due
-(threshold is 4) — the next code sub-step (5.3) is where the check
-falls due.
+current across this whole session: Step 5.1 → n=1; Part A (widget.yml
+fix + run-ci-locally.mjs, real code) → n=2; Part B (per-worktree
+`.venv`, no tracked-repo code change) does not count; Part C (contract
+check, documentation/markers only) does not count; Part D (Step 5.2
+Chat UI core, real code) → n=3; this alignment task's
+`test_layout_placeholders.py` edit (real code) → **n=4, due**.
+**Duplication check run (2026-10-15)**: scanned the accumulated
+widget-track code (Parts A/D plus this fix) for a genuine 3rd-occurrence
+duplication. One 2nd occurrence found, below the fix bar: the
+"resolve a URL relative to this `<script>` tag's own `src`" pattern
+exists once as a shared helper (`loader/src/config.js`'s
+`resolveSiblingUrl()`, used internally for both `chatUrl` and `cssUrl`)
+and once more as a one-off inline call
+(`chat/src/index.js`'s own `cssUrl` computation) — a second occurrence
+of the pattern, not a third, so it does not meet rule 9's own bar ("a
+genuine 3RD-occurrence duplication"); noted here rather than silently
+extracted on spec. No fixed-error-message-table duplication
+(`SSE_ERROR_MESSAGES` exists in exactly one place,
+`chat-controller.js`). **Counter reset to n=0.**
 
 ## Step 5.1 — Loader and shadow DOM shell (plumbing) (2026-10-15)
 
@@ -564,3 +576,52 @@ cross-checked: no `.env`; `widget/dist/`, `widget/chat/dist/`,
 --ignored=matching`); `backend/` diff for this Part is empty (this
 Part made no backend/ edit at all, unlike Part A's own Felix-authorized
 one).
+
+## Alignment-only task — CI fix, process correction, register sync (2026-10-15)
+
+No feature work (5.3 is a separate, later prompt). Per CLAUDE.md's new "Sync
+before work" rule: fetched/rebased first (no-op — `origin/main` already
+matched local HEAD), then read `docs/DECISIONS_REGISTER.md` and
+PROJECT_SPEC.md §2 rules 19-22 and §11.5 before touching anything.
+
+**1. CI fix (authorized `backend/` edit, this one file only)**:
+`backend/tests/test_layout_placeholders.py` — removed `widget/chat` from
+`_PLACEHOLDER_ROOTS` (now `(dashboard/,)` alone) and from
+`_STILL_PLACEHOLDER_READMES`; renamed
+`test_widget_chat_and_dashboard_contain_only_readmes_and_folders` to
+`test_dashboard_contains_only_readmes_and_folders` (accuracy, matching the
+narrowed scope). Every `dashboard/` entry untouched. Confirmed live in
+isolation (4/4 passed) and in the full suite (below).
+
+**2. Process correction, accepted plainly**: pushing with 2 "known" failing
+tests was wrong — a known failure still turns `main`'s CI red, exactly what
+the push gate (§2 rule 18) exists to prevent. New §11.5 point 7 records
+this: zero failing tests before any push, including the backend offline
+suite from `.venv`; a failure that can't be fixed in scope is a formal §9
+marker + stop condition (a), never a red test shipped with an explanation
+standing in for a fix.
+
+**3. Register sync**: `docs/DECISIONS_REGISTER.md` — corrected the stale
+"5.1 ... RESOLVED" line (it covered `widget/loader` only; `widget/chat`
+needed, and got, the identical fix at 5.2/this task); marked the 5.2 forward
+commitment RESOLVED citing `84aa984`, noting the citation-only-until-
+verified-domains restriction explicitly; added a new "Backend contract gaps
+found by the widget track" subsection (owner: the dashboard track) for the
+three items from the last task (verified domains additive, `conversation_id`
+additive, the `SessionResponse` ASSUMPTION marker ready to delete) — each
+already had a §9 marker (re-owned to "the dashboard track" explicitly, both
+updated in PROJECT_SPEC.md) but was missing its register row, the exact
+rule-22 bidirectional-consistency gap the register itself warns about;
+recorded the contract-check methodology lesson (audit a full request/
+response round trip per endpoint, not just field names/schemas — the
+`conversation_id` gap is exactly what a schema-only check misses).
+
+**Verified**: `backend/` via `.venv` — `ruff check` clean; `pytest tests -q`
+**1063 passed, 422 skipped, 0 failed**, run 3× total, identical every time
+(zero failures, per the new rule this same task adds). `widget/` — lint
+clean; `npm test` 98/98; `npm run build` (loader 920B, chat UI 10,365B,
+both well under budget); `npm run test:e2e` 3/3; `npm audit` 0
+vulnerabilities; `node scripts/run-ci-locally.mjs` green end to end from a
+clean `dist/`/`chat/dist/`. `git status --short`: exactly the three expected
+files (`PROJECT_SPEC.md`, `backend/tests/test_layout_placeholders.py`,
+`docs/DECISIONS_REGISTER.md`); no `.env`.
