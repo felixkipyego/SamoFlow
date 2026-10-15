@@ -1,0 +1,170 @@
+# deploy/Caddyfile -- Step 7.3 prep (ops track). The single reverse proxy
+# docs/SPEC.md §14 names ("proxy": Caddy or Nginx -- Caddy chosen, kickoff
+# decision #5, D-113-hosting-provider-agnostic/D-113-domains-softwareske).
+#
+# Every hostname is read from the environment via Caddy's own {$VAR}
+# substitution -- never a literal hostname anywhere in this file (kickoff
+# decision #6: "hostnames always from Settings/Caddyfile, never
+# hardcoded"). The three names below are read from the SAME root .env file
+# every other Compose service already reads (see .env.example):
+#   DASHBOARD_HOSTNAME  e.g. app.softwareske.com
+#   API_HOSTNAME        e.g. api.softwareske.com
+#   WIDGET_HOSTNAME     e.g. widget.softwareske.com
+#   CADDY_ACME_EMAIL    operator contact for Let's Encrypt
+#   CADDY_UPLOAD_MAX_SIZE_MB  must track backend Settings.upload_max_size_
+#                             bytes (currently 20MB); kept as its own knob
+#                             here since Caddy cannot read backend Settings
+#                             directly -- update both together if the
+#                             upload cap ever changes.
+#
+# Automatic TLS: every site address below is a real hostname (not an IP or
+# ":port"), which is what makes Caddy provision and renew certificates via
+# Let's Encrypt on its own -- no certbot, no manual certificate handling.
+#
+# Phoenix is NEVER routed here, by construction: no site block below
+# references the phoenix service, and none ever should (phoenix-data/
+# PHOENIX_COLLECTOR_ENDPOINT already bind it to 127.0.0.1-only inside the
+# Compose network -- deploy/docker-compose.yml's own comment). An operator
+# reaches it only via an SSH tunnel (docs/deploy/RUNBOOK.md).
+#
+# Backend changes this proxy will need, NOT built here (register entries
+# owned by the Phase 7 batch, docs/DECISIONS_REGISTER.md):
+#   - trusted X-Forwarded-For for the rate limiter (every request.client.
+#     host read today becomes Caddy's own IP once this proxy is in front)
+#   - Host-header validation on the api service
+{
+	email {$CADDY_ACME_EMAIL}
+}
+
+# Shared by every site block below -- one definition, no duplication
+# (rule 9) across the dashboard/api/widget sites. frame-ancestors 'none'
+# is common to all three; the dashboard's own stricter, full CSP
+# (matching its e2e test, dashboard/e2e/csp-server.mjs) is set separately
+# in that site block, replacing (not adding to) this snippet's bare CSP.
+(security_headers) {
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		Permissions-Policy "geolocation=(), microphone=(), camera=(), payment=(), usb=()"
+		Content-Security-Policy "frame-ancestors 'none'"
+		# Caddy's own identifying header, same "don't advertise the stack"
+		# discipline backend/smoke-image.sh already checks for the api
+		# service's own /health response.
+		-Server
+	}
+}
+
+# ---------------------------------------------------------------------------
+# Dashboard: serves the built SPA and routes /api to the API on the SAME
+# origin (dashboard_hostname), so the dashboard/admin surface needs no CORS
+# middleware at all (D-6.1-cors-same-origin) -- confirmed, not guessed:
+# the same path-preserving proxy shape as dashboard/e2e/csp-server.mjs's
+# own /api/* proxy, which the dashboard's own e2e suite already runs
+# against.
+{$DASHBOARD_HOSTNAME} {
+	import security_headers
+	# Full strict CSP, byte-for-byte the same policy dashboard/e2e/
+	# csp-server.mjs already proves the dashboard runs under (Step 6.1's
+	# own live Playwright test) -- REPLACES the security_headers snippet's
+	# bare frame-ancestors-only CSP above, not merged with it (Caddy's
+	# header directive overwrites a same-named header set earlier in the
+	# same site block).
+	header Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; font-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'"
+
+	request_body {
+		max_size {$CADDY_UPLOAD_MAX_SIZE_MB}MB
+	}
+
+	handle /api/* {
+		reverse_proxy api:8000
+	}
+
+	# Vite's own content-hashed build output (dashboard/dist/assets/*) --
+	# the filename changes whenever the content does, so a long,
+	# immutable cache is safe and correct.
+	handle /assets/* {
+		root * /srv/dashboard
+		header Cache-Control "public, max-age=31536000, immutable"
+		file_server
+	}
+
+	# Everything else: the SPA shell. Never cached (it is the one file a
+	# redeploy changes without a new filename), and any unmatched path
+	# falls back to it so client-side routing works on a hard refresh.
+	handle {
+		root * /srv/dashboard
+		header Cache-Control "no-cache"
+		try_files {path} /index.html
+		file_server
+	}
+}
+
+# ---------------------------------------------------------------------------
+# API: the widget's own cross-origin surface (/session, /chat,
+# /conversations, /escalate) -- CORS for THESE routes is the widget's
+# existing dynamic per-site-key mechanism (Task 1.4.g), already built in
+# app/, not Caddy's job.
+{$API_HOSTNAME} {
+	import security_headers
+
+	request_body {
+		max_size {$CADDY_UPLOAD_MAX_SIZE_MB}MB
+	}
+
+	# docs/SPEC.md §14: "buffering off for /api/v1/chat, long idle
+	# timeouts" -- named explicitly because this is the one streaming
+	# (SSE) response in the whole API; every other route keeps Caddy's
+	# ordinary proxy defaults (handle block below). flush_interval -1
+	# disables Caddy's own response buffering entirely (flushes every
+	# write immediately); the transport's read/write timeouts are left
+	# unbounded (0) rather than guessing a number -- the real ceiling for
+	# one turn is already enforced server-side (Settings.chat_request_
+	# timeout_seconds, 30s) and by the turn-lease margin on top of it
+	# (Settings.chat_lease_margin_seconds); Caddy does not need a second,
+	# independently-guessed timeout racing that one.
+	@chat path /api/v1/chat
+	handle @chat {
+		reverse_proxy api:8000 {
+			flush_interval -1
+			transport http {
+				dial_timeout 10s
+				read_timeout 0
+				write_timeout 0
+			}
+		}
+	}
+
+	handle {
+		reverse_proxy api:8000
+	}
+}
+
+# ---------------------------------------------------------------------------
+# Widget: static assets only, no backend proxying, no cookies, no CORS
+# concerns (a <script src> load is never subject to CORS). Served flat
+# from one directory -- the loader resolves "chat.js"/"widget.css" as
+# SIBLINGS of wherever widget.js itself was loaded from (widget/loader/
+# src/config.js's own resolveSiblingUrl()), and chat.js resolves
+# "chat.css" the same way relative to its own <script> src (widget/chat/
+# src/index.js) -- so all four build outputs (widget/dist/widget.{js,css},
+# widget/chat/dist/chat.{js,css}) are copied flat into ONE directory at
+# deploy time (docs/deploy/RUNBOOK.md), never nested.
+{$WIDGET_HOSTNAME} {
+	import security_headers
+
+	root * /srv/widget
+	# Moderate, short-lived caching, not a long immutable one: unlike the
+	# dashboard's Vite output above, these filenames are NOT content-
+	# hashed (confirmed by reading widget/scripts/build.mjs -- plain
+	# widget.js/widget.css/chat.js/chat.css every build), so a stale
+	# browser cache after a redeploy could serve old code under the same
+	# URL. 5 minutes bounds that staleness window to something reasonable
+	# while still meaningfully reducing load from the same visitor
+	# loading the same tenant site repeatedly; must-revalidate makes a
+	# cache that outlives max-age re-check with the server (a cheap
+	# conditional GET) rather than silently serving stale content past it.
+	@assets path *.js *.css
+	header @assets Cache-Control "public, max-age=300, must-revalidate"
+	file_server
+}
