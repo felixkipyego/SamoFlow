@@ -527,16 +527,22 @@ a11y pass.
 
 **The SAME backend/ test collision as Step 5.1's own precedent, found
 again, not fixed again**: `widget/chat/` now has real tooling too
-(Step 5.2's own `src/`/`test/`), so
-`backend/tests/test_layout_placeholders.py::test_widget_chat_and_dashboard_contain_only_readmes_and_folders`
-fails for the identical reason the widget/loader one did at Step 5.1 —
-confirmed live via `.venv`: **1062 passed, 422 skipped, 1 failed**
-(exactly this one test, nothing else). This batch's own instructions did
-not name this file as an allowed edit (unlike Step 5.1's own Part A,
-where Felix explicitly authorized it mid-task), so it is flagged here,
-not fixed, per the `backend/` edit restriction — a new dated annotation
-on the existing Owner-5.1 §9 marker (PROJECT_SPEC.md) records the exact,
-minimal recommended fix (narrow the root list to `(dashboard/,)` alone).
+(Step 5.2's own `src/`/`test/`), so BOTH of
+`backend/tests/test_layout_placeholders.py`'s own remaining
+`widget/chat`-scoped assertions fail for the identical reason the
+widget/loader ones did at Step 5.1 —
+`test_widget_chat_and_dashboard_contain_only_readmes_and_folders` (the
+structural "only a README" check) AND
+`test_still_placeholder_readmes_say_placeholder` (since
+`widget/chat/README.md` no longer says "placeholder" — it isn't one):
+confirmed live via `.venv`, **1061 passed, 422 skipped, 2 failed**,
+exactly these two, nothing else. This batch's own instructions did not
+name this file as an allowed edit (unlike Step 5.1's own Part A, where
+Felix explicitly authorized it mid-task), so it is flagged here, not
+fixed, per the `backend/` edit restriction — a new dated annotation on
+the existing Owner-5.1 §9 marker (PROJECT_SPEC.md) records the exact,
+minimal recommended fix (narrow the root list to `(dashboard/,)` alone,
+and drop `widget/chat/README.md` from `_STILL_PLACEHOLDER_READMES`).
 
 **Verified** (widget/, re-run 3x per this project's convention since new
 test files were added): `npm run lint` clean. `npm test` — **98 passed,
@@ -550,8 +556,8 @@ toggle), identical across 3 runs. `npm audit` — 0 vulnerabilities.
 clean end to end from a fully clean `dist/`/`chat/dist/`.
 
 **Verified** (backend/, via `.venv`): `ruff check` clean. `pytest tests -q`
-— **1062 passed, 422 skipped, 1 failed** (the one named, pre-flagged
-`test_layout_placeholders.py` collision above — not a regression, not
+— **1061 passed, 422 skipped, 2 failed** (the two named, pre-flagged
+`test_layout_placeholders.py` collisions above — not a regression, not
 silently accepted, recorded in PROJECT_SPEC.md §9). `git status --short`
 cross-checked: no `.env`; `widget/dist/`, `widget/chat/dist/`,
 `widget/node_modules/` all correctly ignored (`git status
