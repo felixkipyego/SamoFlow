@@ -1,0 +1,125 @@
+# ops/backup/docker-compose.yml -- Step 7.3 prep (ops track). Two
+# independent things, both profile-gated so neither runs as part of a
+# plain `up`:
+#
+#   `backup`         -- builds ops/backup/Dockerfile, joins the SAME
+#                        network as the real postgres/qdrant (via
+#                        deploy/docker-compose.yml's default network and
+#                        this project's own `name:`), reaches them by
+#                        service name with zero published ports needed.
+#                        Run nightly via cron (docs/deploy/RUNBOOK.md):
+#                          docker compose --env-file .env \
+#                            -f deploy/docker-compose.yml \
+#                            -f ops/backup/docker-compose.yml \
+#                            run --rm backup ./backup.sh
+#
+#   `postgres-scratch`/`qdrant-scratch`/`restore-drill` -- the restore
+#                        drill's own disposable stack (this task's own
+#                        instruction: "restores into a scratch stack").
+#                        postgres-scratch/qdrant-scratch are tmpfs-backed
+#                        like deploy/docker-compose.yml's own test-db/
+#                        test-qdrant (nothing persists, ever, across a
+#                        restart -- same precedent, not a new pattern).
+#                        `restore-drill` is the SAME image as `backup`
+#                        above, running restore-drill.sh against these
+#                        two scratch targets BY SERVICE NAME, never the
+#                        real postgres/qdrant -- orchestrated by ops/
+#                        backup/run-restore-drill.sh (brings the scratch
+#                        pair up, runs this, tears everything down
+#                        unconditionally):
+#                          ./ops/backup/run-restore-drill.sh
+
+# Shared by `backup` and `restore-drill` below (duplication check,
+# Step 7.3 batch): the S3-compatible endpoint/credentials are identical
+# either way -- both read the same bucket, just at different points in
+# the backup/restore cycle. Merged into each service's own `environment:`
+# map below, same anchor style this project's own deploy/docker-compose.
+# yml already uses (`x-app-env`, `x-healthcheck-timing`).
+x-s3-env: &s3-env
+  S3_BACKUP_BUCKET: ${S3_BACKUP_BUCKET:?S3_BACKUP_BUCKET must be set in .env}
+  S3_BACKUP_ENDPOINT_URL: ${S3_BACKUP_ENDPOINT_URL:?S3_BACKUP_ENDPOINT_URL must be set in .env}
+  AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:?AWS_ACCESS_KEY_ID must be set in .env}
+  AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:?AWS_SECRET_ACCESS_KEY must be set in .env}
+  AWS_DEFAULT_REGION: ${AWS_DEFAULT_REGION:-us-east-1}
+
+services:
+  backup:
+    build:
+      context: .
+    image: samoflow-backup:dev
+    profiles: ["tools"]
+    environment:
+      PGHOST: postgres
+      PGPORT: 5432
+      PGUSER: ${POSTGRES_USER:?POSTGRES_USER must be set in .env}
+      PGPASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set in .env}
+      PGDATABASE: ${POSTGRES_DB:?POSTGRES_DB must be set in .env}
+      QDRANT_URL: ${QDRANT_URL:?QDRANT_URL must be set in .env}
+      QDRANT_API_KEY: ${QDRANT_API_KEY:?QDRANT_API_KEY must be set in .env}
+      QDRANT_COLLECTION_NAME: ${QDRANT_COLLECTION_NAME:-knowledge_chunks}
+      # Encrypting (public) key only -- see backup.sh's own header.
+      BACKUP_AGE_PUBLIC_KEY: ${BACKUP_AGE_PUBLIC_KEY:?BACKUP_AGE_PUBLIC_KEY must be set in .env}
+      S3_BACKUP_RETENTION_DAYS: ${S3_BACKUP_RETENTION_DAYS:-14}
+      <<: *s3-env
+
+  postgres-scratch:
+    image: postgres:18.2-trixie
+    profiles: ["drill"]
+    environment:
+      POSTGRES_USER: drill
+      POSTGRES_PASSWORD: drill
+      POSTGRES_DB: drill
+    tmpfs:
+      - /var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U drill -d drill"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  qdrant-scratch:
+    image: qdrant/qdrant:v1.19.1
+    profiles: ["drill"]
+    environment:
+      QDRANT__SERVICE__API_KEY: drill-scratch-key
+    tmpfs:
+      - /qdrant/storage
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "bash",
+          "-c",
+          "exec 3<>/dev/tcp/127.0.0.1/6333 && printf 'GET /healthz HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n' >&3 && head -1 <&3 | grep -q '200 OK'",
+        ]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  restore-drill:
+    build:
+      context: .
+    image: samoflow-backup:dev
+    profiles: ["drill"]
+    depends_on:
+      postgres-scratch:
+        condition: service_healthy
+      qdrant-scratch:
+        condition: service_healthy
+    environment:
+      PGHOST: postgres-scratch
+      PGPORT: 5432
+      PGUSER: drill
+      PGPASSWORD: drill
+      PGDATABASE: drill
+      QDRANT_URL: http://qdrant-scratch:6333
+      QDRANT_API_KEY: drill-scratch-key
+      QDRANT_COLLECTION_NAME: ${QDRANT_COLLECTION_NAME:-knowledge_chunks}
+      # The age PRIVATE key and the pgcrypto passphrase -- both loaded
+      # from a source separate from .env and the backup bucket alike
+      # (docs/deploy/RUNBOOK.md's own secrets section); never present in
+      # the `backup` service above.
+      BACKUP_AGE_SECRET_KEY: ${BACKUP_AGE_SECRET_KEY:?BACKUP_AGE_SECRET_KEY must be set (from the separate secrets file, never .env)}
+      DB_CONNECTION_ENCRYPTION_KEY: ${DB_CONNECTION_ENCRYPTION_KEY:?DB_CONNECTION_ENCRYPTION_KEY must be set (from the separate secrets file, never .env)}
+      <<: *s3-env
+    entrypoint: ["/bin/bash", "./restore-drill.sh"]
