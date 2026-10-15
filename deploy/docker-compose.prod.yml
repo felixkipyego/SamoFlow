@@ -1,0 +1,101 @@
+# deploy/docker-compose.prod.yml -- Step 7.3 prep (ops track). A
+# PRODUCTION-ONLY override, applied on top of deploy/docker-compose.yml
+# (never replacing it, never edited in place -- that file stays owned by
+# whichever track's own dev/CI/test workflow already depends on its exact
+# current shape):
+#
+#   docker compose --env-file .env \
+#     -f deploy/docker-compose.yml -f deploy/docker-compose.prod.yml \
+#     up -d
+#
+# Dev and test behavior is UNCHANGED: nothing here runs, and nothing in
+# the base file is touched, unless this second -f is explicitly added.
+#
+# Three things this file does, each verified live against the real
+# `docker compose config` merge (not assumed):
+#   1. Adds the `caddy` service (deploy/Caddyfile) -- the only service
+#      with a published port.
+#   2. Removes `api`'s and `phoenix`'s own loopback-bound dev ports via
+#      the Compose Specification's `!reset` tag -- confirmed live that a
+#      bare `ports: []` does NOT clear an inherited list (Compose merges
+#      list keys by concatenation), only `!reset []` genuinely does.
+#      `postgres`/`qdrant` already publish no ports in the base file;
+#      `!reset []` is added for them too, so this file is a single
+#      explicit, auditable guarantee that none of the four ever gains a
+#      published port in production, independent of what the base file
+#      does later.
+#   3. Adds log rotation to every service, base and new alike.
+#
+# "db, qdrant and phoenix on the internal network only" (this task's own
+# instruction) does not mean literally unreachable: phoenix's own UI is
+# still reached over an SSH tunnel (docs/deploy/RUNBOOK.md), but through
+# its container IP on the Compose network, never a published host port --
+# Linux Docker already routes a host to any container IP on a user-defined
+# bridge with zero `ports:` entries, which is what `!reset` below achieves.
+
+x-log-rotation: &log-rotation
+  logging:
+    driver: json-file
+    options:
+      max-size: "10m"
+      max-file: "5"
+
+services:
+  caddy:
+    image: caddy:2.10.2
+    <<: *log-rotation
+    environment:
+      DASHBOARD_HOSTNAME: ${DASHBOARD_HOSTNAME:?DASHBOARD_HOSTNAME must be set in .env}
+      API_HOSTNAME: ${API_HOSTNAME:?API_HOSTNAME must be set in .env}
+      WIDGET_HOSTNAME: ${WIDGET_HOSTNAME:?WIDGET_HOSTNAME must be set in .env}
+      CADDY_ACME_EMAIL: ${CADDY_ACME_EMAIL:?CADDY_ACME_EMAIL must be set in .env}
+      # Must track backend Settings.upload_max_size_bytes (currently
+      # 20MB) -- Caddy has no way to read that Settings value directly,
+      # so this is its own knob, kept in sync by the operator; see
+      # deploy/Caddyfile's own header comment.
+      CADDY_UPLOAD_MAX_SIZE_MB: ${CADDY_UPLOAD_MAX_SIZE_MB:-21}
+    volumes:
+      - ../deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+      # Read-only: Caddy only ever serves these, never writes them. Built
+      # by each track's own build step and copied here at deploy time
+      # (docs/deploy/RUNBOOK.md's own "first deploy" section) -- this
+      # compose file does not build dashboard/ or widget/ itself (neither
+      # is a backend Docker image, and this track does not touch either
+      # directory's own build tooling).
+      - ${DASHBOARD_DIST_DIR:-/srv/samoflow/dashboard}:/srv/dashboard:ro
+      - ${WIDGET_DIST_DIR:-/srv/samoflow/widget}:/srv/widget:ro
+    ports:
+      - "80:80"
+      - "443:443"
+    depends_on:
+      api:
+        condition: service_healthy
+    restart: unless-stopped
+
+  postgres:
+    <<: *log-rotation
+    ports: !reset []
+
+  qdrant:
+    <<: *log-rotation
+    ports: !reset []
+
+  phoenix:
+    <<: *log-rotation
+    ports: !reset []
+
+  api:
+    <<: *log-rotation
+    ports: !reset []
+
+  worker:
+    <<: *log-rotation
+
+  migrate:
+    <<: *log-rotation
+
+volumes:
+  caddy-data:
+  caddy-config:
