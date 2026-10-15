@@ -642,6 +642,31 @@ class Settings(BaseSettings):
     # only together with smtp_host (see app/notifications/service.py's
     # own is_smtp_configured() for the real "configured" definition).
     smtp_from_address: str | None = Field(default=None)
+    # Step 4.5: docs/SPEC.md §13's own "phoenix.otel.register at startup".
+    # Optional, matching smtp_host's own established "deployment without
+    # this real service stood up yet must still start" shape -- a
+    # deployment with no Phoenix container running yet still starts and
+    # serves chats normally, with tracing simply disabled (app/telemetry/
+    # service.py's own is_phoenix_configured()). The full OTLP traces
+    # path, not just a host:port (e.g. "http://phoenix:6006/v1/traces"),
+    # confirmed live against Arize's own self-hosting docs before this
+    # field's shape was decided.
+    phoenix_collector_endpoint: str | None = Field(default=None)
+    # The project name every span is grouped under in the Phoenix UI --
+    # "samoflow", this project's own internal product name throughout
+    # the codebase already (e.g. crawl_user_agent's own "SamoFlowBot"),
+    # not the kickoff-decided public domain (softwareske.com) -- a
+    # project name and a domain name answer different questions.
+    phoenix_project_name: str = Field(default="samoflow")
+    # Step 4.5: docs/SPEC.md §13's own "a startup check that the
+    # collector is reachable" -- an internal safety ceiling bounding
+    # that one check's own real TCP connect attempt (app/telemetry/
+    # service.py's own _check_collector_reachable()), matching this
+    # project's own "generous but bounded, no corresponding spec
+    # number" precedent (chat_model_timeout_seconds, docx_max_part_
+    # size_bytes). Never blocks startup regardless of outcome -- only
+    # bounds how long ONE already-non-fatal check can take.
+    phoenix_startup_reachability_timeout_seconds: float = Field(default=3.0, gt=0)
     # [SECURITY-adjacent] Task 4.2 adversarial follow-up: a REAL finding,
     # not a speculative hardening -- `GET /api/v1/conversations`
     # (`TenantScopedRepository.list_conversations()`) had NO limit at

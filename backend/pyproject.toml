@@ -223,6 +223,23 @@ dependencies = [
     # installed starlette==1.7.0/anyio==4.15.1 (transitive via
     # fastapi==0.141.1), so no new transitive package is expected.
     "sse-starlette==3.5.0",
+    # Step 4.5: docs/SPEC.md §13 names these mechanisms explicitly --
+    # "phoenix.otel.register", "OpenInference for LangChain/LangGraph",
+    # "OpenTelemetry for FastAPI" -- not a free choice among
+    # alternatives. Each confirmed live (installed and imported
+    # successfully, real APIs checked directly, not assumed from
+    # documentation) before this step's own code was written, matching
+    # docs/SPEC.md §13's own "verify each instrumentor exists and is
+    # maintained before relying on it" requirement. Versions re-verified
+    # current on PyPI at this task's own build time.
+    "arize-phoenix-otel==0.17.2",
+    "openinference-instrumentation-langchain==0.1.79",
+    # A pre-1.0 (beta, "b1") release -- confirmed this is the real,
+    # current, intended version for this package specifically (the
+    # wider opentelemetry-instrumentation-* family ships this way by
+    # convention, unlike opentelemetry-api/-sdk themselves, which are
+    # stable 1.x), not a stray pre-release accidentally picked up.
+    "opentelemetry-instrumentation-fastapi==0.66b1",
 ]
 
 [project.optional-dependencies]

@@ -21,6 +21,10 @@ EXTRA_EXAMPLE_KEYS: tuple[str, ...] = (
     "POSTGRES_DB",
     "JWT_SIGNING_KEY_PREVIOUS",
     "ANTHROPIC_API_KEY",
+    # Step 4.5: PHOENIX_COLLECTOR_ENDPOINT is the identical shape --
+    # optional (has a default, so REQUIRED_VARS excludes it), but
+    # .env.example still declares it (empty) so an operator sees it.
+    "PHOENIX_COLLECTOR_ENDPOINT",
 )
 
 HEADER_WARNING = "# Copy to .env and edit. Never commit .env."

@@ -613,8 +613,50 @@ def fresh_import(module_name):
     # mutates the module dict a test file's own `from x import y` binding
     # still points into, breaking later isinstance/pytest.raises checks).
     # Must not raise despite an empty environment.
+    #
+    # [SECURITY-adjacent, a REAL bug found live, not assumed]: both
+    # existing callers (test_config.py's own test_module_imports_
+    # cleanly_with_empty_environment, test_main.py's own test_importing_
+    # app_main_succeeds_with_empty_environment) discard this function's
+    # own return value -- neither needs `sys.modules[module_name]` to
+    # stay pointed at the fresh object afterward. Before this fix, it
+    # DID stay pointed at it, PERMANENTLY, for the rest of the pytest
+    # session -- confirmed live with a real, reproducible full-suite
+    # failure: `scripts/retrieval_eval.py`'s own main() does a
+    # deliberate, function-LOCAL `from app.config import get_settings`
+    # (required by its own "must stay importable with no env at all"
+    # design) -- after test_config.py's own fresh-import test ran,
+    # EVERY later function-local `from app.config import ...` anywhere
+    # in the suite bound to this now-orphaned module instead of the
+    # original, including its own SEPARATE get_settings() -- @lru_cache
+    # singleton, never cleared by this project's own autouse `_isolated_
+    # env` fixture, which only ever clears the ORIGINAL module's
+    # function (bound at conftest.py's own top-level import, well
+    # before any fresh_import() call could run). Whichever test
+    # happened to be the FIRST later caller to populate that orphaned
+    # cache -- with whatever env was active at that moment -- silently
+    # fixed its own wrong Settings value in place for the REST of the
+    # session. Live proof, not reasoned about: a direct `Settings()`
+    # construction and `os.environ["QDRANT_URL"]` both read correctly
+    # at the point of failure; only the orphaned module's own
+    # `get_settings()` read stale.
+    #
+    # Fixed by restoring `sys.modules[module_name]` to whatever it was
+    # before this call, immediately after the fresh import completes --
+    # the fresh module object is still returned (and still a genuinely
+    # different object from the original, still proving "a clean
+    # import succeeds" -- this function's only real contract), but it
+    # no longer lingers as the live entry in `sys.modules` for anything
+    # else in the session to stumble into later.
+    previous = sys.modules.get(module_name)
     sys.modules.pop(module_name, None)
-    return importlib.import_module(module_name)
+    try:
+        return importlib.import_module(module_name)
+    finally:
+        if previous is None:
+            sys.modules.pop(module_name, None)
+        else:
+            sys.modules[module_name] = previous
 
 
 # Shared "expected schema" facts for Task 1.2.b's/1.2.c's tests (moved here

@@ -67,10 +67,14 @@ SUBPACKAGES = [
 # separately in test_handoff_routes.py; calling it with zero arguments
 # raises TypeError, not NotImplementedError, so it is removed from this
 # list the same way.
+# app.telemetry.service.record_trace is no longer a raising stub as of
+# Step 4.5 -- it is now a real manual-span context-manager factory
+# requiring a real `name` argument, tested separately in test_telemetry_
+# service.py; calling it with zero arguments raises TypeError, not
+# NotImplementedError, so it is removed from this list the same way.
 STUB_ENTRY_POINTS = [
     ("app.mcp.service", "search_knowledge_base"),
     ("app.admin.routes", "list_platform_tenants"),
-    ("app.telemetry.service", "record_trace"),
 ]
 
 

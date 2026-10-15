@@ -43,6 +43,15 @@ x-app-env: &app-env
   ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
   API_HOST: ${API_HOST:?API_HOST must be set in .env}
   API_PORT: ${API_PORT:?API_PORT must be set in .env}
+  # Optional (Step 4.5): tracing is wired up by app/main.py's own
+  # lifespan hook (the api service only -- worker/migrate never run
+  # the chat graph or call retrieve(), so there is nothing in either
+  # process this instrumentation would capture; present here anyway,
+  # unused by worker/migrate, only because this one anchor is shared
+  # across all three and an unused Settings value is harmless). ":-"
+  # (not ":?"): absent is a valid "tracing disabled" value, the same
+  # shape ANTHROPIC_API_KEY above already uses.
+  PHOENIX_COLLECTOR_ENDPOINT: ${PHOENIX_COLLECTOR_ENDPOINT:-}
 
 # Hardening applied to api, worker and migrate only (our own code running
 # the widgetplatform-backend image): read-only root filesystem with a tmpfs
@@ -147,6 +156,58 @@ services:
     restart: unless-stopped
     # No published ports: only other Compose services reach qdrant, over
     # the default network, by service name.
+
+  phoenix:
+    # Step 4.5 [SECURITY, Felix's own direct instruction]: self-hosted
+    # Phoenix (docs/SPEC.md §14's own named service). Verified with
+    # `docker manifest inspect arizephoenix/phoenix:version-20.22.0-
+    # nonroot` (returned a valid manifest list) -- the "version-X.Y.Z"
+    # tag form, confirmed against the real Docker Hub tags API to be
+    # the explicit, intentional pin for this exact release (not a
+    # floating "20"/"20.22" tag); "-nonroot" matches this project's own
+    # established non-root-container discipline (api/worker/migrate
+    # already run as uid 10001, Task 1.1.g).
+    image: arizephoenix/phoenix:version-20.22.0-nonroot
+    environment:
+      # Confirmed live against Arize's own self-hosting docs: the real
+      # mechanism behind docs/SPEC.md §13's own "stored for 30 days,
+      # then auto-deleted" -- defaults to 0 (infinite retention)
+      # otherwise, which would silently keep trace text forever.
+      PHOENIX_DEFAULT_RETENTION_POLICY_DAYS: "30"
+      # Explicit, absolute path -- not left to default to "~/.phoenix",
+      # which resolves against whatever HOME the image's own non-root
+      # user happens to have (not independently confirmed here); an
+      # explicit path removes that ambiguity and gives the named volume
+      # below an unambiguous mount target.
+      PHOENIX_WORKING_DIR: /data
+    volumes:
+      - phoenix-data:/data
+    ports:
+      # [SECURITY, Felix's own direct instruction]: bound to loopback
+      # ONLY -- never routed through Caddy, and no entry for this
+      # service exists (or should ever exist) in any Caddyfile this
+      # project writes. An operator reaches the Phoenix UI by SSH-
+      # tunneling to the host first, e.g.:
+      #   ssh -L 6006:127.0.0.1:6006 <user>@<host>
+      # then opening http://127.0.0.1:6006 in a local browser -- never
+      # by a public DNS name. Same "127.0.0.1:PORT:PORT" shape as the
+      # api service's own binding below.
+      - "127.0.0.1:6006:6006"
+    healthcheck:
+      # No documented /healthz-shaped path was confirmed for this image
+      # (checked against Arize's own docs before writing this) -- a
+      # plain TCP-connect check to the UI/OTLP port, the same /dev/tcp
+      # mechanism qdrant's own healthcheck above already uses (bash is
+      # present on this image's own base; curl/wget not confirmed).
+      test:
+        [
+          "CMD",
+          "bash",
+          "-c",
+          "exec 3<>/dev/tcp/127.0.0.1/6006",
+        ]
+      <<: *healthcheck-timing
+    restart: unless-stopped
 
   api:
     <<: [*app-build, *app-hardening]
@@ -304,6 +365,7 @@ services:
 volumes:
   postgres-data:
   qdrant-data:
+  phoenix-data:
   # Task 2.7.a: shared between api and worker only (not migrate -- it
   # never touches uploads); named, not bind-mounted, matching the two
   # volumes above.

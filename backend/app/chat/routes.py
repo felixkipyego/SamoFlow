@@ -61,6 +61,7 @@ from datetime import UTC, datetime
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse, Response
 from langchain_core.messages import AIMessage, HumanMessage
+from opentelemetry import context
 from sqlalchemy import text
 from sqlalchemy.exc import TimeoutError as PoolTimeoutError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -82,6 +83,11 @@ from app.plans.service import get_plan_limits
 from app.plans.usage import PendingUsageEvent, estimate_cost_usd
 from app.ratelimit import RateLimiter
 from app.request_limits import get_or_create_limiter
+from app.telemetry.service import (
+    effective_trace_text_enabled,
+    tag_current_span_with_identity,
+    trace_text_context,
+)
 from app.tenancy.models import Conversation
 from app.tenancy.repository import TenantScopedRepository
 
@@ -425,6 +431,7 @@ async def _stream_turn(
     existing_values: dict,
     chat_request_timeout_seconds: float,
     quota_exhausted: bool,
+    trace_text_enabled: bool,
 ) -> AsyncIterator[dict]:
     """The real SSE body. Holds NO database connection of its own for the
     main loop's own duration -- the lease and the idempotency check were
@@ -454,6 +461,20 @@ async def _stream_turn(
     answer, and quota-exhausted).
     """
     event_id = 0
+
+    # Step 4.5: docs/SPEC.md §13: "Spans are tagged with tenant and
+    # visitor" and "the switch is applied per request before spans are
+    # exported" -- both done HERE, inside this generator's own body,
+    # not in create_chat_turn() above: this is the actual `asyncio`
+    # task that runs the graph (`run_turn()`, below) and therefore the
+    # one whose own OTel context the baggage attach below needs to
+    # wrap. Attaching it in create_chat_turn() instead would attach it
+    # to THAT function's own task, which returns (handing the
+    # `EventSourceResponse` back to Starlette) before this generator's
+    # own body ever executes -- the attach would have no effect on the
+    # spans this function's own `run_turn()` call produces.
+    tag_current_span_with_identity(identity.tenant_id, identity.vid)
+    trace_context_token = context.attach(trace_text_context(trace_text_enabled))
 
     try:
         if existing_answer is not None:
@@ -578,6 +599,7 @@ async def _stream_turn(
     finally:
         active_streams.discard(identity.vid)
         await _release_lease(identity.tenant_id, conversation_id, lease_token)
+        context.detach(trace_context_token)
 
 
 @router.post("/chat")
@@ -672,6 +694,21 @@ async def create_chat_turn(payload: ChatRequest, request: Request) -> Response:
                 tenant.id, plan_limits
             )
 
+            # Step 4.5: docs/SPEC.md §13's own per-tenant trace-text
+            # switch -- resolved HERE, with the already-open session and
+            # the already-fetched `tenant` row, the IDENTICAL "resolve
+            # retention_days with a platform-default fallback, clamped
+            # to [1, 90]" logic `handle_retention_sweep()` (app/ingest/
+            # job_handlers.py) already uses -- not extracted into a
+            # shared helper (a 2nd occurrence, below this project's own
+            # established 3rd-occurrence threshold).
+            retention_days = tenant.config.get(
+                "retention_days", settings.default_chat_retention_days
+            )
+            if not isinstance(retention_days, int) or not (1 <= retention_days <= 90):
+                retention_days = settings.default_chat_retention_days
+            trace_text_enabled = effective_trace_text_enabled(tenant.config, retention_days)
+
             lease_token = uuid.uuid4()
             lease_seconds = (
                 settings.chat_request_timeout_seconds + settings.chat_lease_margin_seconds
@@ -720,6 +757,7 @@ async def create_chat_turn(payload: ChatRequest, request: Request) -> Response:
             existing_values,
             settings.chat_request_timeout_seconds,
             quota_exhausted,
+            trace_text_enabled,
         ),
         ping=15,
         headers={

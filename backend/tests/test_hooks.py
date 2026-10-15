@@ -83,7 +83,7 @@ def _run_hooks(cwd) -> str:
     return result.stdout
 
 
-def test_the_real_repository_marker_count_is_68():
+def test_the_real_repository_marker_count_is_67():
     # The real, live regression this task's own exclusion exists for:
     # Task 3.7.d's own injection-detector constant and its test both
     # mirror real planted-injection text verbatim, which happens to
@@ -150,11 +150,17 @@ def test_the_real_repository_marker_count_is_68():
     # endpoint replaced that whole stub), and app/agent/graph.py's own
     # `_is_escalation_intent()` deferral marker (the real YAML trigger-
     # phrase check replaced it). No other marker moved.
+    # 68 -> 67 at Step 4.5 (2026-10-15), real, not accidental: confirmed
+    # by grepping directly that this scanner's own first trigger word,
+    # followed by "(4.5)", no longer appears anywhere under app/ -- one
+    # real removal, app/telemetry/service.py's own Step-1.1b-era stub
+    # marker (the real init_tracing()/record_trace() replaced that
+    # whole stub). No other marker moved.
     stdout = _run_hooks(REPO_ROOT)
     first_line = stdout.splitlines()[0]
     count = int(first_line.split()[0])
-    assert count == 68, (
-        f"expected 68 markers against the real repository, got {count} -- "
+    assert count == 67, (
+        f"expected 67 markers against the real repository, got {count} -- "
         f"either a real marker was added/removed, or the exclusion below "
         f"needs revisiting:\n{stdout}"
     )

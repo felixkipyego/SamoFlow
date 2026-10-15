@@ -1,5 +1,7 @@
 # backend/tests/test_config.py
 # Tests for Task 1.1.c's Settings module (backend/app/config.py).
+import sys
+
 import pytest
 from pydantic import ValidationError
 
@@ -154,6 +156,42 @@ def test_module_imports_cleanly_with_empty_environment(monkeypatch):
     for name in ALL_SETTINGS_VARS:
         monkeypatch.delenv(name, raising=False)
     fresh_import("app.config")  # must not raise despite empty env
+
+
+def test_fresh_import_never_leaves_sys_modules_pointed_at_the_orphaned_copy(monkeypatch):
+    # [SECURITY-adjacent] Real bug, found live via a reproducible full-
+    # suite failure, not assumed: fresh_import("app.config") used to
+    # leave `sys.modules["app.config"]` PERMANENTLY pointed at the new,
+    # freshly-imported module object -- every LATER function-local
+    # `from app.config import get_settings` anywhere else in the same
+    # pytest session (e.g. scripts/retrieval_eval.py's own main(),
+    # which deliberately imports this way) bound to that orphaned
+    # module's OWN, separate `@lru_cache`, which this project's own
+    # autouse `_isolated_env` fixture never clears (it only clears the
+    # ORIGINAL module's function, bound at conftest.py's own top-level
+    # import). Whichever test happened to be the first later caller to
+    # populate that orphaned cache silently froze its own Settings
+    # value in place for the rest of the session -- confirmed live
+    # with a direct repro (a correct `os.environ`/direct `Settings()`
+    # read, alongside a stale `get_settings()` read from the orphaned
+    # module).
+    original_module = sys.modules["app.config"]
+    original_get_settings = get_settings
+
+    fresh_import("app.config")
+
+    # sys.modules itself must be back to the exact original object --
+    # the real fix's own direct contract.
+    assert sys.modules["app.config"] is original_module
+
+    # The real regression proof: a FRESH, function-local import (the
+    # exact pattern scripts/retrieval_eval.py's own main() uses) must
+    # bind to the SAME get_settings -- and therefore the SAME, properly
+    # clearable @lru_cache -- as everything else in this process, not
+    # a new, orphaned, never-cleared one.
+    from app.config import get_settings as local_get_settings
+
+    assert local_get_settings is original_get_settings
 
 
 def test_settings_env_file_is_never_configured():

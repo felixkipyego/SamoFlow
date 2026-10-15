@@ -69,6 +69,7 @@ from app.qdrant import (
     get_qdrant_read_client,
     tenant_filter,
 )
+from app.telemetry.service import record_trace
 
 
 def _retrieval_filter(client_id: uuid.UUID) -> Filter:
@@ -251,10 +252,22 @@ async def retrieve(
     )
 
     client = get_qdrant_read_client()
-    hybrid_response, dense_only_response = await client.query_batch_points(
-        collection_name=collection_name,
-        requests=[hybrid_request, dense_only_request],
-    )
+    # docs/SPEC.md §13: "a manual retriever span inside retrieve()" --
+    # the one Qdrant call this project's own OpenInference instrumentor
+    # (LangChainInstrumentor) never sees, since it is a raw qdrant-
+    # client call, not a LangChain Runnable. "input.value" (not a
+    # bespoke attribute name) deliberately matches the SAME OpenInference
+    # text-attribute prefix app/telemetry/service.py's own redaction
+    # processor already watches for -- the per-tenant trace-text switch
+    # covers this manual span exactly the same way it covers every
+    # automatic one, with no special-casing needed here.
+    with record_trace(
+        "retrieve", {"tenant.id": str(client_id), "input.value": query, "retrieval.k": k}
+    ):
+        hybrid_response, dense_only_response = await client.query_batch_points(
+            collection_name=collection_name,
+            requests=[hybrid_request, dense_only_request],
+        )
     best_dense_score = (
         dense_only_response.points[0].score if dense_only_response.points else None
     )

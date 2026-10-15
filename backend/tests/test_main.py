@@ -32,6 +32,16 @@ import pytest
 # bound), used by every test below instead of a fresh, test-local
 # import -- consistent with `create_app`'s own origin regardless of
 # what `fresh_import()` does to `sys.modules` later in the run.
+# Step 4.5 follow-up: fresh_import()'s own root cause (permanently
+# replacing sys.modules[module_name], confirmed live to leak into a
+# LATER, unrelated full-suite failure via app.config specifically --
+# see tests/test_config.py's own test_fresh_import_never_leaves_sys_
+# modules_pointed_at_the_orphaned_copy for the real regression proof)
+# is now fixed at the source (tests/conftest.py's own fresh_import()).
+# The shared `main_module` reference below stays exactly as is --
+# still correct, still the right pattern for a test file whose own
+# tests monkeypatch module attributes -- this file's own fix was never
+# wrong, just narrower than the real, shared root cause.
 import app.main as main_module
 from app import db, qdrant
 from app.config import Settings, SettingsError, get_settings

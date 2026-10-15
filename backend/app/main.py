@@ -62,6 +62,7 @@ from app.handoff.routes import router as handoff_router
 from app.health import router as health_router
 from app.plans.usage import sync_usage_counters
 from app.qdrant import get_qdrant_client
+from app.telemetry.service import init_tracing, instrument_fastapi_app, shutdown_tracing
 
 _TITLE = "widgetplatform API"  # neutral name; no brand name in code
 
@@ -78,6 +79,23 @@ _USAGE_COUNTER_STARTUP_TIMEOUT_SECONDS = 30.0
 
 @asynccontextmanager
 async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
+    # Step 4.5: docs/SPEC.md §13's own "phoenix.otel.register at
+    # startup". Before open_checkpointer_pool()/the graph compile below
+    # -- LangChainInstrumentor patches LangChain's own base Runnable
+    # classes globally, so order relative to graph construction has no
+    # functional effect either way, but doing it first keeps every
+    # later startup step's own spans (if any ever exist) correctly
+    # instrumented from the moment they run, rather than depending on
+    # a reader noticing instrumentation happened to land after them.
+    # `init_tracing()` never raises (see its own docstring) and returns
+    # `None` when Phoenix is not configured -- the identical "optional
+    # feature, must still start without it" shape SMTP/Anthropic
+    # already established.
+    tracer_provider = await init_tracing(get_settings())
+    if tracer_provider is not None:
+        instrument_fastapi_app(app, tracer_provider)
+    app.state.tracer_provider = tracer_provider
+
     await open_checkpointer_pool()
     # Task 4.1: resolves the §9 marker recorded at the Step 3.3 breakdown
     # (decision Q5) -- "compile the graph once, in the lifespan hook,
@@ -234,6 +252,14 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         logger.exception("failed to close the checkpointer pool during shutdown")
     else:
         logger.info("checkpointer pool closed")
+
+    # Step 4.5: docs/SPEC.md §13's own "a flush on shutdown" -- last,
+    # not first: every other shutdown step above still runs (and still
+    # logs/traces normally) even if this one were ever slow, matching
+    # this hook's own "one failing disposal must never prevent another"
+    # discipline. shutdown_tracing() is a no-op, never raising, when
+    # tracing was never configured (app.state.tracer_provider is None).
+    shutdown_tracing(app.state.tracer_provider)
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
