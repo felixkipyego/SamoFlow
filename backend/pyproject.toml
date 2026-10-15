@@ -229,6 +229,12 @@ dependencies = [
 dev = [
     "pytest==9.1.1",
     "pytest-asyncio==1.4.0",
+    # Added 2026-10-15: a hang must fail fast with a stack trace, never
+    # silently block for hours (a real multi-hour hang happened this same
+    # week -- see PROJECT_SPEC.md's Part A decision-log entry). Current on
+    # PyPI at this task's own build time (2.4.0, confirmed live via
+    # `pip index versions`).
+    "pytest-timeout==2.4.0",
     "ruff==0.16.8",
     "uv==0.12.19",
     "pip-audit==2.10.1",
@@ -286,3 +292,12 @@ minversion = "9.1"
 addopts = ["-ra"]
 testpaths = ["tests"]
 asyncio_mode = "auto"
+# Global per-test timeout (pytest-timeout), added 2026-10-15. Value is 2x
+# the single largest explicit timeout anywhere in this suite -- the real
+# subprocess alembic calls in test_alembic.py, timeout=30 -- confirmed by
+# reading both call sites directly: each test invokes its subprocess
+# helper exactly once (no chaining), so no test legitimately needs more
+# than one 30s wait. 60s is generous without masking a genuine hang for
+# hours. Long-running tests get an explicit `@pytest.mark.timeout(N)`
+# override instead of raising this global.
+timeout = "60"
