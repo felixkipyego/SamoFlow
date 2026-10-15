@@ -11,6 +11,12 @@
 3. Then docs/SPEC.md.
 If PROJECT_SPEC.md and docs/SPEC.md disagree, stop and ask me which one is right.
 
+## Sync before work
+Applies to every task.
+- At the start of every task, run `git fetch origin && git rebase origin/main` (commit or stash first — never discard work), then read the docs/DECISIONS_REGISTER.md entries for the step you're about to do.
+- Rebase again immediately before pushing.
+- If a rebase conflicts in PROJECT_SPEC.md or DECISIONS_REGISTER.md, keep both sides' content — never drop the other side's lines.
+
 ## Senior engineer judgment
 Applies to every task, whether or not the prompt mentions it. Extends PROJECT_SPEC.md rule 11 (over-engineering/security) and rule 6 (the end-of-task report) — read those first; this does not repeat them.
 - State the simplest correct design before building, and justify every piece of complexity beyond it.
@@ -30,5 +36,5 @@ Applies to every task.
 - Exception: if genuinely blocked mid-task (cannot continue safely or correctly without input), stop there and report the blocker in the same report format — never ask permission for things the prompt already authorised.
 
 ## Keeping the files in sync
-- Do not copy rules or decisions into this file, with one exception: "Senior engineer judgment" and "Ending a task" above are standing, project-independent rules, not SamoFlow spec decisions, so they live here directly rather than in PROJECT_SPEC.md. Everything else still only points to the two files above, so nothing can drift.
+- Do not copy rules or decisions into this file, with one exception: "Sync before work", "Senior engineer judgment" and "Ending a task" above are standing, project-independent rules, not SamoFlow spec decisions, so they live here directly rather than in PROJECT_SPEC.md. Everything else still only points to the two files above, so nothing can drift.
 - After every task, update PROJECT_SPEC.md as its rules describe.
