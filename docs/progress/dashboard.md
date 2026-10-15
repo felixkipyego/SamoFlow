@@ -375,3 +375,71 @@ there before the widget track's own fix lands on `main`. Push gate
 (rule 4/§2.18): never push while any test fails, so this track's own
 rebase+push waits for `origin/main` to go green on its own widget-side
 fix first, re-fetching before every rebase attempt.
+
+### Rebase/push outcome (final)
+
+By the time this track rebased, `origin/main` had already gone green
+at `6eea542` ("Alignment: fix CI (narrow test_layout_placeholders.py to
+dashboard/ only)...") — the widget track's own fix for the collision
+above landed first, exactly as the heads-up anticipated, so no second
+wait was needed.
+
+`git rebase origin/main` replayed this track's 5 commits (Parts A-E)
+cleanly except for two conflicts, both resolved by hand, both
+mechanical (no logic changed on either side):
+
+- `backend/tests/test_layout_placeholders.py` (commit 3, Part C): the
+  widget track's own `6eea542` had already renamed/restructured the
+  same file this track's own 6.1 change touched (narrowing
+  `_STILL_PLACEHOLDER_READMES`/`_PLACEHOLDER_ROOTS` for `widget/chat`).
+  Resolved by taking that structure as the base and applying this
+  track's own change on top: both dicts/tuples now empty (dashboard/
+  also has real tooling as of this task), the generic test name
+  `test_placeholder_roots_contain_only_readmes_and_folders` kept (no
+  folder this file tracks is still a placeholder), all three README
+  entries kept permanently in `_READMES` (established convention —
+  real folders stay listed). Verified immediately: `pytest tests/
+  test_layout_placeholders.py -q` — 4 passed.
+- `.gitignore` (commit 4, Part D): both tracks added a Node-tooling
+  comment line over the same pre-existing blank slot (widget's own
+  "chosen at Step 5.1" wording vs. this track's "not chosen yet").
+  Resolved by merging both into one true statement naming both
+  tracks' own real, now-chosen tooling (esbuild/Playwright/ESLint for
+  widget at 5.1; Vite/React/TypeScript/shadcn-ui/Playwright/Vitest for
+  dashboard at 6.1) — content merge, not a pick-one-side resolution.
+
+Full verification re-run from scratch after the rebase (this
+worktree's own `.venv`, confirmed pointed at this worktree's `backend/`
+before running anything):
+
+- `make lint`: clean.
+- `make test-all` (real test-db/test-qdrant): **1568 passed, 0
+  failed**, both services confirmed stopped/removed afterward.
+- `make hooks`: unchanged shape (64 markers).
+- `make lock-check`: clean.
+- `make audit`: 0 known vulnerabilities.
+- Image job: fresh `docker build` of `backend/`, `deploy/
+  smoke-image.sh` — all 8 checks PASS.
+- `dashboard/`: lint (0 errors, 1 pre-existing shadcn-template
+  warning), `npm run test` (8/8), `npm run build`, `npm run audit
+  --omit=dev` (0 vulnerabilities) — all clean.
+- `dashboard/e2e`: real backend stack (`make up`/`make migrate`, a
+  real seeded owner via piped stdin), full Playwright suite — **4/4
+  passing**, including the authenticated-shell/Dialog test. One
+  self-inflicted false alarm during this run, not a real bug: an
+  earlier `make up &` was started as a detached background shell
+  outside this session's own background-task tracking and killed
+  before the `api`/`worker` containers finished starting (only
+  postgres/qdrant/phoenix came up); the resulting e2e run correctly
+  failed on "Email or password is incorrect" (login had nowhere to
+  go). Re-ran `make up` properly, confirmed `/health` returns 200
+  first, then re-ran the suite clean. No code or test change was
+  needed — recorded here so the failure isn't mistaken for a real
+  login/session bug on a future read of this log.
+- `git status --short`: clean; `.env` confirmed present only as an
+  ignored (`!!`) local file, never staged.
+
+Pushed straight to `main` (rule 4): `6eea542..195de3a`, five commits —
+`7519325` (Part A), `1202972` (Part B), `a98cd09` (Part C), `29b444b`
+(Part D), `195de3a` (Part E). Not rejected; `origin/main` had not moved
+again since the rebase base, so only one push attempt was needed.
