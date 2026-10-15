@@ -1,0 +1,129 @@
+/* Task 5.2: chat panel styles. Loaded the identical way loader/src/
+ * widget.css already is -- a real external stylesheet (<link
+ * rel="stylesheet">), never inline, for the identical CSP reason (see
+ * that file's own header). Basic, functional styling only; the full
+ * theming/token/accessibility pass is Step 5.5's own scope.
+ */
+.sf-panel {
+  all: initial;
+  position: absolute;
+  right: 0;
+  bottom: 64px;
+  width: 320px;
+  max-height: min(480px, 70vh);
+  display: flex;
+  flex-direction: column;
+  background: #ffffff;
+  border-radius: 12px;
+  box-shadow: 0 4px 24px rgba(0, 0, 0, 0.2);
+  font: 14px/1.4 system-ui, -apple-system, sans-serif;
+  overflow: hidden;
+}
+
+.sf-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 12px 16px;
+  background: #4f46e5;
+  color: #ffffff;
+  font-weight: 600;
+}
+
+.sf-logo {
+  width: 20px;
+  height: 20px;
+  border-radius: 4px;
+}
+
+.sf-message-list {
+  flex: 1;
+  overflow-y: auto;
+  padding: 12px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.sf-message {
+  max-width: 85%;
+  padding: 8px 12px;
+  border-radius: 10px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.sf-message-visitor {
+  align-self: flex-end;
+  background: #4f46e5;
+  color: #ffffff;
+}
+
+.sf-message-assistant {
+  align-self: flex-start;
+  background: #f1f1f4;
+  color: #1a1a1a;
+}
+
+.sf-citations {
+  all: initial;
+  display: block;
+  margin-top: 6px;
+  font-size: 12px;
+}
+
+.sf-citations li {
+  all: initial;
+  display: block;
+}
+
+.sf-citations a {
+  color: #4f46e5;
+}
+
+.sf-banner {
+  padding: 8px 16px;
+  background: #fef3c7;
+  color: #92400e;
+  font-size: 13px;
+}
+
+.sf-input-row {
+  display: flex;
+  gap: 8px;
+  padding: 12px 16px;
+  border-top: 1px solid #e5e5ea;
+}
+
+.sf-input {
+  all: initial;
+  flex: 1;
+  resize: none;
+  height: 36px;
+  padding: 8px;
+  border: 1px solid #d0d0d8;
+  border-radius: 8px;
+  font: inherit;
+}
+
+.sf-send {
+  all: initial;
+  padding: 0 14px;
+  background: #4f46e5;
+  color: #ffffff;
+  border: none;
+  border-radius: 8px;
+  cursor: pointer;
+  font: inherit;
+}
+
+.sf-send:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.sf-privacy-link {
+  padding: 6px 16px 10px;
+  font-size: 11px;
+  color: #6b7280;
+}

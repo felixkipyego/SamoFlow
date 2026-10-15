@@ -1,10 +1,12 @@
 # widget/chat
 
-The Preact chat UI that runs inside the widget's shadow DOM: streaming
-answers, previous chats, escalation panel, theming and accessibility
-(docs/SPEC.md §11).
+The Preact chat UI that runs inside the widget's shadow DOM: session
+creation, streaming answers via `fetch`+SSE, a restricted safe-markdown
+renderer, and the calm fixed error states (docs/SPEC.md §11). Previous
+chats, the escalation panel and the full theming/accessibility pass are
+still ahead (steps 5.3–5.5).
 
-Owned by steps 5.2 to 5.5 (Chat UI core, Conversations UI, Escalation panel
-and fallback UI, Theming/accessibility/CSP) — see PROJECT_SPEC.md.
-
-Placeholder: no build tooling yet. The bundler is chosen in step 5.1.
+Built at Step 5.2 (Chat UI core [SECURITY]) — see PROJECT_SPEC.md and
+`docs/progress/widget.md`. Source in `src/`, unit tests in `test/`.
+Bundled with esbuild (`../scripts/build.mjs`) from the repo's `widget/`
+package (`../package.json`).

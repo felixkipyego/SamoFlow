@@ -4,8 +4,14 @@ Track: `track/widget`. Shape per PROJECT_SPEC.md §11.5 point 3 (dated entries:
 what was built, what was verified). Folded into PROJECT_SPEC.md §4/§5/§7/§9
 and removed when this track merges.
 
-Duplication counter (rule 9, this track's own, starting at n=0): **n=1**
-after this task (one code sub-step: Step 5.1). Not due (threshold is 4).
+Duplication counter (rule 9, this track's own, starting at n=0), kept
+current across this whole session rather than left at its first value:
+Step 5.1 → n=1; Part A (widget.yml fix + run-ci-locally.mjs, real code)
+→ n=2; Part B (per-worktree `.venv`, no tracked-repo code change) does
+not count; Part C (contract check, documentation/markers only) does not
+count; Part D (Step 5.2 Chat UI core, real code) → **n=3**. Not due
+(threshold is 4) — the next code sub-step (5.3) is where the check
+falls due.
 
 ## Step 5.1 — Loader and shadow DOM shell (plumbing) (2026-10-15)
 
@@ -405,3 +411,150 @@ behavior, not assumption**:
 Step 5.2 needs (session creation, streaming chat, citation URLs for
 link-gating, a complete fixed error vocabulary) already exists in the
 locked contract.
+
+## Part D — Step 5.2 Chat UI core [SECURITY] (2026-10-15)
+
+**A real correction to Part C, found only while building, not caught by
+the Part C survey itself**: "no other contract gap found" was wrong.
+`POST /api/v1/chat` never returns the `conversation_id` it creates for a
+first turn, anywhere (confirmed: every `_sse_event()` call site read
+directly; docs/SPEC.md §10's own event table doesn't carry it either).
+Re-checked against Part C's own stop-condition-(a) instruction before
+treating this as a blocker: a safe workaround through ALREADY-LOCKED
+endpoints exists (`GET /api/v1/conversations`, ordered most-recently-
+active-first, scoped to the caller's own token — reliably
+`conversations[0]` immediately after that turn's own `done` event), the
+same shape as the verified-domains finding, so this does NOT stop the
+task — built the workaround, added a new §9 marker (PROJECT_SPEC.md,
+recommending the real, additive fix: a `conversation_id` field on the
+`done` event) and corrected Part C's own record in place rather than
+quietly building around the gap without saying so.
+
+**Dependency**: `preact` 11.0.1 (mandated by docs/SPEC.md §11; zero
+transitive dependencies of its own, confirmed via `npm view`). No
+markdown library added (rule 8) — a small, purpose-built restricted
+parser instead; see its own file header for the full reasoning (smaller
+surface than defanging a general-purpose one, fully covered by this
+step's own adversarial suite).
+
+**Loader → chat hand-off**: Step 5.1's own "leaks no globals (or
+exactly one namespaced one, justified)" rule is now exercised for real
+— `window.__SAMOFLOW_WIDGET__` (`{shadowRoot, launcherEl, siteKey,
+baseUrl}`), set by `chat-loader.js::ensureChatLoaded()` immediately
+before the chat `<script>` tag is inserted, read once synchronously by
+`chat/src/index.js` (same `document.currentScript`-style discipline as
+the loader itself) and deleted the moment it's read. The launcher button
+itself is handed over too, so `chat/src/App.js` can attach its OWN
+toggle-open/closed click handler to the SAME button the loader already
+built — one shared widget host, per docs/SPEC.md §11.
+
+**Pipeline (each file's own header has the full reasoning)**:
+`sse-parser.js` (incremental SSE framing, robust across arbitrary chunk
+boundaries, including a split CRLF terminator) → `chat-controller.js`
+(stateful orchestration: session+token-refresh-on-401-once,
+duplicate-send guard, oversized-stream cap + reader cancellation, the
+real fixed HTTP/SSE error vocabulary, the conversation_id workaround
+above) → `markdown.js` (the restricted parser: code spans, fenced
+blocks, strong/em, gated links — NOTHING else, no autolink, no raw
+HTML, no reference-style links, NO `.normalize()` call anywhere, ever)
+→ `render.js` (AST → Preact vnodes; `dangerouslySetInnerHTML` never
+imported, never called, anywhere — the structural reason raw HTML/XSS
+is a non-issue by construction, not a filtering problem) →
+`config-validation.js`/`color.js`/`url-safety.js` (tenant-config
+validation: colors as real CSS color values only, logo/privacy URLs
+https-only via the real `URL` parser, title/greeting as plain text) →
+`App.js`/`mount.js`/`index.js` (the Preact panel + its own entry point).
+
+**Two real bugs, found live by the Playwright test, neither caught by
+98 passing Node unit tests**:
+1. **A Chromium-specific `this`-binding bug**: `{ fetchImpl = fetch } = {}`
+   as a default parameter detaches `fetch` from `window`, and Chromium's
+   native implementation throws `TypeError: Illegal invocation` the
+   moment it's called that way — caught silently by this component's
+   OWN calm error handling, so the first real e2e run just showed
+   "Connection lost" with no console error and no network request ever
+   issued (confirmed via `page.on('response')`/`page.on('console')`
+   diagnostics: zero events for `/api/v1/chat` at all). Fixed with a
+   thin wrapper closure, `(...args) => fetch(...args)`, in both
+   `session.js` and `chat-controller.js`. **Confirmed this could not
+   have been caught by a Node unit test**: Node's own global `fetch`
+   (undici) does NOT enforce this `this` binding (tested live — a
+   detached reference works fine there), so this is genuinely a
+   browser-only class of bug, real evidence for why the Playwright
+   layer exists at all, not a gap in the unit tests' own design.
+2. **A test-fixture-only bug**: the fake e2e backend's citation URL was
+   `http://127.0.0.1:4173/...` (plain http, matching the fixture
+   server's own origin) — correctly rejected by `isHttpsUrl()`, exactly
+   as production code should for a real non-https citation. Fixed the
+   FIXTURE (a real `https://example.com/...` URL, never navigated to,
+   only asserted on), not the security check.
+
+**Adversarial pass, every required case a committed regression test**
+(`chat/test/markdown-render-adversarial.test.mjs`, asserted directly
+against the Preact VNODE TREE via `h()`'s own plain-object output —
+`vnode-helpers.mjs`'s header explains why that's sufficient without
+jsdom): XSS through answer text; javascript:/data:/vbscript: and mixed-
+case/whitespace-padded schemes (the real WHATWG URL-parser technique,
+`url-safety.test.mjs`); protocol-relative `//evil`; reference-style
+links (not implemented at all — never become a link); nested brackets
+(both an allowed and a rejected case, proving the depth-tracking bracket
+matcher, not a naive one); HTML entities (decoded only at the leaf,
+after structural scanning — proven both for `&#106;avascript:` in a URL
+and for a fully entity-encoded `&#91;click me&#93;&#40;...&#41;` that
+must NOT manufacture a live link); the fullwidth look-alike construct
+(`！［click］（url）`, proven inert because `.normalize()` is never
+called anywhere); IDN/homograph domains (proven structurally irrelevant
+— gated by exact citation-URL match, not domain heuristics); autolink
+`<https://evil>` (never recognised, not a link, not raw HTML); images
+(alt-text only, URL always discarded); CSS injection through colors
+(`color.test.mjs`); a malformed/split SSE frame (both at the parser
+level and as a `chat-controller.js` integration test); an oversized
+stream (truncated, reader cancelled, `onDone({truncated:true})`, never
+unbounded growth); a duplicate send while streaming (fetch called
+exactly once, proven via a controlled pending-promise fetch).
+
+**Budget**: real chat UI build, **10,365 bytes gzipped** against the
+~60KB (61,440-byte) budget — Step 5.1's own placeholder check is now a
+real, passing, enforced check (no longer skipped).
+
+**Scope deliberately NOT built here** (docs/SPEC.md §18's own step
+split): previous-chats list (5.3), the escalation panel (5.4), the full
+WCAG 2.2 AA/theming/CSS-custom-property token pass (5.5) — this step's
+own UI is minimal but functionally complete for send/receive/citations/
+calm-error-states. Baseline accessibility only (`role="log"`/
+`aria-live="polite"` on the message list, `aria-label`s) — not a full
+a11y pass.
+
+**The SAME backend/ test collision as Step 5.1's own precedent, found
+again, not fixed again**: `widget/chat/` now has real tooling too
+(Step 5.2's own `src/`/`test/`), so
+`backend/tests/test_layout_placeholders.py::test_widget_chat_and_dashboard_contain_only_readmes_and_folders`
+fails for the identical reason the widget/loader one did at Step 5.1 —
+confirmed live via `.venv`: **1062 passed, 422 skipped, 1 failed**
+(exactly this one test, nothing else). This batch's own instructions did
+not name this file as an allowed edit (unlike Step 5.1's own Part A,
+where Felix explicitly authorized it mid-task), so it is flagged here,
+not fixed, per the `backend/` edit restriction — a new dated annotation
+on the existing Owner-5.1 §9 marker (PROJECT_SPEC.md) records the exact,
+minimal recommended fix (narrow the root list to `(dashboard/,)` alone).
+
+**Verified** (widget/, re-run 3x per this project's convention since new
+test files were added): `npm run lint` clean. `npm test` — **98 passed,
+0 failed**, identical across 3 runs. `npm run build` — loader
+920 bytes gzipped, chat UI 10,365 bytes gzipped, both well inside
+budget. `npm run test:e2e` — **3 passed** (the original Step 5.1 loader
+test, plus two new chat-UI tests: a full real session→streamed-answer→
+citation-link flow with zero CSP violations, and a launcher open/close
+toggle), identical across 3 runs. `npm audit` — 0 vulnerabilities.
+`node scripts/run-ci-locally.mjs` — the real widget.yml step order, run
+clean end to end from a fully clean `dist/`/`chat/dist/`.
+
+**Verified** (backend/, via `.venv`): `ruff check` clean. `pytest tests -q`
+— **1062 passed, 422 skipped, 1 failed** (the one named, pre-flagged
+`test_layout_placeholders.py` collision above — not a regression, not
+silently accepted, recorded in PROJECT_SPEC.md §9). `git status --short`
+cross-checked: no `.env`; `widget/dist/`, `widget/chat/dist/`,
+`widget/node_modules/` all correctly ignored (`git status
+--ignored=matching`); `backend/` diff for this Part is empty (this
+Part made no backend/ edit at all, unlike Part A's own Felix-authorized
+one).

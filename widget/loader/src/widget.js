@@ -5,11 +5,15 @@
 // reliable way to find the tag that loaded this file and read its
 // data-* attributes.
 //
-// Leaks no globals: everything below runs inside esbuild's IIFE wrapper,
-// and nothing is assigned onto `window`. No public JS API is exposed
-// because nothing in docs/SPEC.md §11 asks for host-page programmatic
-// control in v1; if that need shows up later, it becomes one namespaced
-// global added deliberately, not a default.
+// Leaks no globals of its OWN: everything below runs inside esbuild's
+// IIFE wrapper. Task 5.2 extends this with exactly one, momentary,
+// namespaced global (`window.__SAMOFLOW_WIDGET__`, set by
+// chat-loader.js's own `ensureChatLoaded()` immediately before the chat
+// script tag is inserted, deleted by chat/src/index.js the moment it
+// reads it) -- the one real need (handing the chat bundle a live
+// shadowRoot/launcher reference, not serializable as a string
+// attribute) that justifies the escape hatch this file's own original
+// comment already anticipated. No OTHER public JS API is exposed.
 import { resolveConfig } from "./config.js";
 import { createLauncher } from "./dom.js";
 import { ensureChatLoaded } from "./chat-loader.js";
@@ -53,7 +57,12 @@ function mount() {
       return;
     }
     chatLoadTriggered = true;
-    ensureChatLoaded(config.chatUrl);
+    ensureChatLoaded(config.chatUrl, {
+      shadowRoot,
+      launcherEl: launcher,
+      siteKey: config.siteKey,
+      baseUrl: config.baseUrl,
+    });
   });
 
   document.body.appendChild(host);

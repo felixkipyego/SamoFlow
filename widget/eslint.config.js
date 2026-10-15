@@ -24,6 +24,35 @@ export default [
     },
   },
   {
+    files: ["chat/src/**/*.js"],
+    languageOptions: {
+      ecmaVersion: 2022,
+      sourceType: "module",
+      globals: {
+        window: "readonly",
+        document: "readonly",
+        console: "readonly",
+        URL: "readonly",
+        fetch: "readonly",
+        crypto: "readonly",
+        TextDecoder: "readonly",
+      },
+    },
+  },
+  {
+    files: ["chat/test/**/*.mjs"],
+    languageOptions: {
+      ecmaVersion: 2022,
+      sourceType: "module",
+      globals: {
+        window: "readonly",
+        URL: "readonly",
+        TextEncoder: "readonly",
+        setTimeout: "readonly",
+      },
+    },
+  },
+  {
     files: ["scripts/**/*.mjs", "test/e2e/server.mjs", "playwright.config.mjs"],
     languageOptions: {
       ecmaVersion: 2022,

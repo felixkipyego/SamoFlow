@@ -6,11 +6,14 @@
   "type": "module",
   "scripts": {
     "build": "node scripts/build.mjs",
-    "test": "node --test loader/test/*.test.mjs",
+    "test": "node --test loader/test/*.test.mjs chat/test/*.test.mjs",
     "test:e2e": "playwright test",
     "lint": "eslint .",
     "size": "node scripts/check-size.mjs",
     "ci:local": "node scripts/run-ci-locally.mjs"
+  },
+  "dependencies": {
+    "preact": "11.0.1"
   },
   "devDependencies": {
     "@eslint/js": "10.0.1",
