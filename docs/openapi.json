@@ -440,6 +440,39 @@
         "title": "EscalationResponse",
         "type": "object"
       },
+      "GoLiveCheckResponse": {
+        "properties": {
+          "has_allowed_origin": {
+            "title": "Has Allowed Origin",
+            "type": "boolean"
+          },
+          "has_contact_method": {
+            "title": "Has Contact Method",
+            "type": "boolean"
+          },
+          "has_enabled_source": {
+            "title": "Has Enabled Source",
+            "type": "boolean"
+          },
+          "has_verified_domain": {
+            "title": "Has Verified Domain",
+            "type": "boolean"
+          },
+          "ready_for_go_live": {
+            "title": "Ready For Go Live",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "has_contact_method",
+          "has_allowed_origin",
+          "has_verified_domain",
+          "has_enabled_source",
+          "ready_for_go_live"
+        ],
+        "title": "GoLiveCheckResponse",
+        "type": "object"
+      },
       "HTTPValidationError": {
         "properties": {
           "detail": {
@@ -1994,6 +2027,29 @@
           }
         ],
         "summary": "Update Alert Emails"
+      }
+    },
+    "/api/v1/dashboard/tenant/go-live-check": {
+      "get": {
+        "operationId": "get_go_live_check_api_v1_dashboard_tenant_go_live_check_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GoLiveCheckResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "security": [
+          {
+            "APIKeyCookie": []
+          }
+        ],
+        "summary": "Get Go Live Check"
       }
     },
     "/api/v1/dashboard/tenant/install-snippet": {

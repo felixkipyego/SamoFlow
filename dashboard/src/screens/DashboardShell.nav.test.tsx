@@ -15,6 +15,7 @@ const session = {
 describe("DashboardShell navigation", () => {
   it("starts on Overview and switches screens when a sidebar item is clicked", async () => {
     vi.spyOn(tenantApi, "getTenantConfig").mockImplementation(() => new Promise(() => {}));
+    vi.spyOn(tenantApi, "getGoLiveCheck").mockImplementation(() => new Promise(() => {}));
     render(<DashboardShell session={session} onLoggedOut={vi.fn()} />);
 
     expect(screen.getByRole("heading", { name: "Overview" })).toBeInTheDocument();

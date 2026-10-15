@@ -19,6 +19,7 @@ from app.dashboard.csrf import CSRF_COOKIE_NAME, CSRF_HEADER_NAME
 from app.dashboard.models import DashboardSession, User
 from app.dashboard.passwords import password_helper
 from app.dashboard.repository import create_membership
+from app.ingest.models import Source, VerifiedDomain
 from app.main import create_app
 from app.tenancy.models import SiteKey, Tenant
 from tests.conftest import db_session
@@ -384,3 +385,120 @@ async def test_install_snippet_404s_with_no_site_key(_seeded):
         await _login(client, "owner-b@example.com")
         response = await client.get("/api/v1/dashboard/tenant/install-snippet")
     assert response.status_code == 404
+
+
+# --- Go-live checklist -----------------------------------------------------
+
+
+async def test_go_live_check_starts_all_false_for_a_fresh_tenant(_seeded):
+    app = create_app()
+    async with _dashboard_http_client(app) as client:
+        await _login(client, "owner-a@example.com")
+        response = await client.get("/api/v1/dashboard/tenant/go-live-check")
+    assert response.status_code == 200
+    body = response.json()
+    assert body == {
+        "has_contact_method": False,
+        "has_allowed_origin": False,
+        "has_verified_domain": False,
+        "has_enabled_source": False,
+        "ready_for_go_live": False,
+    }
+
+
+async def test_go_live_check_is_ready_once_contact_method_and_origin_exist(_seeded):
+    app = create_app()
+    async with _dashboard_http_client(app) as client:
+        headers = await _login(client, "owner-a@example.com")
+        await client.patch(
+            "/api/v1/dashboard/tenant/support-details",
+            json={
+                "support_email": "help@example.com",
+                "support_phone": None,
+                "support_contact_link": None,
+                "support_hours": None,
+                "support_message": None,
+            },
+            headers=headers,
+        )
+        await client.patch(
+            f"/api/v1/dashboard/tenant/site-keys/{_seeded['site_key_a_id']}/origins",
+            json={"allowed_origins": ["https://example.com"]},
+            headers=headers,
+        )
+        response = await client.get("/api/v1/dashboard/tenant/go-live-check")
+    assert response.status_code == 200
+    body = response.json()
+    assert body["has_contact_method"] is True
+    assert body["has_allowed_origin"] is True
+    assert body["ready_for_go_live"] is True
+    # Neither of these two is part of the real gate -- confirms
+    # `ready_for_go_live` doesn't silently also require them.
+    assert body["has_verified_domain"] is False
+    assert body["has_enabled_source"] is False
+
+
+async def test_go_live_check_reflects_a_verified_domain_and_enabled_source(_seeded):
+    async with db_session() as session:
+        session.add(
+            VerifiedDomain(
+                tenant_id=_seeded["tenant_a"],
+                domain="example.com",
+                method="dns",
+                status="verified",
+                verification_token="tok-a",  # noqa: S106 (test fixture value)
+            )
+        )
+        session.add(
+            Source(
+                tenant_id=_seeded["tenant_a"],
+                type="urls",
+                config={"urls": ["https://example.com/a"]},
+                refresh_interval="daily",
+                enabled=True,
+                status="active",
+            )
+        )
+        await session.commit()
+
+    app = create_app()
+    async with _dashboard_http_client(app) as client:
+        await _login(client, "owner-a@example.com")
+        response = await client.get("/api/v1/dashboard/tenant/go-live-check")
+    assert response.status_code == 200
+    body = response.json()
+    assert body["has_verified_domain"] is True
+    assert body["has_enabled_source"] is True
+    # Still not ready -- neither counts toward the real gate.
+    assert body["ready_for_go_live"] is False
+
+
+async def test_go_live_check_is_tenant_scoped(_seeded):
+    app = create_app()
+    async with _dashboard_http_client(app) as client:
+        headers = await _login(client, "owner-a@example.com")
+        await client.patch(
+            "/api/v1/dashboard/tenant/support-details",
+            json={
+                "support_email": "help@example.com",
+                "support_phone": None,
+                "support_contact_link": None,
+                "support_hours": None,
+                "support_message": None,
+            },
+            headers=headers,
+        )
+
+    app2 = create_app()
+    async with _dashboard_http_client(app2) as client:
+        await _login(client, "owner-b@example.com")
+        response = await client.get("/api/v1/dashboard/tenant/go-live-check")
+    assert response.status_code == 200
+    assert response.json()["has_contact_method"] is False
+
+
+async def test_go_live_check_without_login_is_401(_seeded):
+    app = create_app()
+    async with _dashboard_http_client(app) as client:
+        response = await client.get("/api/v1/dashboard/tenant/go-live-check")
+    assert response.status_code == 401

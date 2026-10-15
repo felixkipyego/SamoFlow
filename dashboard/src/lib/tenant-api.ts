@@ -38,6 +38,14 @@ export interface InstallSnippet {
   base_url: string | null;
 }
 
+export interface GoLiveCheck {
+  has_contact_method: boolean;
+  has_allowed_origin: boolean;
+  has_verified_domain: boolean;
+  has_enabled_source: boolean;
+  ready_for_go_live: boolean;
+}
+
 export async function getTenantConfig(): Promise<TenantConfig> {
   return apiFetch<TenantConfig>("/api/v1/dashboard/tenant");
 }
@@ -118,4 +126,8 @@ export async function updateSiteKeyOrigins(
 
 export async function getInstallSnippet(): Promise<InstallSnippet> {
   return apiFetch<InstallSnippet>("/api/v1/dashboard/tenant/install-snippet");
+}
+
+export async function getGoLiveCheck(): Promise<GoLiveCheck> {
+  return apiFetch<GoLiveCheck>("/api/v1/dashboard/tenant/go-live-check");
 }

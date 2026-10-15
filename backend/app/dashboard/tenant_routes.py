@@ -19,11 +19,13 @@ from app.dashboard.dependencies import (
     require_recent_auth,
 )
 from app.dashboard.tenant_schemas import (
+    GoLiveCheckResponse,
     InstallSnippetResponse,
     SiteKeyResponse,
     TenantConfigResponse,
 )
 from app.db import get_db_session
+from app.ingest.repository import IngestRepository
 from app.tenancy.repository import (
     SiteKeyAlreadyExistsError,
     TenantScopedRepository,
@@ -209,6 +211,55 @@ async def update_site_key_origins(
         raise HTTPException(status_code=404, detail="site key not found")
     await session.commit()
     return SiteKeyResponse.model_validate(site_key, from_attributes=True)
+
+
+@router.get("/go-live-check", response_model=GoLiveCheckResponse)
+async def get_go_live_check(
+    repo: TenantScopedRepository = Depends(get_dashboard_tenant_repository),  # noqa: B008
+    session: AsyncSession = Depends(get_db_session),  # noqa: B008
+) -> GoLiveCheckResponse:
+    # Read-only mirror of docs/SPEC.md's own real gate ("a site key
+    # moves from draft to live only through a server-side check: at
+    # least one contact method and one allowed origin"). This endpoint
+    # computes that SAME pair server-side and surfaces it as data, so
+    # the Overview screen never duplicates the rule client-side and can
+    # never drift from it -- but it does not itself perform, or gate,
+    # any status transition (that stays "done elsewhere", exactly as
+    # `create_site_key()`'s own header comment already says); issuing a
+    # live site key remains a platform-admin CLI action, out of this
+    # task's scope (6.5 Platform admin is explicitly POST-PILOT).
+    tenant = await repo.get_tenant()
+    config = tenant.config
+    has_contact_method = bool(
+        config.get("support_email")
+        or config.get("support_phone")
+        or config.get("support_contact_link")
+    )
+
+    site_keys = await repo.list_site_keys()
+    has_allowed_origin = any(sk.allowed_origins for sk in site_keys)
+
+    ingest_repo = IngestRepository(tenant_id=repo.tenant_id, session=session)
+    domains = await ingest_repo.list_domains()
+    has_verified_domain = any(d.status == "verified" for d in domains)
+
+    sources = await ingest_repo.list_sources()
+    has_enabled_source = any(s.enabled for s in sources)
+
+    return GoLiveCheckResponse(
+        has_contact_method=has_contact_method,
+        has_allowed_origin=has_allowed_origin,
+        has_verified_domain=has_verified_domain,
+        has_enabled_source=has_enabled_source,
+        # The real gate (docs/SPEC.md, "Going live" row + §12/§6.1's own
+        # line) names exactly two conditions -- contact method and
+        # allowed origin. Verified domain and enabled source are real,
+        # useful pilot-readiness signals (surfaced above for the
+        # checklist), but are NOT part of the actual draft-to-live gate
+        # itself; folding them into `ready_for_go_live` would make this
+        # field claim a stricter rule than the server actually enforces.
+        ready_for_go_live=has_contact_method and has_allowed_origin,
+    )
 
 
 @router.get("/install-snippet", response_model=InstallSnippetResponse)
