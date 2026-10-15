@@ -276,6 +276,46 @@ browser install, remains possible and was never the failure mode observed
 here anyway). **Pending Felix's confirmation that the real push's
 `widget.yml` run on `main` is green.**
 
+## Part B — per-worktree Python environment (2026-10-15)
+
+**Problem, confirmed from Part A's own 5.1 close-out**: this machine has
+no per-worktree virtualenv; both `track/widget` and `track/dashboard`
+worktrees were observed sharing the single global conda env
+`/opt/miniconda3/envs/widgetplatform`, whose editable `widgetplatform`
+install can only ever point `app`/etc. at ONE worktree's `backend/` at a
+time — whichever track last ran `pip install -e ./backend` there.
+
+**Fix**: `.venv` created in THIS worktree
+(`/Users/mac/.../SamoFlow-widget/.venv`), from the pinned interpreter
+(`/opt/miniconda3/envs/widgetplatform/bin/python -m venv .venv` —
+`backend/pyproject.toml`'s own `requires-python = "==3.12.*"`, confirmed
+`python --version` → `3.12.14`), then `--require-hashes -r
+backend/requirements-dev.lock` and `--no-deps -e ./backend` installed
+into it. Already covered by the existing `.venv*/` `.gitignore` pattern
+(confirmed via `git check-ignore -v .venv/bin/python` and `git status
+--short`) — no `.gitignore` change needed.
+
+**Proof `import app` resolves to THIS worktree, not the other one**:
+```
+app module file: .../SamoFlow-widget/backend/app/__init__.py
+this worktree:   .../SamoFlow-widget
+resolved under this worktree: True
+```
+`git worktree list` confirms three distinct worktrees exist on this
+machine (`SamoFlow` @ main, `SamoFlow-dashboard` @ track/dashboard,
+`SamoFlow-widget` @ track/widget) — `app.__file__` resolves under
+`SamoFlow-widget` specifically, never under either of the other two.
+
+**From here on, `.venv/bin/python`/`.venv/bin/ruff` (equivalently,
+`source .venv/bin/activate` then the plain `make lint`/`python -m
+pytest` invocations) are what this track uses for every backend command**
+— confirmed via a real `ruff check` (all checks passed) and a real
+`pytest tests -q` (**1063 passed, 422 skipped**, identical to the
+shared-env run) through `.venv` directly. The shared conda env is left
+alone (not uninstalled from, not relied on going forward) — fixing this
+track's own isolation doesn't require touching what the dashboard track
+has installed there.
+
 **Verified** (backend/, using the correct `/opt/miniconda3/envs/widgetplatform`
 Python 3.12.14 interpreter): `ruff check backend evals hooks.py` — all
 checks passed. `python -m pytest tests -q` — **1063 passed, 422 skipped**,
