@@ -216,6 +216,23 @@ widget, a live strict-CSP Playwright test — see docs/progress/dashboard.md's o
 Dialog scroll-lock" entry, and this alignment task's own exact-tolerance tightening of that
 same test, item 3 below).
 
+### Step 7.3 prep (ops track, 2026-10-15)
+
+Tool choices made under rule 8 while building the Caddyfile/prod compose override/backup and
+monitoring scripts (docs/progress/ops.md has the full build log). All PREP, not final —
+docs/DECISIONS_REGISTER.md §2's own 7.3 entry below records final verification as owned by
+whoever runs 7.3/7.4 on the real server.
+
+| id | date | topic | decision | status | step(s) | source |
+|---|---|---|---|---|---|---|
+| D-73-caddy-pin | 2026-10-15 | Proxy image | `caddy:2.10.2`, verified against a real manifest list (`docker manifest inspect`) — the proxy kickoff decision #5 already named (Caddy over Nginx); this is the version pin | APPROVED | 7.3 | `deploy/docker-compose.prod.yml`; docs/progress/ops.md |
+| D-73-backup-encryption-age | 2026-10-15 | Backup encryption tool | `age` (asymmetric: a public recipient key encrypts, a private key — stored separately, never in the backup bucket — decrypts) over `gpg`/OpenSSL `enc`: the asymmetric split is what makes "the pgcrypto key and other secrets stored SEPARATELY from the data" (this task's own requirement) a structural property of the encrypting side needing no secret at all, not an operator discipline to maintain by hand | APPROVED | 7.3 | `ops/backup/lib.sh`; docs/progress/ops.md |
+| D-73-s3-tool-awscli | 2026-10-15 | S3-compatible upload tool | The AWS CLI (`aws s3 cp`, pointed at any S3-compatible endpoint via `--endpoint-url`) over `rclone`/`s5cmd`: the smallest standard mechanism for a single bucket, no multi-cloud abstraction this project doesn't need (rule 11) | APPROVED | 7.3 | `ops/backup/Dockerfile`; docs/progress/ops.md |
+| D-73-pg-client-pgdg | 2026-10-15 | `postgresql-client-18` source | Debian trixie's own base repo ships only `postgresql-client-17` (confirmed live: no `-18` candidate in `apt-cache policy`) — the official PGDG apt repo (`apt.postgresql.org`) is the standard, well-known source for a client matching `postgres:18.2-trixie`'s own major version exactly | APPROVED | 7.3 | `ops/backup/Dockerfile`; docs/progress/ops.md |
+| D-73-caddy-ports-reset | 2026-10-15 | [SECURITY-adjacent] Prod port isolation | Confirmed live (`docker compose config`, not assumed): a bare `ports: []` in a Compose override does NOT clear an inherited `ports:` list (Compose concatenates list keys by default) — only the Compose Specification's `!reset []` tag genuinely does. Used for `api`/`phoenix`/`postgres`/`qdrant` in the prod override, so none of the four can ever gain a published port in production regardless of what the base `deploy/docker-compose.yml` does later | APPROVED, verified live | 7.3 | `deploy/docker-compose.prod.yml`; docs/progress/ops.md |
+| D-73-phoenix-tunnel-container-ip | 2026-10-15 | Phoenix SSH-tunnel access with zero published ports | Reconciles two instructions that first looked like they conflicted ("only ports 80 and 443 published" vs. "Phoenix access over an SSH tunnel"): Linux Docker already routes a host to any container's own IP on a user-defined bridge network with zero `ports:` entries, so `ssh -L 6006:<container-ip>:6006` still works with NO published port anywhere — docs/deploy/RUNBOOK.md §9 has the exact commands | APPROVED | 7.3 | `docs/deploy/RUNBOOK.md`; docs/progress/ops.md |
+| D-73-backend-changes-flagged-not-built | 2026-10-15 | Scope boundary | Two real `backend/` changes this proxy will need — trusted `X-Forwarded-For` for the rate limiter (confirmed live: every `request.client.host` read in `app/auth/routes.py`/`app/chat/routes.py`/`app/dashboard/routes.py` today becomes Caddy's own IP once it fronts the app, silently breaking per-IP rate limiting) and `Host`-header validation (confirmed live: no `TrustedHostMiddleware` or equivalent exists anywhere in `app/main.py`/`app/config.py` today) — are named here, NOT built: this track does not edit `backend/` (§11.5 point 4), and both are already the named subject of the pre-existing PROJECT_SPEC.md:6859/6888 marker this entry reinforces, not duplicates | APPROVED, flagged not built | owner: Phase 7 batch (whoever next edits `backend/`) | `deploy/Caddyfile`; docs/progress/ops.md |
+
 ---
 
 ## 2. Forward commitments by step
@@ -485,7 +502,13 @@ or the first non-Felix-operated one. The following join it by Felix's decision G
 
 ### 7.3 Backups, restore drill and monitoring
 - The restore drill must prove the restored credentials actually decrypt the restored data —
-  a real, end-to-end proof, not merely "the backup file exists." (PROJECT_SPEC.md:6272)
+  a real, end-to-end proof, not merely "the backup file exists." **Prep done (2026-10-15, ops
+  track) — final verification on the real server at 7.3/7.4.** `ops/backup/restore-drill.sh` +
+  `ops/backup/run-restore-drill.sh` built and run LIVE locally end to end (both the real-row
+  decrypt path and the empty-table canary path — see docs/progress/ops.md for the full pasted
+  proof), including a real Qdrant snapshot restore with a matching point count. Not yet proven
+  against the real production backup bucket or the real `DB_CONNECTION_ENCRYPTION_KEY`, since
+  neither exists until a real server does. (PROJECT_SPEC.md:6272)
 - Per-message token cap and max-agent-steps limit join this batch (Felix decision C — see 7.1
   above; the batch is 7.1+7.3+7.4 together).
 - `mem_limit`/`pids_limit` for api/worker/migrate should be tuned from the real load tests
@@ -494,7 +517,24 @@ or the first non-Felix-operated one. The following join it by Felix's decision G
 - JWT signing-key rotation should be documented and tested end to end (a real rotation drill),
   not just the mechanism. (PROJECT_SPEC.md:6886)
 - Allowed `Host` header validation, and the identical rate-limiter forwarded-header switch,
-  both wait on the real proxy this step introduces. (PROJECT_SPEC.md:6859, 6888)
+  both wait on the real proxy this step introduces. **Prep done (2026-10-15, ops track) — the
+  proxy now exists** (`deploy/Caddyfile`, every hostname from env, automatic TLS, security
+  headers, strict CSP matching the dashboard's own e2e test, body limits, buffering off for
+  `/api/v1/chat`) **— final verification (the actual backend wiring: trust Caddy's own
+  `X-Forwarded-For`/`X-Real-IP`, validate `Host`) is a `backend/` change this track does not
+  make, owned by whoever next edits `backend/` during 7.3/7.4** (see
+  D-73-backend-changes-flagged-not-built above). (PROJECT_SPEC.md:6859, 6888)
+- **New (2026-10-15, ops track): a production Compose override** (`deploy/docker-compose.
+  prod.yml`) **adding Caddy and removing every other service's published port** (verified live
+  via `docker compose config` that only `caddy` ends up with published ports — see
+  D-73-caddy-ports-reset above) **— prep done, final verification (the real `docker compose up`
+  on the real server) owned by 7.3/7.4.**
+- **New (2026-10-15, ops track): the cron disk/memory monitor** (`ops/monitoring/check_
+  resources.py`, stdlib-only, alerts via the same Postmark SMTP settings) **and the hosted
+  uptime-checker setup steps** (`docs/deploy/RUNBOOK.md` §7) **— prep done (script smoke-tested
+  live inside a real Linux container, both the clean-run and the forced-alert path), final
+  verification (a real alert actually reaching a real inbox, the real uptime checker actually
+  configured) owned by 7.3/7.4.**
 - Separate migration-vs-application Postgres roles (DDL rights vs. data rights only) — this
   is also what finally makes the `audit_log` `REVOKE` (D-2.2-superuser) real enforcement for
   the first time; re-verify the existing regression test flips to FAIL→pass as expected. (PROJECT_SPEC.md:6869)
