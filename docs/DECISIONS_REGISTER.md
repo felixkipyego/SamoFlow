@@ -432,10 +432,31 @@ D-6.1-test-layout-placeholders and D-6.1-cors-same-origin respectively.
   overwrites `source.config` wholesale with no diffing, so a tenant removing one URL from
   their own list has no cleanup path — the removed URL's `Document` row and Qdrant points are
   never revisited. (PROJECT_SPEC.md:6919)
-- Four `crawl_page_cap`/`upload_max_size_bytes`/`db_sync_row_cap`/`refresh_interval_min_allowed`/
-  `refresh_now_daily_allowance` Settings fields are still not sourced from `plans.limits` —
-  whoever next revisits per-plan ingestion limits (likely 6.3, since it's the first real
-  per-tenant limits UI) should wire them to the real `PlanLimits` type. (PROJECT_SPEC.md:6899, 6900, 6916, 6917)
+- **Investigated at Step 6.3 (2026-10-16), declined as not contained, per this task's own
+  "wire it IF it's contained; otherwise leave the register entry with its reason" instruction.**
+  Three of the five (`crawl_page_cap`/`db_sync_row_cap`/`refresh_now_daily_allowance`) are a
+  genuinely small, mechanical change at their one real call site each (fetch the `Tenant` row,
+  call the already-existing `get_plan_limits()`, fall back to the Settings default on `None` —
+  exactly `app/chat/routes.py`'s own existing quota-check pattern). The fourth,
+  `refresh_interval_min_allowed`, is NOT contained to the same degree: it is read inside a
+  bare module-level helper (`_validate_refresh_interval()`, `app/ingest/repository.py`) with no
+  `tenant`/`session` parameter at all, shared by `create_source()`/`update_source()` — making
+  it per-plan means changing that helper's own signature and both call sites, in a function
+  with real existing regression coverage for the exact behavior being touched
+  (`test_update_source_enforces_the_same_refresh_interval_rules_on_change`). The fifth,
+  `upload_max_size_bytes`, has a real NEW consumer in this same task (the real upload endpoint,
+  `app/dashboard/source_routes.py`) — wired there directly against `PlanLimits` with a Settings
+  fallback from day one (no legacy behavior to risk). **Declined to touch the other four
+  existing call sites in this task**: in production today, no real tenant has `plan_id` set yet
+  (no admin screen, and the pilot tenant's own plan assignment is a manual CLI step Felix has
+  not yet run) — `get_plan_limits()` returns `None` for every real tenant right now, meaning
+  the wiring would have ZERO observable effect until a plan is actually assigned, for a real
+  signature-change risk today, in a business-logic/security-adjacent file. Re-owned, with this
+  task's own investigation as the new reason: whoever next revisits per-plan ingestion limits
+  (the first time a real tenant actually has a `plan_id` assigned) should wire `crawl_page_cap`/
+  `db_sync_row_cap`/`refresh_now_daily_allowance` using the pattern named above, and decide
+  then whether `refresh_interval_min_allowed`'s own larger shared-helper change is worth it at
+  that point. (PROJECT_SPEC.md:6899, 6900, 6916, 6917)
 
 ### 6.4 Escalation inbox and usage
 - Apply the exact inverse of `_sanitize_answer_text()`'s escape table (markdown-unescape,

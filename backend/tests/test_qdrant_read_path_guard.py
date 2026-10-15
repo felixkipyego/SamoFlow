@@ -149,6 +149,11 @@ CLIENT_ACCESS_ALLOWLIST: frozenset[str] = frozenset(
         "app/ingest/database_adapter.py",
         "app/ingest/repository.py",
         "app/ingest/reconcile.py",
+        # Step 6.3: the dashboard's own sources screen -- disable/enable/
+        # delete/update all take a real client (never held across a
+        # stream, one request-scoped Depends() per call) to pass into the
+        # already-allowlisted IngestRepository methods above.
+        "app/dashboard/source_routes.py",
     }
 )
 

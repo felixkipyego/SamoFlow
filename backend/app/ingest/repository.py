@@ -719,6 +719,24 @@ class IngestRepository:
         await self.session.flush()
         return source
 
+    async def list_sources(self) -> list[Source]:
+        """Step 6.3: the dashboard's own sources table. No arguments
+        beyond self -- tenant scoping is automatic, matching
+        TenantScopedRepository.list_site_keys()'s own established shape.
+        """
+        result = await self.session.execute(
+            select(Source).where(Source.tenant_id == self.tenant_id)
+        )
+        return list(result.scalars().all())
+
+    async def get_source(self, source_id: uuid.UUID) -> Source:
+        """Step 6.3: a public name for `_get_owned_source()` below, for
+        callers outside this module (app/dashboard/source_routes.py)
+        that need the identical "exists and belongs to this tenant, or
+        raise UnknownSourceError" lookup without reaching into a
+        private method."""
+        return await self._get_owned_source(source_id)
+
     async def _get_owned_source(self, source_id: uuid.UUID) -> Source:
         # Shared by update_source()/disable_source() below -- the one real
         # place both look up a source scoped to this repository's own

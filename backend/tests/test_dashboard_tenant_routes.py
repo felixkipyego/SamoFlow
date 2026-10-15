@@ -1,10 +1,12 @@
 # backend/tests/test_dashboard_tenant_routes.py
 # Step 6.2 [SECURITY]: tests for /api/v1/dashboard/tenant/* -- tenant
 # settings and site keys. Same fixture shape as test_dashboard_routes.py
-# (owner_a/owner_b/two tenants, for cross-tenant proof), reused rather
-# than duplicated at a THIRD occurrence (this file makes it two) --
-# flagged for extraction at the next duplication check if a third
-# consumer appears.
+# (owner_a/owner_b/two tenants, for cross-tenant proof). RESOLVED at the
+# Step 6.3 duplication check: the identical helpers below were extracted
+# into tests/dashboard_test_helpers.py once a real third consumer
+# appeared (test_dashboard_source_routes.py) -- this file's own already-
+# passing local copies are left as-is (rule 2: don't modify a completed
+# task without flagging), not retrofitted onto the shared module.
 import uuid
 from datetime import UTC, datetime, timedelta
 

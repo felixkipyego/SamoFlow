@@ -50,6 +50,20 @@
         "title": "AllowedOriginsUpdate",
         "type": "object"
       },
+      "Body_upload_source_api_v1_dashboard_sources_upload_post": {
+        "properties": {
+          "file": {
+            "contentMediaType": "application/octet-stream",
+            "title": "File",
+            "type": "string"
+          }
+        },
+        "required": [
+          "file"
+        ],
+        "title": "Body_upload_source_api_v1_dashboard_sources_upload_post",
+        "type": "object"
+      },
       "ChatRequest": {
         "additionalProperties": false,
         "properties": {
@@ -81,6 +95,30 @@
           "client_message_id"
         ],
         "title": "ChatRequest",
+        "type": "object"
+      },
+      "ClaimDomainRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "domain": {
+            "title": "Domain",
+            "type": "string"
+          },
+          "method": {
+            "default": "dns",
+            "enum": [
+              "dns",
+              "file",
+              "meta_tag"
+            ],
+            "title": "Method",
+            "type": "string"
+          }
+        },
+        "required": [
+          "domain"
+        ],
+        "title": "ClaimDomainRequest",
         "type": "object"
       },
       "ConversationListResponse": {
@@ -171,6 +209,61 @@
         "title": "ConversationSummary",
         "type": "object"
       },
+      "CreateCrawlSourceRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "refresh_interval": {
+            "default": "daily",
+            "title": "Refresh Interval",
+            "type": "string"
+          },
+          "seed_url": {
+            "title": "Seed Url",
+            "type": "string"
+          },
+          "type": {
+            "const": "crawl",
+            "title": "Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "seed_url"
+        ],
+        "title": "CreateCrawlSourceRequest",
+        "type": "object"
+      },
+      "CreateUrlsSourceRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "refresh_interval": {
+            "default": "daily",
+            "title": "Refresh Interval",
+            "type": "string"
+          },
+          "type": {
+            "const": "urls",
+            "title": "Type",
+            "type": "string"
+          },
+          "urls": {
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 200,
+            "minItems": 1,
+            "title": "Urls",
+            "type": "array"
+          }
+        },
+        "required": [
+          "type",
+          "urls"
+        ],
+        "title": "CreateUrlsSourceRequest",
+        "type": "object"
+      },
       "DashboardSessionResponse": {
         "properties": {
           "tenant": {
@@ -223,6 +316,66 @@
           "email"
         ],
         "title": "DashboardUser",
+        "type": "object"
+      },
+      "DomainResponse": {
+        "properties": {
+          "domain": {
+            "title": "Domain",
+            "type": "string"
+          },
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
+          "method": {
+            "title": "Method",
+            "type": "string"
+          },
+          "revoked_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Revoked At"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "verification_token": {
+            "title": "Verification Token",
+            "type": "string"
+          },
+          "verified_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Verified At"
+          }
+        },
+        "required": [
+          "id",
+          "domain",
+          "method",
+          "status",
+          "verification_token",
+          "verified_at",
+          "revoked_at"
+        ],
+        "title": "DomainResponse",
         "type": "object"
       },
       "EscalationRequest": {
@@ -465,6 +618,126 @@
         "title": "SiteKeyResponse",
         "type": "object"
       },
+      "SourceResponse": {
+        "properties": {
+          "config": {
+            "additionalProperties": true,
+            "title": "Config",
+            "type": "object"
+          },
+          "document_count": {
+            "title": "Document Count",
+            "type": "integer"
+          },
+          "enabled": {
+            "title": "Enabled",
+            "type": "boolean"
+          },
+          "exceeds_plan": {
+            "title": "Exceeds Plan",
+            "type": "boolean"
+          },
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
+          "last_run_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Run At"
+          },
+          "may_need_javascript": {
+            "title": "May Need Javascript",
+            "type": "boolean"
+          },
+          "next_run_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Next Run At"
+          },
+          "refresh_interval": {
+            "title": "Refresh Interval",
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "ok",
+              "syncing",
+              "error",
+              "disabled"
+            ],
+            "title": "Status",
+            "type": "string"
+          },
+          "type": {
+            "title": "Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "type",
+          "status",
+          "enabled",
+          "refresh_interval",
+          "last_run_at",
+          "next_run_at",
+          "exceeds_plan",
+          "document_count",
+          "may_need_javascript",
+          "config"
+        ],
+        "title": "SourceResponse",
+        "type": "object"
+      },
+      "SourcesListResponse": {
+        "properties": {
+          "sources": {
+            "items": {
+              "$ref": "#/components/schemas/SourceResponse"
+            },
+            "title": "Sources",
+            "type": "array"
+          },
+          "total_indexed_pages": {
+            "title": "Total Indexed Pages",
+            "type": "integer"
+          },
+          "total_indexed_pages_limit": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Total Indexed Pages Limit"
+          }
+        },
+        "required": [
+          "sources",
+          "total_indexed_pages",
+          "total_indexed_pages_limit"
+        ],
+        "title": "SourcesListResponse",
+        "type": "object"
+      },
       "SupportDetailsUpdate": {
         "additionalProperties": false,
         "properties": {
@@ -695,6 +968,39 @@
           "trace_text_enabled"
         ],
         "title": "TraceTextUpdate",
+        "type": "object"
+      },
+      "UpdateUrlsSourceRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "refresh_interval": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Refresh Interval"
+          },
+          "urls": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "maxItems": 200,
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Urls"
+          }
+        },
+        "title": "UpdateUrlsSourceRequest",
         "type": "object"
       },
       "ValidationError": {
@@ -1128,6 +1434,500 @@
           }
         ],
         "summary": "Me"
+      }
+    },
+    "/api/v1/dashboard/domains": {
+      "get": {
+        "operationId": "list_domains_api_v1_dashboard_domains_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/DomainResponse"
+                  },
+                  "title": "Response List Domains Api V1 Dashboard Domains Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "security": [
+          {
+            "APIKeyCookie": []
+          }
+        ],
+        "summary": "List Domains"
+      },
+      "post": {
+        "operationId": "claim_domain_api_v1_dashboard_domains_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ClaimDomainRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DomainResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "APIKeyCookie": []
+          }
+        ],
+        "summary": "Claim Domain"
+      }
+    },
+    "/api/v1/dashboard/domains/{domain_id}/verify": {
+      "post": {
+        "operationId": "verify_domain_api_v1_dashboard_domains__domain_id__verify_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "domain_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Domain Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DomainResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "APIKeyCookie": []
+          }
+        ],
+        "summary": "Verify Domain"
+      }
+    },
+    "/api/v1/dashboard/sources": {
+      "get": {
+        "operationId": "list_sources_api_v1_dashboard_sources_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SourcesListResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "security": [
+          {
+            "APIKeyCookie": []
+          }
+        ],
+        "summary": "List Sources"
+      },
+      "post": {
+        "operationId": "create_source_api_v1_dashboard_sources_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/CreateUrlsSourceRequest"
+                  },
+                  {
+                    "$ref": "#/components/schemas/CreateCrawlSourceRequest"
+                  }
+                ],
+                "title": "Payload"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SourceResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "APIKeyCookie": []
+          }
+        ],
+        "summary": "Create Source"
+      }
+    },
+    "/api/v1/dashboard/sources/database": {
+      "post": {
+        "operationId": "create_database_source_rejected_api_v1_dashboard_sources_database_post",
+        "responses": {
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Create Database Source Rejected Api V1 Dashboard Sources Database Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Create Database Source Rejected"
+      }
+    },
+    "/api/v1/dashboard/sources/upload": {
+      "post": {
+        "description": "Step 6.3 [SECURITY]. `upload_id` is generated here and looked up\nONLY through this tenant's own source (via `get_source()`, never a\nclient-supplied storage id); the size cap is enforced WHILE\nSTREAMING (`save_streaming()`, never buffering the whole body\nfirst); the existing `sniff_file_type()` is reused, against the\nbytes actually written to disk, never the client's own Content-Type\nheader or filename extension; the filename is never used as a path\n(`save_streaming()` structurally cannot accept one); and a re-upload\nunder the same `original_filename` deletes the PREVIOUS upload_id's\nown on-disk bytes before adopting the new one.",
+        "operationId": "upload_source_api_v1_dashboard_sources_upload_post",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "source_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Source Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_upload_source_api_v1_dashboard_sources_upload_post"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SourceResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "APIKeyCookie": []
+          }
+        ],
+        "summary": "Upload Source"
+      }
+    },
+    "/api/v1/dashboard/sources/{source_id}": {
+      "delete": {
+        "operationId": "delete_source_api_v1_dashboard_sources__source_id__delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "source_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Source Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "APIKeyCookie": []
+          }
+        ],
+        "summary": "Delete Source"
+      },
+      "patch": {
+        "operationId": "update_source_api_v1_dashboard_sources__source_id__patch",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "source_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Source Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateUrlsSourceRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SourceResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "APIKeyCookie": []
+          }
+        ],
+        "summary": "Update Source"
+      }
+    },
+    "/api/v1/dashboard/sources/{source_id}/disable": {
+      "post": {
+        "operationId": "disable_source_api_v1_dashboard_sources__source_id__disable_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "source_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Source Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SourceResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "APIKeyCookie": []
+          }
+        ],
+        "summary": "Disable Source"
+      }
+    },
+    "/api/v1/dashboard/sources/{source_id}/enable": {
+      "post": {
+        "operationId": "enable_source_api_v1_dashboard_sources__source_id__enable_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "source_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Source Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SourceResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "APIKeyCookie": []
+          }
+        ],
+        "summary": "Enable Source"
+      }
+    },
+    "/api/v1/dashboard/sources/{source_id}/refresh-now": {
+      "post": {
+        "operationId": "refresh_source_now_api_v1_dashboard_sources__source_id__refresh_now_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "source_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Source Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SourceResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "APIKeyCookie": []
+          }
+        ],
+        "summary": "Refresh Source Now"
       }
     },
     "/api/v1/dashboard/tenant": {
