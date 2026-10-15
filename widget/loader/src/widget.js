@@ -17,6 +17,7 @@
 import { resolveConfig } from "./config.js";
 import { createLauncher } from "./dom.js";
 import { ensureChatLoaded } from "./chat-loader.js";
+import { getCachedPosition } from "./position-cache.js";
 
 // Captured synchronously, at top-level script execution -- NOT inside
 // any deferred callback. document.currentScript is only set while this
@@ -43,29 +44,41 @@ function mount() {
   const host = document.createElement("div");
   host.id = "samoflow-widget-host";
 
+  // Task 5.5: a RETURNING visitor's launcher starts on the correct side
+  // from first paint -- see loader/src/position-cache.js's own header
+  // for why the loader itself cannot know this on a visitor's very
+  // first-ever view (it never calls the backend; only the chat bundle
+  // does, and only after it loads). A plain class toggle, never an
+  // inline style mutation -- see widget.css's own `:host(.sf-position-
+  // left)` rule for why that distinction matters under a strict CSP.
+  if (getCachedPosition(config.siteKey) === "left") {
+    host.classList.add("sf-position-left");
+  }
+
   // Open, not closed (deliberate choice -- see docs/progress/widget.md):
   // nothing secret ever lives in this shadow tree (the session token is
   // held in memory in JS, never in the DOM), so closed mode would buy no
   // real security property here, only extra friction for debugging and
   // for the tests that must assert the shadow root mounted.
   const shadowRoot = host.attachShadow({ mode: "open" });
-  const launcher = createLauncher(shadowRoot, config.cssUrl);
+  document.body.appendChild(host);
 
-  let chatLoadTriggered = false;
-  launcher.addEventListener("click", () => {
-    if (chatLoadTriggered) {
-      return;
-    }
-    chatLoadTriggered = true;
-    ensureChatLoaded(config.chatUrl, {
-      shadowRoot,
-      launcherEl: launcher,
-      siteKey: config.siteKey,
-      baseUrl: config.baseUrl,
+  createLauncher(shadowRoot, config.cssUrl).then((launcher) => {
+    let chatLoadTriggered = false;
+    launcher.addEventListener("click", () => {
+      if (chatLoadTriggered) {
+        return;
+      }
+      chatLoadTriggered = true;
+      ensureChatLoaded(config.chatUrl, {
+        shadowRoot,
+        hostEl: host,
+        launcherEl: launcher,
+        siteKey: config.siteKey,
+        baseUrl: config.baseUrl,
+      });
     });
   });
-
-  document.body.appendChild(host);
 }
 
 if (document.readyState === "loading") {

@@ -1,14 +1,15 @@
-// Task 5.2: the chat panel component. Minimal UI for THIS step's own
-// scope (send/receive one real conversation, citations, the calm fixed
-// error states, the budget) -- previous-chats (5.3), the escalation
-// panel (5.4) and the full WCAG 2.2 AA/theming pass (5.5) are
-// deliberately NOT built here, per docs/SPEC.md §18's own step split.
+// Task 5.2-5.5: the chat panel component.
 import { h } from "preact";
 import { useEffect, useRef, useState } from "preact/hooks";
 import { parseMarkdown } from "./markdown.js";
 import { renderMarkdown } from "./render.js";
 import { isHttpsUrl } from "./url-safety.js";
+import { pickReadableTextColor } from "./contrast.js";
 import { MAX_MESSAGE_LENGTH } from "./chat-controller.js";
+import { ConversationList } from "./ConversationList.js";
+import { EscalationPanel } from "./EscalationPanel.js";
+
+const MOBILE_SHEET_QUERY = "(max-width: 480px)";
 
 function _updateLast(list, role, updater) {
   const next = list.slice();
@@ -39,28 +40,56 @@ function Citations({ items }) {
   );
 }
 
-function Message({ message }) {
+// Task 5.3: history has no PER-TURN citation set to gate against (the
+// register's own "Unscheduled" entry: past-turn citations can't be
+// reconstructed from conversation history, a per-turn-overwrite state
+// field) -- passing an EMPTY allow-set into the SAME renderer every
+// live message already uses means any `[text](url)` surviving in
+// stored text structurally can never match, and therefore always
+// renders as plain text, never a live link. No separate "history mode"
+// branch in the renderer itself; the empty set alone is what does it.
+const NO_CITATIONS_ALLOWED = new Set();
+
+function Message({ message, onRetry }) {
   if (message.role === "visitor") {
-    // The visitor's OWN text, rendered the identical safe way as an
-    // answer: this is still untrusted content as far as this renderer
-    // is concerned (it never special-cases "but I typed it myself").
-    return h("div", { className: "sf-message sf-message-visitor" }, renderMarkdown(parseMarkdown(message.text), new Set()));
+    return h("div", { className: "sf-message sf-message-visitor" }, renderMarkdown(parseMarkdown(message.text), NO_CITATIONS_ALLOWED));
   }
   const allowedUrls = new Set((message.citations || []).map((c) => c.url));
   return h(
     "div",
-    { className: "sf-message sf-message-assistant" },
+    { className: `sf-message sf-message-assistant${message.status === "error" ? " sf-message-error" : ""}` },
     renderMarkdown(parseMarkdown(message.text), allowedUrls),
     message.citations?.length ? h(Citations, { items: message.citations }) : null,
+    message.status === "error" && onRetry
+      ? h("button", { type: "button", className: "sf-retry", onClick: onRetry }, "Retry")
+      : null,
   );
 }
 
 export function App({ controller, config, launcherEl }) {
   const [open, setOpen] = useState(true);
+  const [view, setView] = useState("chat"); // "chat" | "conversations" | "escalation"
   const [messages, setMessages] = useState([]);
   const [inputValue, setInputValue] = useState("");
   const [banner, setBanner] = useState(null);
+  const [offerEscalation, setOfferEscalation] = useState(false);
+  const [escalationSubmitted, setEscalationSubmitted] = useState(false);
   const listRef = useRef(null);
+  const panelRef = useRef(null);
+  const liveRegionRef = useRef(null);
+
+  // Task 5.5: tenant branding, applied via CSSOM property assignment
+  // (never a <style> block / Constructable Stylesheet -- see chat.css's
+  // own header for the live CSP proof) -- and its own automatically
+  // computed, always-readable text color (contrast.js), so a tenant's
+  // primary color choice can never make the header/launcher text
+  // unreadable.
+  useEffect(() => {
+    if (panelRef.current) {
+      panelRef.current.style.setProperty("--sf-primary", config.colors.primary);
+      panelRef.current.style.setProperty("--sf-primary-text", pickReadableTextColor(config.colors.primary));
+    }
+  }, [config.colors.primary]);
 
   useEffect(() => {
     const onToggle = () => setOpen((o) => !o);
@@ -74,34 +103,143 @@ export function App({ controller, config, launcherEl }) {
     }
   }, [messages]);
 
-  const handleSend = () => {
-    const text = inputValue.trim();
-    if (!text || controller.isStreaming) {
-      return;
+  // Task 5.5: Esc always closes (desktop non-modal AND the mobile
+  // sheet, docs/SPEC.md §11's own design direction); on the mobile
+  // sheet specifically (the full-screen view below 480px), the panel
+  // is modal while open -- a real focus trap (Tab/Shift+Tab never
+  // leaves the panel) and the host page's own scroll locked -- whereas
+  // the desktop panel stays non-modal (no trap, host page usable
+  // around it). Focus always returns to the launcher on close, either way.
+  useEffect(() => {
+    if (!open) {
+      return undefined;
     }
-    setInputValue("");
-    setBanner(null);
-    setMessages((prev) => [
-      ...prev,
-      { role: "visitor", text },
-      { role: "assistant", text: "", citations: [], status: "streaming" },
-    ]);
+    const isMobileSheet = () => window.matchMedia(MOBILE_SHEET_QUERY).matches;
 
-    controller.send(text, {
+    const previousOverflow = document.body.style.overflow;
+    if (isMobileSheet()) {
+      document.body.style.setProperty("overflow", "hidden");
+    }
+
+    const onKeyDown = (event) => {
+      if (event.key === "Escape") {
+        setOpen(false);
+        launcherEl.focus();
+        return;
+      }
+      if (event.key !== "Tab" || !isMobileSheet() || !panelRef.current) {
+        return;
+      }
+      const focusable = panelRef.current.querySelectorAll(
+        'button:not(:disabled), a[href], input, textarea, [tabindex]:not([tabindex="-1"])',
+      );
+      if (focusable.length === 0) {
+        return;
+      }
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      // `document.activeElement` resolves to the shadow HOST, not the
+      // real focused element, whenever focus is inside a shadow tree
+      // (the DOM spec's own defined behavior) -- the shadow root's OWN
+      // `activeElement` is what actually reflects focus within it.
+      // `getRootNode()` finds that shadow root from any element inside
+      // it, with no need to thread a `shadowRoot` prop down just for this.
+      const root = panelRef.current.getRootNode();
+      const active = root.activeElement;
+      if (event.shiftKey && active === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && active === last) {
+        event.preventDefault();
+        first.focus();
+      }
+    };
+    document.addEventListener("keydown", onKeyDown);
+
+    return () => {
+      document.removeEventListener("keydown", onKeyDown);
+      document.body.style.setProperty("overflow", previousOverflow || "");
+    };
+  }, [open, launcherEl]);
+
+  const announce = (text) => {
+    if (liveRegionRef.current) {
+      liveRegionRef.current.textContent = text;
+    }
+  };
+
+  const runTurn = (text, { isRetry }) => {
+    setBanner(null);
+    if (!isRetry) {
+      setMessages((prev) => [
+        ...prev,
+        { role: "visitor", text },
+        { role: "assistant", text: "", citations: [], status: "streaming" },
+      ]);
+    } else {
+      setMessages((prev) => _updateLast(prev, "assistant", (m) => ({ ...m, text: "", status: "streaming" })));
+    }
+
+    const callbacks = {
+      // Task 5.5: the VISIBLE bubble updates on every token (no live
+      // region involved at all here) -- only the SEPARATE, visually-
+      // hidden region below is ever aria-live-announced, and only once
+      // per completed turn, in onDone. This is what keeps a screen
+      // reader from announcing every streamed token.
       onToken: (accumulated) => {
         setMessages((prev) => _updateLast(prev, "assistant", (m) => ({ ...m, text: accumulated })));
       },
       onCitations: (items) => {
         setMessages((prev) => _updateLast(prev, "assistant", (m) => ({ ...m, citations: items })));
       },
-      onDone: () => {
-        setMessages((prev) => _updateLast(prev, "assistant", (m) => ({ ...m, status: "done" })));
+      onDone: (info) => {
+        setMessages((prev) => {
+          const next = _updateLast(prev, "assistant", (m) => ({ ...m, status: "done" }));
+          const last = next[next.length - 1];
+          announce(`Assistant: ${last.text}`);
+          return next;
+        });
+        setOfferEscalation(Boolean(info.offerEscalation));
       },
       onError: (message) => {
         setBanner(message);
         setMessages((prev) => _updateLast(prev, "assistant", (m) => ({ ...m, status: "error" })));
       },
-    });
+    };
+
+    if (isRetry) {
+      controller.retry(callbacks);
+    } else {
+      controller.send(text, callbacks);
+    }
+  };
+
+  const handleSend = () => {
+    const text = inputValue.trim();
+    if (!text || controller.isStreaming) {
+      return;
+    }
+    setInputValue("");
+    runTurn(text, { isRetry: false });
+  };
+
+  const handleRetry = () => {
+    if (controller.isStreaming) {
+      return;
+    }
+    runTurn(null, { isRetry: true });
+  };
+
+  const handleOpenConversation = (cid) => {
+    setView("chat");
+    setBanner(null);
+    controller
+      .loadConversation(cid)
+      .then((history) => {
+        setMessages(history.map((m) => ({ role: m.role, text: m.text, citations: [], status: "done" })));
+        setOfferEscalation(false);
+      })
+      .catch(() => setBanner("Couldn't open that chat. Please try again."));
   };
 
   const onInputKeyDown = (event) => {
@@ -111,21 +249,57 @@ export function App({ controller, config, launcherEl }) {
     }
   };
 
+  if (view === "conversations") {
+    return h(
+      "div",
+      { className: "sf-panel", ref: panelRef, hidden: !open, role: "dialog", "aria-label": "Previous chats" },
+      h(ConversationList, { controller, onOpenConversation: handleOpenConversation, onBack: () => setView("chat") }),
+    );
+  }
+
+  if (view === "escalation") {
+    return h(
+      "div",
+      { className: "sf-panel", ref: panelRef, hidden: !open, role: "dialog", "aria-label": "Talk to a person" },
+      h(EscalationPanel, {
+        controller,
+        onClose: () => setView("chat"),
+        onSubmitted: () => {
+          setEscalationSubmitted(true);
+          setView("chat");
+        },
+      }),
+    );
+  }
+
   return h(
     "div",
-    { className: "sf-panel", style: { display: open ? "flex" : "none" }, role: "dialog", "aria-label": config.title },
+    { className: "sf-panel", ref: panelRef, hidden: !open, role: "dialog", "aria-label": config.title },
     h(
       "div",
       { className: "sf-header" },
       config.logoUrl ? h("img", { className: "sf-logo", src: config.logoUrl, alt: "" }) : null,
-      h("span", { className: "sf-title" }, config.title),
+      h("span", { className: "sf-header-title" }, config.title),
+      h(
+        "button",
+        { type: "button", className: "sf-icon-button", "aria-label": "Previous chats", onClick: () => setView("conversations") },
+        "🕑",
+      ),
     ),
     h(
       "div",
-      { className: "sf-message-list", role: "log", "aria-live": "polite", ref: listRef },
+      { className: "sf-message-list", role: "log", "aria-live": "off", ref: listRef },
       messages.length === 0 ? h("div", { className: "sf-message sf-message-assistant" }, config.greeting) : null,
-      messages.map((message, index) => h(Message, { key: index, message })),
+      messages.map((message, index) => h(Message, { key: index, message, onRetry: index === messages.length - 1 ? handleRetry : null })),
     ),
+    // Task 5.5: the real announcer -- visually hidden, aria-live, text
+    // set exactly once per completed turn (see runTurn's own onDone
+    // above), never per token.
+    h("div", { className: "sf-visually-hidden", role: "status", "aria-live": "polite", ref: liveRegionRef }),
+    offerEscalation && !escalationSubmitted
+      ? h("button", { type: "button", className: "sf-talk-to-human", onClick: () => setView("escalation") }, "Talk to a person")
+      : null,
+    escalationSubmitted ? h("p", { className: "sf-banner", role: "status" }, "Your request has been sent. Someone will be in touch.") : null,
     banner ? h("div", { className: "sf-banner", role: "status" }, banner) : null,
     h(
       "div",
@@ -145,7 +319,7 @@ export function App({ controller, config, launcherEl }) {
         "Send",
       ),
     ),
-    config.privacyNoticeUrl
+    config.privacyNoticeUrl && isHttpsUrl(config.privacyNoticeUrl)
       ? h(
           "a",
           { className: "sf-privacy-link", href: config.privacyNoticeUrl, target: "_blank", rel: "noopener noreferrer nofollow" },

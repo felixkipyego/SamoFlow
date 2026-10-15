@@ -6,7 +6,11 @@
     <link rel="stylesheet" href="/host-page.css" />
   </head>
   <body>
-    <p id="host-page-marker">host page content</p>
+    <!-- tabindex="0": programmatically focusable (test/e2e/
+         accessibility.spec.mjs's own desktop-non-modal proof needs a
+         real host-page focus target), with no change to document/
+         widget tab ORDER otherwise. -->
+    <p id="host-page-marker" tabindex="0">host page content</p>
     <script
       src="/widget.js"
       data-site-key="sk_test_e2e"

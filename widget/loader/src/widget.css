@@ -24,6 +24,13 @@
   z-index: 2147483000;
 }
 
+/* Task 5.5: docs/SPEC.md §11 "left or right position" -- a plain class
+ * toggle (loader/src/widget.js), never an inline style mutation. */
+:host(.sf-position-left) {
+  right: auto;
+  left: 20px;
+}
+
 .samoflow-launcher {
   all: initial;
   display: inline-flex;

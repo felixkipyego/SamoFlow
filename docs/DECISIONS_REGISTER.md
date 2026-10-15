@@ -172,6 +172,16 @@ APPROVED, CANDIDATE, or SUPERSEDED-by-`<id>`.
 | D-pilot-onboarding-step | 2026-10-15 | New step | New Step 7.5 "Pilot onboarding": the pilot tenant's own golden set, plus re-checking the model choice, the 0.20 gate threshold, `retrieval_k=8` and the reranker-off decision on real content | APPROVED, new step; consolidates the Task 3.7.a/3.7.f/3.7.g/3.7.i "whoever onboards the first real pilot tenant" markers | owner 7.5 (new) | same |
 | D-postpilot-admin-overrides | 2026-10-15 | Admin screen scope | Per-tenant gate-threshold override, per-tenant model choice, and the async unsafe/abusive review are re-owned to POST-PILOT, bundled with 6.5 Platform admin | APPROVED, supersedes the "Phase 6's admin screen"/"Step 6.4" ownership on the Task 3.4.d/3.4.b-research/3.4.g markers | owner POST-PILOT / whoever onboards the second tenant (same as 6.5) | same |
 
+### Phase 5 continuation (5.3-5.6, 2026-10-15, this task)
+
+| id | date | topic | decision | status | step(s) | source |
+|---|---|---|---|---|---|---|
+| D-53-history-no-citations | 2026-10-15 | History rendering | A past conversation's own stored text renders through the SAME renderer with an EMPTY citation allow-set, never a separate "history mode" — any surviving link syntax structurally cannot match, so it always renders as plain text | APPROVED | 5.3 | `docs/progress/widget.md` |
+| D-54-support-details-no-new-path | 2026-10-15 | Support-details fallback | The fallback message (docs/SPEC.md §6.1) needs no dedicated UI surface — it streams through the existing `token`/`citations`/`done` sequence like any other answer, already covered by Step 5.2's own renderer | APPROVED | 5.4 | same |
+| D-55-focus-trap-mobile-only | 2026-10-15 | Focus trap scope | "A focus trap in panels" (this batch's own task instruction) is built to match docs/SPEC.md §11's own, more specific design direction: a real trap + host-scroll-lock on the mobile (<480px) sheet only; the desktop panel stays non-modal (no trap) | APPROVED, a deliberate reading where the task instruction and the spec's own design direction could otherwise be read as conflicting | 5.5 | same |
+| D-55-cssom-style-not-csp-restricted | 2026-10-15 | [SECURITY-adjacent] Theming mechanism | `element.style.setProperty()` is NOT subject to CSP style-src (unlike a `<style>` tag, a `style=""` attribute, or a Constructable Stylesheet's `replaceSync()`, which all are) — confirmed live with a direct, isolated probe before relying on it | APPROVED, verified live | 5.5 | same |
+| D-55-no-dashboard-preview | 2026-10-15 | Scope | The dashboard live-preview mode (docs/SPEC.md §12, `postMessage`-based) is deliberately not built — a new message-passing attack surface and a cross-track coupling point, for a feature the pilot doesn't need (save-then-view-on-a-test-page works today) | APPROVED, deferred POST-PILOT | owner: whoever builds the dashboard preview after pilot | PROJECT_SPEC.md §9 |
+
 **Note on D-shadcn vs D-113-dashboard-tooling**: this is the exact gap that prompted this
 register. The 2026-10-15 Phase 5-7 kickoff (D-113-dashboard-tooling) ratified "Vite + React +
 CSS Modules" for the dashboard without citing or superseding the still-open shadcn/ui
@@ -222,16 +232,53 @@ is deliberately forward-only, matching its purpose.
   second, additive allow-list rule, not a rewrite of this one.
 
 ### 5.3 Conversations UI
-- *(no open forward commitment found addressed specifically to this step)*
+- No forward commitment was addressed to this step in advance; built and **RESOLVED** this
+  batch (commit recorded in `docs/progress/widget.md`): "Previous chats" (`GET
+  /conversations`, opening one via `GET /conversations/{cid}/messages`), rendered through the
+  SAME restricted renderer Step 5.2 built — history links render as plain text, never live,
+  since no per-turn citation set is ever reconstructable for a past turn (see the
+  "Unscheduled" section's own "past-turn citations" entry, PROJECT_SPEC.md:6932); a retry
+  button that reuses the failed turn's own `client_message_id` (docs/SPEC.md §10); empty/
+  loading/error states all real and tested.
 
 ### 5.4 Escalation panel and fallback UI
-- *(no open forward commitment found addressed specifically to this step)*
+- No forward commitment was addressed to this step in advance; built and **RESOLVED** this
+  batch: the "Talk to a person" button (shown on `offer_escalation`), a consent panel stating
+  exactly what will be shared before anything is sent, client-side contact-field validation
+  mirroring the server's own control-character/length/email-shape rules exactly (never the
+  real enforcement boundary), `POST /conversations/{cid}/escalate` via the existing
+  conversation-id workaround, and the three required security-adjacent checks (no submission
+  without consent; injection through contact fields stays inert; a double-submit is
+  prevented) — each a committed, live-passing Playwright test, not merely argued. The support-
+  details fallback display needed no separate code path: it is a fixed server-side message
+  streamed through the SAME `token`/`citations`/`done` sequence any other answer uses, so the
+  existing renderer already covers it safely.
 
 ### 5.5 Theming, accessibility and CSP
-- *(no open forward commitment found addressed specifically to this step)*
+- No forward commitment was addressed to this step in advance; built and **RESOLVED** this
+  batch: tenant branding (colors/logo/greeting/position) through the existing validated
+  config; automatic WCAG-AA text-contrast against the tenant's own primary color (real
+  relative-luminance math, not a brightness guess); keyboard operability, visible focus, a
+  real focus trap + host-scroll-lock on the mobile sheet only (desktop stays non-modal, per
+  docs/SPEC.md §11's own design direction — a deliberate reading of "a focus trap in panels,"
+  recorded here since the spec's own design direction is more specific than the task
+  instruction's generic phrasing); a decoupled, visually-hidden live region that announces
+  only completed turns, never per-token; `prefers-reduced-motion` respected (the panel's own
+  open animation is skipped entirely under it); an automated axe scan with zero serious/
+  critical findings; the 5.1-era flash-of-unstyled-launcher fixed (the button is now created
+  only after its own stylesheet's `load` event). **A real, load-bearing finding along the
+  way**: CSP's style-src governs anything that goes through CSS TEXT PARSING (a `<style>` tag,
+  a `style=""` attribute, a Constructable Stylesheet's `replaceSync()`) but NOT a plain CSSOM
+  property assignment (`element.style.setProperty()`) — confirmed live with a direct probe
+  (an external, non-inline script under a real `style-src 'self'` header, zero violations) —
+  which is what makes per-tenant color theming possible at all without a parameterized
+  backend stylesheet endpoint. The dashboard live-preview mode (docs/SPEC.md §12) is
+  deliberately NOT built — see the new POST-PILOT entry under 6.5 above.
 
 ### 5.6 Phase 5 acceptance
-- *(no open forward commitment found addressed specifically to this step)*
+- No forward commitment was addressed to this step in advance; see `docs/progress/widget.md`
+  for the full clause-by-clause check of docs/SPEC.md §18's own Phase 5 accept line and the
+  §9/register reconciliation this step performed.
 
 ### Backend contract gaps found by the widget track (owner: the dashboard track)
 Three real, named gaps in the locked `backend/` contract, each found by the widget track
@@ -349,6 +396,17 @@ or the first non-Felix-operated one. The following join it by Felix's decision G
   defer real-time detection; this is its named replacement mechanism). (PROJECT_SPEC.md:6964)
 - Self-signup, mandatory email verification, and team invites (docs/SPEC.md §12's full auth
   system) — a contained, additive follow-up once a second tenant exists. (PROJECT_SPEC.md:6274)
+- **The dashboard live-preview mode (docs/SPEC.md §12: "the live preview renders the real
+  widget bundle with unsaved configuration" via validated `postMessage`) is deliberately NOT
+  built for the pilot — re-owned here POST-PILOT by direct instruction at Step 5.1/5.4-5.6
+  (2026-10-15), the widget track's own batch.** Reason stated plainly: a `postMessage`-based
+  live preview is a NEW message-passing attack surface (origin validation that must be
+  airtight on both the dashboard's send side and the widget's own receive side, for a feature
+  no pilot tenant needs on day one) AND a real coupling point between the two tracks (the
+  widget bundle would need to expose a receive-config API the dashboard calls, binding both
+  tracks' own release cadence together for a non-essential feature). The pilot's own path is
+  simpler and already fully supported: save the config via the dashboard, then open the real
+  widget on a real test page to see it. (docs/SPEC.md:345, 347)
 
 ### 6.6 Phase 6 acceptance
 - *(no open forward commitment found addressed specifically to this step)*

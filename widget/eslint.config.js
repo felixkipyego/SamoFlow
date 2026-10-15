@@ -74,6 +74,8 @@ export default [
         document: "readonly",
         getComputedStyle: "readonly",
         console: "readonly",
+        setTimeout: "readonly",
+        fetch: "readonly",
       },
     },
   },

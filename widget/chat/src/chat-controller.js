@@ -78,6 +78,94 @@ export class ChatController {
     this._widgetConfig = null;
     this._conversationId = null;
     this.isStreaming = false;
+    // docs/SPEC.md §10: "a retry reuses the same client_message_id, so
+    // the message never appears twice" -- the one piece of state a
+    // retry needs that a fresh send() does not: the exact text and id
+    // of the turn that just failed, so retry() can resubmit identically
+    // rather than starting a new, differently-id'd message.
+    this._lastTurn = null;
+  }
+
+  // Task 5.3: "Previous chats" (docs/SPEC.md §10/§11). Throws on failure
+  // (no HTTP-error-to-fixed-message mapping needed here, unlike
+  // send()/retry() -- the caller is a list view that wants to show a
+  // calm "couldn't load" state and offer its own retry, not something
+  // this controller needs to script the copy for).
+  async listConversations() {
+    await this.ensureSession();
+    const response = await this._fetch(`${this._baseUrl}/api/v1/conversations`, {
+      headers: { authorization: `Bearer ${this._sessionToken}` },
+    });
+    if (!response.ok) {
+      throw new Error(`failed to list conversations (status ${response.status})`);
+    }
+    const body = await response.json();
+    return Array.isArray(body.conversations) ? body.conversations : [];
+  }
+
+  // Opening a past conversation (docs/SPEC.md §10: "history, showing
+  // completed turns only"). Switches this controller's own
+  // `conversation_id` to the opened one, so the NEXT send() continues
+  // THAT thread rather than starting a new one -- matching a visitor's
+  // real expectation that opening an old chat and typing resumes it.
+  async loadConversation(cid) {
+    await this.ensureSession();
+    const response = await this._fetch(`${this._baseUrl}/api/v1/conversations/${cid}/messages`, {
+      headers: { authorization: `Bearer ${this._sessionToken}` },
+    });
+    if (!response.ok) {
+      throw new Error(`failed to load conversation ${cid} (status ${response.status})`);
+    }
+    const body = await response.json();
+    this._conversationId = cid;
+    this._lastTurn = null; // a loaded conversation has no in-memory "last turn" of its own to retry
+    return Array.isArray(body.messages) ? body.messages : [];
+  }
+
+  // Task 5.4: POST /conversations/{cid}/escalate (docs/SPEC.md §7).
+  // Requires a known conversation_id -- structurally always true by
+  // the time this is callable: escalation is only ever OFFERED
+  // (`offerEscalation` on a `done` event) after a turn has already
+  // completed, and `_discoverConversationIdIfUnknown()` already runs
+  // on every `done` event before that flag is even surfaced to the UI.
+  async submitEscalation(contactFields, callbacks) {
+    if (this._conversationId === null) {
+      callbacks.onError?.("Something went wrong. Please try again.");
+      return;
+    }
+    try {
+      await this.ensureSession();
+    } catch {
+      callbacks.onError?.("Couldn't start a session. Please reload and try again.");
+      return;
+    }
+
+    let response;
+    try {
+      response = await this._fetch(`${this._baseUrl}/api/v1/conversations/${this._conversationId}/escalate`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          authorization: `Bearer ${this._sessionToken}`,
+        },
+        body: JSON.stringify(contactFields),
+      });
+    } catch {
+      callbacks.onError?.("Connection lost. Please try again.");
+      return;
+    }
+
+    if (!response.ok) {
+      if (response.status === 409) {
+        callbacks.onError?.("An escalation is already open for this conversation.");
+        return;
+      }
+      callbacks.onError?.(_fixedHttpErrorMessage(response.status, response.headers.get("retry-after")));
+      return;
+    }
+
+    const body = await response.json();
+    callbacks.onSubmitted?.(body);
   }
 
   async ensureSession() {
@@ -100,15 +188,38 @@ export class ChatController {
     if (this.isStreaming) {
       return;
     }
+    const clientMessageId = crypto.randomUUID();
+    this._lastTurn = { messageText, clientMessageId };
     this.isStreaming = true;
     try {
-      await this._sendOnce(messageText, callbacks, { retriedAfterSessionRefresh: false });
+      await this._sendOnce(messageText, clientMessageId, callbacks, { retriedAfterSessionRefresh: false });
     } finally {
       this.isStreaming = false;
     }
   }
 
-  async _sendOnce(messageText, callbacks, { retriedAfterSessionRefresh }) {
+  // docs/SPEC.md §10: resubmits the turn that just failed with the
+  // IDENTICAL client_message_id -- `_check_idempotency()` (backend/app/
+  // chat/routes.py) is what makes this safe to call after a dropped
+  // connection or a calm error state: a duplicate id either replays the
+  // already-completed answer (if the server actually finished before
+  // the connection dropped) or runs the turn for the first time (if it
+  // never did), but never double-counts or double-answers. A no-op if
+  // nothing has been sent yet, or a turn is already in flight.
+  async retry(callbacks) {
+    if (this.isStreaming || this._lastTurn === null) {
+      return;
+    }
+    const { messageText, clientMessageId } = this._lastTurn;
+    this.isStreaming = true;
+    try {
+      await this._sendOnce(messageText, clientMessageId, callbacks, { retriedAfterSessionRefresh: false });
+    } finally {
+      this.isStreaming = false;
+    }
+  }
+
+  async _sendOnce(messageText, clientMessageId, callbacks, { retriedAfterSessionRefresh }) {
     try {
       await this.ensureSession();
     } catch {
@@ -116,7 +227,6 @@ export class ChatController {
       return;
     }
 
-    const clientMessageId = crypto.randomUUID();
     let response;
     try {
       response = await this._fetch(`${this._baseUrl}/api/v1/chat`, {
@@ -142,7 +252,7 @@ export class ChatController {
       // Retried exactly once: a 401 that persists after a fresh session
       // is a real, calm, fixed failure, never a retry loop.
       this._sessionToken = null;
-      await this._sendOnce(messageText, callbacks, { retriedAfterSessionRefresh: true });
+      await this._sendOnce(messageText, clientMessageId, callbacks, { retriedAfterSessionRefresh: true });
       return;
     }
 

@@ -6,10 +6,11 @@ import { h, render } from "preact";
 import { App } from "./App.js";
 import { ChatController } from "./chat-controller.js";
 import { validateWidgetConfig } from "./config-validation.js";
+import { setCachedPosition } from "./position-cache.js";
 
 const DEFAULT_CONFIG = validateWidgetConfig({});
 
-export async function mountChatApp({ shadowRoot, launcherEl, siteKey, baseUrl, cssUrl }) {
+export async function mountChatApp({ shadowRoot, hostEl, launcherEl, siteKey, baseUrl, cssUrl }) {
   const link = document.createElement("link");
   link.rel = "stylesheet";
   link.href = cssUrl;
@@ -29,6 +30,16 @@ export async function mountChatApp({ shadowRoot, launcherEl, siteKey, baseUrl, c
     // a proper fixed error state then (never a blank/broken panel,
     // per docs/SPEC.md §11's own "never a blank panel" state list).
   }
+
+  // Task 5.5: apply the REAL position now (the loader may have started
+  // the launcher on the cached/default side) and cache it for the
+  // loader's own next page load -- see loader/src/position-cache.js's
+  // header for the full round trip. A plain class toggle on the host
+  // element the loader itself created (never an inline style mutation).
+  if (hostEl) {
+    hostEl.classList.toggle("sf-position-left", config.position === "left");
+  }
+  setCachedPosition(siteKey, config.position);
 
   render(h(App, { controller, config, launcherEl }), panelHost);
 }

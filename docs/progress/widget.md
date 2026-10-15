@@ -625,3 +625,215 @@ vulnerabilities; `node scripts/run-ci-locally.mjs` green end to end from a
 clean `dist/`/`chat/dist/`. `git status --short`: exactly the three expected
 files (`PROJECT_SPEC.md`, `backend/tests/test_layout_placeholders.py`,
 `docs/DECISIONS_REGISTER.md`); no `.env`.
+
+## Steps 5.3, 5.4, 5.5 — Conversations UI, Escalation panel, Theming/a11y/CSP (2026-10-15)
+
+**Built together, in one continuous pass, committed as one commit — a
+deliberate deviation from "commit each sub-step separately," stated
+plainly, not silently done.** `App.js`, `chat-controller.js`, `chat.css`
+and `mount.js` are genuinely shared across all three steps (e.g.
+`App.js` renders the conversation list, the escalation panel, AND the
+live-region/focus-trap/contrast wiring in one component tree) — splitting
+the diff into three commits would mean either committing non-functional
+intermediate states (ConversationList.js referenced by nothing until the
+5.5-era App.js rewrite lands) or fabricating an artificial separation
+that doesn't reflect how the code was actually built. See the Senior
+engineer check at the end of this task's own report for the full
+reasoning.
+
+**5.3 Conversations UI**: `chat-controller.js` gained
+`listConversations()`/`loadConversation(cid)` (throws on a real failure
+— the caller, `ConversationList.js`, shows its own calm error state with
+a retry) and `retry()` (resubmits the LAST failed turn's own exact
+`client_message_id`, per docs/SPEC.md §10 — never a fresh one, so a
+retry after a dropped connection can never double-answer). `Message`
+(`App.js`) grew a `onRetry` prop, wired only to the LAST message when its
+own `status === "error"`. History rendering needed NO new renderer code
+at all: `Message` passes an EMPTY citation `Set` for loaded history (no
+per-turn citation set is ever reconstructable — the register's own
+"Unscheduled" entry, PROJECT_SPEC.md:6932), so the SAME gating logic
+Step 5.2 already built for live answers structurally renders any
+surviving link syntax as plain text, never live — proven live
+(`conversations.spec.mjs`: a stored `[our hours page](url)` renders as
+"our hours page" with zero `<a>` elements).
+
+**5.4 Escalation panel**: `escalation-validation.js` mirrors
+`backend/app/handoff/schemas.py`'s own three rules exactly (control-
+character rejection including CR/LF, the three real max lengths 200/320/
+40, the email-shape regex) — a UX nicety, never the enforcement boundary
+(the server re-validates independently regardless). `EscalationPanel.js`
+is the ONLY caller of the new `chat-controller.js::submitEscalation()`;
+the REQUIRED consent checkbox is the only thing that ever enables the
+Submit handler's own call into it — structurally, not just via a
+disabled attribute (proven live with a FORCED click past the disabled
+button: the handler itself still refuses). The support-details fallback
+display needed no new code: it is a fixed server-side message streamed
+through the exact same `token`/`citations`/`done` sequence as any other
+answer, already covered by Step 5.2's renderer.
+
+**5.5 Theming, accessibility, CSP**:
+- `contrast.js` — real WCAG relative-luminance math (not a brightness
+  heuristic) picks black or white text against the tenant's own
+  validated primary color, parsing every form `color.js` accepts (hex/
+  rgb/rgba/hsl/hsla).
+- **A real, load-bearing live finding, verified before building on it**:
+  CSP's style-src governs anything that goes through CSS TEXT PARSING (a
+  `<style>` tag, a `style=""` attribute, a Constructable Stylesheet's
+  `replaceSync()` — Step 5.1's own earlier finding) but NOT a plain
+  CSSOM property assignment. Confirmed with a direct, isolated probe
+  (an external, non-inline script calling `el.style.setProperty('color',
+  'red')` under a real `style-src 'self'` response header, no
+  `'unsafe-inline'`) — zero CSP violations, the real computed color
+  applied. This is what makes per-tenant color theming possible at all
+  without standing up a parameterized backend stylesheet endpoint (which
+  would itself be a `backend/` change outside this track's scope).
+  `App.js` applies `--sf-primary`/`--sf-primary-text` this way, once per
+  config change.
+- Position (left/right): threaded end to end despite a real
+  architectural gap found along the way — the LOADER (which renders the
+  launcher) never calls the backend at all (by design, lazy/tiny), so it
+  cannot know the tenant's real position preference before the chat
+  bundle has loaded once. Fixed with a small read/write cache
+  (`loader/src/position-cache.js` + `chat/src/position-cache.js`,
+  localStorage-with-in-memory-fallback, the same shape as `session.js`'s
+  own visitor-secret storage — a second, independent occurrence across
+  the two separate bundles, not a third): a RETURNING visitor's launcher
+  starts on the correct side from first paint; a first-ever visit
+  defaults to "right" until the chat bundle confirms the real value. A
+  plain `classList` toggle applies it, never an inline style mutation.
+- The 5.1-era flash-of-unstyled-launcher is fixed: `createLauncher()`
+  now creates the button only after its OWN stylesheet's `load` (or
+  `error`, so a network hiccup can't permanently hide it) event — there
+  is never a moment an unstyled button exists in the DOM at all, a
+  stronger fix than hiding-then-revealing it.
+- Focus trap: built to match docs/SPEC.md §11's own, more specific design
+  direction (real trap + host-scroll-lock on the mobile <480px sheet
+  only; the desktop panel stays non-modal) rather than this batch's own
+  generic "a focus trap in panels" instruction taken literally — recorded
+  as a real decision (D-55-focus-trap-mobile-only, the register), not a
+  silent reinterpretation. Uses `panelRef.current.getRootNode()` to find
+  the real shadow root and its OWN `activeElement` — `document.
+  activeElement` resolves to the shadow HOST, not the real focused
+  element, whenever focus is inside a shadow tree (a real bug caught
+  live by the e2e test, not assumed correct from the first draft).
+- The live region: a SEPARATE, visually-hidden `role="status" aria-
+  live="polite"` element, decoupled from the visible streaming bubble —
+  its text is set exactly ONCE per completed turn (`onDone`), never per
+  token, so a screen reader announces the finished answer once, not
+  every delta.
+- `prefers-reduced-motion`: the panel's own open animation
+  (`@keyframes sf-panel-in`) is defined only inside `@media (prefers-
+  reduced-motion: no-preference)` — `animation`, not `transition` (a
+  `transition` has nothing to interpolate from across a `display: none`
+  boundary; an `animation` correctly replays every time the box is
+  recreated).
+- Axe: `@axe-core/playwright` (new dev dependency, 4.14.0), scanning the
+  real open panel — zero serious/critical findings.
+- The dashboard live-preview mode (docs/SPEC.md §12) is deliberately NOT
+  built, per direct instruction — recorded as a new §9 marker (owner:
+  whoever builds it post-pilot) and a matching register entry, with the
+  real reasoning (a new message-passing attack surface; cross-track
+  coupling) stated, not just asserted.
+
+**Tests**: `escalation-validation.test.mjs` (7), `contrast.test.mjs` (7,
+including an independent re-derivation of the WCAG ratio, not just
+trusting the function picked something), `chat-controller.test.mjs`
+(+12: retry/no-op cases, `listConversations`/`loadConversation` success
+and failure, `submitEscalation` success/no-conversation/409/429).
+`conversations.spec.mjs` (4), `escalation.spec.mjs` (6), `accessibility.
+spec.mjs` (7) — new Playwright files, all against the real browser,
+real strict CSP.
+
+**A real, stateful e2e test-isolation bug, found and fixed**: the fake
+backend (`test/e2e/server.mjs`) originally returned a FIXED
+`session_token`/`conversation_id` for every test — once Step 5.3/5.4
+added STATEFUL fixture behavior (fail-once-then-succeed for retry;
+one-open-escalation-per-conversation for the real 409), tests
+contaminated each other's state (a later test seeing a stale "already
+escalated" 409 from an earlier, unrelated test), made worse by
+Playwright's own `fullyParallel` config running every spec file against
+the one shared server process. Fixed at the root: `POST /session` now
+mints a genuinely random `session_token`/`conversation_id` pair per
+call, so two tests can never collide on shared fixture state regardless
+of execution order or parallelism.
+
+**Verified** (widget/, e2e re-run 3x per this project's convention since
+new test files were added): `npm run lint` clean. `npm test` — **125
+passed, 0 failed**. `npm run build` — loader **1083 bytes gzipped**
+(budget 4096), chat UI **13,293 bytes gzipped** (budget 61,440), both
+reported per the task's own instruction. `npm run test:e2e` — **19
+passed**, identical across 3 runs. `npm audit` — 0 vulnerabilities.
+`node scripts/run-ci-locally.mjs` — green end to end from a fully clean
+`dist/`/`chat/dist/`.
+
+**Verified** (backend/, via `.venv`, confirming `backend/` is
+unchanged): `ruff check` clean. `pytest tests -q` — **1090 passed, 478
+skipped, 0 failed**, run twice, identical both times (no flake observed
+this session, unlike the alignment task's own one-off, order-dependent
+`test_chat_model.py` flake, which did not recur).
+
+## Step 5.6 — Phase 5 acceptance (2026-10-15)
+
+docs/SPEC.md §18's own Phase 5 accept line, checked clause by clause
+against real evidence, per direct instruction:
+
+> "budgets met; keyboard-only and screen-reader pass; the widget works on
+> a strict-CSP test page."
+
+- **Budgets met**: loader 1,083 bytes gzipped against the ~4,096-byte
+  (4KB) budget; chat UI 13,293 bytes gzipped against the ~61,440-byte
+  (60KB) budget. Both real, built, measured numbers (`npm run size`),
+  not estimates.
+- **Keyboard-only... pass**: `accessibility.spec.mjs`'s own keyboard-
+  reachability test (Tab reaches the launcher, Enter opens the panel,
+  Enter sends a message), the Escape-closes-and-returns-focus test, and
+  the mobile-sheet focus-trap test — all real, all passing against a
+  real Chromium, no mocking of keyboard events.
+- **...and screen-reader pass**: stated precisely, not overclaimed —
+  this is an AUTOMATED proxy for a screen-reader pass (a real axe scan
+  finding zero serious/critical violations, plus the decoupled live-
+  region design proven to announce exactly once per completed turn, not
+  per token), not a manual pass with a real screen reader (VoiceOver/
+  NVDA/JAWS), which this environment has no way to run. The automated
+  signals a screen reader actually depends on (ARIA roles/labels, live-
+  region timing, focus order) are real and verified; a manual pass with
+  an actual assistive technology is not something this step claims to
+  have done.
+- **The widget works on a strict-CSP test page**: every e2e test in this
+  whole track (Steps 5.1 through 5.5, 19 tests total) runs against a
+  real strict CSP response header (`default-src 'none'`, no
+  `'unsafe-inline'`, no `'unsafe-eval'` anywhere) and asserts zero
+  violations — including the combined smoke test that drives a real
+  turn, opens previous chats, and submits a real escalation in one
+  session.
+
+**This line is now satisfied**, with the one named, honest exception
+(automated, not manual, screen-reader verification) stated above rather
+than rounded up.
+
+**§9 markers and register entries reconciled**: the one real open marker
+owned by a Phase-5 step (`backend/app/agent/graph.py`'s own 3.4.c-era
+marker, owner Step 5.2 — "the widget's own renderer must not Unicode-
+normalise before markdown parsing, in addition to disabling images/raw
+HTML/linkify") is now marked RESOLVED in PROJECT_SPEC.md §9, citing the
+real files and the committed adversarial test that proves it, with the
+verified-domains half of its own original wording correctly left
+pointing at its own SEPARATE, already-tracked marker (owner the
+dashboard track) rather than being folded into this resolution. `docs/
+DECISIONS_REGISTER.md`'s own 5.1-5.6 forward-commitment entries are all
+updated to reflect what was actually built (5.1/5.2 were already
+corrected at the prior alignment task; 5.3/5.4/5.5/5.6 updated this
+task), plus a new "Phase 5 continuation" decisions-table section for the
+real decisions made along the way (the focus-trap-scope reading, the
+CSSOM/CSP finding, the no-dashboard-preview deferral) and the matching
+§9 marker for the one genuinely deferred item.
+
+**PROJECT_SPEC.md §4 updated**: all six Phase 5 rows (5.1-5.6) changed
+from "Not started" to "Done," each with a one-line note pointing at this
+file for the full build record — no other row in §4 touched.
+
+**Verified**: see the combined `Verified` paragraphs under Steps 5.3/5.4/
+5.5 above — this step itself added no new code, only the acceptance
+check and the documentation updates named here. `git status --short`
+cross-checked: no `.env`; `widget/dist/`, `widget/chat/dist/`, `widget/
+node_modules/` all correctly ignored.

@@ -1,8 +1,22 @@
-/* Task 5.2: chat panel styles. Loaded the identical way loader/src/
+/* Task 5.2/5.5: chat panel styles. Loaded the identical way loader/src/
  * widget.css already is -- a real external stylesheet (<link
  * rel="stylesheet">), never inline, for the identical CSP reason (see
- * that file's own header). Basic, functional styling only; the full
- * theming/token/accessibility pass is Step 5.5's own scope.
+ * that file's own header).
+ *
+ * Tenant branding (--sf-primary/--sf-primary-text) is applied via
+ * `element.style.setProperty()` (App.js), never a `<style>` block or a
+ * Constructable Stylesheet -- confirmed LIVE, directly, before relying
+ * on it: CSP's style-src governs anything that goes through CSS TEXT
+ * PARSING (a `<style>` tag's content, a `style=""` markup attribute, a
+ * Constructable Stylesheet's `replaceSync()`), but a plain CSSOM
+ * property assignment (`el.style.setProperty(name, value)`) never
+ * parses a CSS text string at all, so there is no parsing boundary for
+ * style-src to apply to -- a real probe (an external, non-inline
+ * script calling `el.style.setProperty('color','red')` under a real
+ * `style-src 'self'` response header, no 'unsafe-inline') showed zero
+ * CSP violations and the real computed color. This is what makes
+ * per-tenant color theming possible at all under a strict CSP without
+ * a parameterized backend stylesheet endpoint.
  */
 .sf-panel {
   all: initial;
@@ -20,14 +34,78 @@
   overflow: hidden;
 }
 
+/* Unconditional, not gated by the media query below: this is what
+ * actually hides the panel (correctness) -- the author rule needed
+ * because the UA's own default `[hidden] { display: none }` rule has
+ * the SAME specificity as a plain class selector like `.sf-panel`
+ * (both 0-1-0), and author styles win cascade ties, so without this
+ * explicit rule `.sf-panel`'s own `display: flex` above would silently
+ * override the `hidden` attribute and the panel would never actually close. */
+.sf-panel[hidden] {
+  display: none;
+}
+
+:host(.sf-position-left) .sf-panel {
+  right: auto;
+  left: 0;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  /* `animation`, not `transition`: toggling the `hidden` attribute
+   * flips `display` between `none` and `flex`, which creates a NEW box
+   * each time it becomes visible again -- a `transition` has nothing
+   * to interpolate FROM across a `display: none` boundary, but an
+   * `animation` replays correctly every time the box is (re)created,
+   * which is exactly what "short motion on open" needs. Entirely
+   * skipped under `prefers-reduced-motion: reduce` -- the panel simply
+   * appears instantly, matching docs/SPEC.md §11's own "disabled under
+   * prefers-reduced-motion" requirement. */
+  .sf-panel {
+    animation: sf-panel-in 120ms ease-out;
+  }
+  @keyframes sf-panel-in {
+    from {
+      opacity: 0;
+      transform: translateY(8px);
+    }
+    to {
+      opacity: 1;
+      transform: translateY(0);
+    }
+  }
+}
+
 .sf-header {
   display: flex;
   align-items: center;
   gap: 8px;
   padding: 12px 16px;
-  background: #4f46e5;
-  color: #ffffff;
+  background: var(--sf-primary, #4f46e5);
+  color: var(--sf-primary-text, #ffffff);
   font-weight: 600;
+}
+
+.sf-header-title {
+  flex: 1;
+}
+
+.sf-icon-button {
+  all: initial;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 6px;
+  background: transparent;
+  color: inherit;
+  border: none;
+  cursor: pointer;
+  font: inherit;
+}
+
+.sf-icon-button:hover {
+  background: rgba(255, 255, 255, 0.15);
 }
 
 .sf-logo {
@@ -55,14 +133,32 @@
 
 .sf-message-visitor {
   align-self: flex-end;
-  background: #4f46e5;
-  color: #ffffff;
+  background: var(--sf-primary, #4f46e5);
+  color: var(--sf-primary-text, #ffffff);
 }
 
 .sf-message-assistant {
   align-self: flex-start;
   background: #f1f1f4;
   color: #1a1a1a;
+}
+
+.sf-message-error {
+  border: 1px solid #e53e3e;
+}
+
+.sf-retry {
+  all: initial;
+  display: inline-block;
+  margin-top: 6px;
+  padding: 4px 10px;
+  background: transparent;
+  color: var(--sf-primary, #4f46e5);
+  border: 1px solid var(--sf-primary, #4f46e5);
+  border-radius: 6px;
+  cursor: pointer;
+  font: inherit;
+  font-size: 12px;
 }
 
 .sf-citations {
@@ -78,7 +174,7 @@
 }
 
 .sf-citations a {
-  color: #4f46e5;
+  color: var(--sf-primary, #4f46e5);
 }
 
 .sf-banner {
@@ -109,8 +205,8 @@
 .sf-send {
   all: initial;
   padding: 0 14px;
-  background: #4f46e5;
-  color: #ffffff;
+  background: var(--sf-primary, #4f46e5);
+  color: var(--sf-primary-text, #ffffff);
   border: none;
   border-radius: 8px;
   cursor: pointer;
@@ -126,4 +222,167 @@
   padding: 6px 16px 10px;
   font-size: 11px;
   color: #6b7280;
+}
+
+.sf-talk-to-human {
+  all: initial;
+  display: block;
+  margin: 0 16px 10px;
+  padding: 8px 12px;
+  text-align: center;
+  background: #ffffff;
+  color: var(--sf-primary, #4f46e5);
+  border: 1px solid var(--sf-primary, #4f46e5);
+  border-radius: 8px;
+  cursor: pointer;
+  font: inherit;
+}
+
+/* Task 5.3: previous-chats list. */
+.sf-conversation-list {
+  all: initial;
+  display: block;
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  overflow-y: auto;
+  flex: 1;
+}
+
+.sf-conversation-item {
+  all: initial;
+  display: block;
+  width: 100%;
+  text-align: left;
+  padding: 10px 16px;
+  background: transparent;
+  border: none;
+  border-bottom: 1px solid #efeff2;
+  cursor: pointer;
+  font: inherit;
+  color: #1a1a1a;
+}
+
+.sf-conversation-item:hover {
+  background: #f7f7fa;
+}
+
+.sf-empty-state,
+.sf-loading-state,
+.sf-error-state {
+  padding: 24px 16px;
+  text-align: center;
+  color: #6b7280;
+  font-size: 13px;
+}
+
+/* Task 5.4: the escalation consent panel. */
+.sf-escalation-panel {
+  padding: 16px;
+  overflow-y: auto;
+}
+
+.sf-escalation-panel h2 {
+  all: initial;
+  display: block;
+  font-size: 15px;
+  font-weight: 600;
+  margin-bottom: 8px;
+  color: #1a1a1a;
+}
+
+.sf-escalation-consent {
+  font-size: 13px;
+  color: #374151;
+  background: #f7f7fa;
+  border-radius: 8px;
+  padding: 10px;
+  margin-bottom: 12px;
+}
+
+.sf-field-row {
+  margin-bottom: 10px;
+}
+
+.sf-field-row label {
+  all: initial;
+  display: block;
+  font-size: 12px;
+  color: #374151;
+  margin-bottom: 4px;
+}
+
+.sf-field-row input {
+  all: initial;
+  display: block;
+  width: 100%;
+  box-sizing: border-box;
+  padding: 8px;
+  border: 1px solid #d0d0d8;
+  border-radius: 8px;
+  font: inherit;
+}
+
+.sf-field-error {
+  display: block;
+  color: #e53e3e;
+  font-size: 11px;
+  margin-top: 2px;
+}
+
+.sf-escalation-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.sf-escalation-submit {
+  all: initial;
+  padding: 8px 14px;
+  background: var(--sf-primary, #4f46e5);
+  color: var(--sf-primary-text, #ffffff);
+  border: none;
+  border-radius: 8px;
+  cursor: pointer;
+  font: inherit;
+}
+
+.sf-escalation-submit:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.sf-escalation-cancel {
+  all: initial;
+  padding: 8px 14px;
+  background: transparent;
+  color: #374151;
+  border: 1px solid #d0d0d8;
+  border-radius: 8px;
+  cursor: pointer;
+  font: inherit;
+}
+
+/* Task 5.5: a visually-hidden element, still in the accessibility
+ * tree -- the standard pattern for an aria-live announcer whose text
+ * must exist but never be shown twice (once visually, once read
+ * aloud). */
+.sf-visually-hidden {
+  all: initial;
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+}
+
+/* Task 5.5: visible focus for every interactive element in the panel,
+ * WCAG 2.2 AA. */
+.sf-panel button:focus-visible,
+.sf-panel a:focus-visible,
+.sf-panel input:focus-visible,
+.sf-panel textarea:focus-visible {
+  outline: 2px solid var(--sf-primary, #4f46e5);
+  outline-offset: 2px;
 }

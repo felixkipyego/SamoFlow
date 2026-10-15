@@ -46,6 +46,18 @@ function _validatedColors(rawColors) {
   return { primary };
 }
 
+const VALID_POSITIONS = new Set(["left", "right"]);
+
+function _validatedPosition(value) {
+  // Task 5.5: the launcher/panel corner (docs/SPEC.md §11: "left or
+  // right position"). A closed, two-value allow-list -- anything else
+  // (including an arbitrary string a tenant admin might have typed
+  // directly into a raw JSONB column before a real dashboard UI
+  // existed) falls back to the default, never passed through as a CSS
+  // value of any kind.
+  return VALID_POSITIONS.has(value) ? value : "right";
+}
+
 export function validateWidgetConfig(rawConfig) {
   const raw = typeof rawConfig === "object" && rawConfig !== null ? rawConfig : {};
   return {
@@ -54,5 +66,6 @@ export function validateWidgetConfig(rawConfig) {
     colors: _validatedColors(raw.colors),
     logoUrl: _validatedHttpsUrl(raw.logo_url),
     privacyNoticeUrl: _validatedHttpsUrl(raw.privacy_notice_url),
+    position: _validatedPosition(raw.position),
   };
 }
