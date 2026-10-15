@@ -37,7 +37,7 @@ UV_COMPILE = uv pip compile backend/pyproject.toml --universal --python-version 
 
 .DEFAULT_GOAL := help
 
-.PHONY: help env up down down-volumes migrate test test-db test-db-down test-qdrant test-qdrant-down test-all lint evals eval eval-answers eval-calibrate install lock lock-upgrade lock-check audit hooks openapi
+.PHONY: help env up down down-volumes migrate test test-db test-db-down test-qdrant test-qdrant-down test-all lint evals eval eval-answers eval-calibrate install lock lock-upgrade lock-check audit hooks openapi dashboard-install dashboard-lint dashboard-test dashboard-build dashboard-audit dashboard-e2e
 
 help:
 	@echo "make env          create .env from .env.example if it does not exist yet"
@@ -63,6 +63,12 @@ help:
 	@echo "make audit        pip-audit against both lockfiles"
 	@echo "make hooks        list TODO/ASSUMPTION/UNCERTAIN/NOTE markers (never fails)"
 	@echo "make openapi      regenerate docs/openapi.json (the locked API contract, §11.5)"
+	@echo "make dashboard-install install dashboard/'s pinned npm dependencies (npm ci)"
+	@echo "make dashboard-lint    ESLint over dashboard/"
+	@echo "make dashboard-test    Vitest component tests over dashboard/"
+	@echo "make dashboard-build   type-check and production-build dashboard/"
+	@echo "make dashboard-audit   npm audit --omit=dev over dashboard/"
+	@echo "make dashboard-e2e     Playwright strict-CSP/a11y test against dashboard/'s real build"
 
 # Never overwrites an existing .env. Every target below that touches
 # $(COMPOSE) depends on this.
@@ -254,3 +260,27 @@ audit:
 # an unreadable file).
 hooks:
 	python hooks.py
+
+# Step 6.1: dashboard/'s own npm targets, one per command dashboard/
+# README.md documents -- pinned Node assumed already active (.nvmrc/
+# package.json#engines; CI pins it explicitly via actions/setup-node),
+# same "whichever interpreter is on PATH" philosophy this Makefile's own
+# header comment already states for Python. `npm ci`, not `npm install`:
+# installs exactly what package-lock.json pins, never resolves anew.
+dashboard-install:
+	cd dashboard && npm ci
+
+dashboard-lint:
+	cd dashboard && npm run lint
+
+dashboard-test:
+	cd dashboard && npm run test
+
+dashboard-build:
+	cd dashboard && npm run build
+
+dashboard-audit:
+	cd dashboard && npm run audit
+
+dashboard-e2e:
+	cd dashboard && npm run test:e2e

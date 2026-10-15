@@ -18,11 +18,18 @@ dist/
 .coverage
 htmlcov/
 
-# Node (widget: esbuild/Playwright/ESLint, chosen at Step 5.1; dashboard
-# tooling not chosen yet)
+# Node (widget: esbuild/Playwright/ESLint, chosen at Step 5.1; dashboard:
+# Vite/React/TypeScript/shadcn-ui/Playwright/Vitest, chosen at Step 6.1)
 node_modules/
 playwright-report/
 test-results/
+
+# Step 6.1: dashboard/'s own Playwright output (e2e/csp.spec.ts) --
+# per-run artifacts, never committed, mirroring evals/golden_set/results/
+# own "real run output, not a committed fixture" treatment below.
+dashboard/test-results/
+dashboard/playwright-report/
+dashboard/blob-report/
 
 # Task 3.7.d: per-run answer-eval output (manual_run_answer_eval.py) --
 # real LLM output, timestamped, non-reproducible (a different run can

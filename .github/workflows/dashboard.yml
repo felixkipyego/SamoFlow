@@ -1,0 +1,111 @@
+# Step 6.1: dashboard/'s own CI, kept in its own workflow file per this
+# task's own direct instruction (ci.yml stays backend-only, not
+# restructured). Same fork-safety discipline as ci.yml's own header
+# comment: read-only GITHUB_TOKEN, no repository secrets referenced,
+# never the target-repo-context trigger -- backend/tests/test_ci_guard.py's
+# own generic checks apply to every workflow file in this directory,
+# this one included, not just ci.yml/security.yml.
+name: Dashboard CI
+
+on:
+  push:
+    branches: [main]
+  pull_request: {}
+
+concurrency:
+  group: dashboard-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Node
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: dashboard/.nvmrc
+          cache: npm
+          cache-dependency-path: dashboard/package-lock.json
+
+      - name: Install
+        run: make dashboard-install
+
+      - name: Lint
+        run: make dashboard-lint
+
+      - name: Test
+        run: make dashboard-test
+
+      - name: Build
+        run: make dashboard-build
+
+      - name: Audit (production dependencies only -- see dashboard/README.md)
+        run: make dashboard-audit
+
+  e2e:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Node
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: dashboard/.nvmrc
+          cache: npm
+          cache-dependency-path: dashboard/package-lock.json
+
+      - name: Create .env from .env.example
+        run: cp .env.example .env
+
+      # Real backend, real Postgres/Qdrant -- the authenticated-shell/
+      # Dialog half of e2e/csp.spec.ts needs a real login, not a mock.
+      - name: Start the backend stack
+        run: make up
+
+      - name: Run migrations
+        run: make migrate
+
+      # The password is piped over stdin, never a CLI argument (app/
+      # dashboard/seed_cli.py's own getpass.getpass() falls back to
+      # reading one line from stdin when no TTY is attached, with a
+      # printed warning -- expected and harmless here, matching this
+      # project's own "never a CLI argument, never logged" rule: it is
+      # not an argv value a process listing could ever see).
+      - name: Seed the e2e owner account
+        run: |
+          printf '%s\n%s\n' "$DASHBOARD_E2E_PASSWORD" "$DASHBOARD_E2E_PASSWORD" | \
+            docker compose --env-file .env -f deploy/docker-compose.yml run --rm \
+              migrate seed-owner --email "$DASHBOARD_E2E_EMAIL" --tenant-name "CI Tenant"
+        env:
+          DASHBOARD_E2E_EMAIL: dashboard-ci-owner@example.com
+          DASHBOARD_E2E_PASSWORD: dashboard-ci-password-not-a-real-secret
+
+      - name: Install dashboard dependencies
+        run: make dashboard-install
+
+      - name: Install Playwright's own Chromium
+        run: cd dashboard && npx playwright install --with-deps chromium
+
+      - name: Run the strict-CSP/accessibility/keyboard Playwright suite
+        run: make dashboard-e2e
+        env:
+          DASHBOARD_E2E_EMAIL: dashboard-ci-owner@example.com
+          DASHBOARD_E2E_PASSWORD: dashboard-ci-password-not-a-real-secret
+          CSP_SERVER_API_TARGET: http://127.0.0.1:8000
+
+      - name: Stop the backend stack
+        if: always()
+        run: make down
