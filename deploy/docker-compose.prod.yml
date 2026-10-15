@@ -49,11 +49,17 @@ services:
       API_HOSTNAME: ${API_HOSTNAME:?API_HOSTNAME must be set in .env}
       WIDGET_HOSTNAME: ${WIDGET_HOSTNAME:?WIDGET_HOSTNAME must be set in .env}
       CADDY_ACME_EMAIL: ${CADDY_ACME_EMAIL:?CADDY_ACME_EMAIL must be set in .env}
-      # Must track backend Settings.upload_max_size_bytes (currently
-      # 20MB) -- Caddy has no way to read that Settings value directly,
-      # so this is its own knob, kept in sync by the operator; see
-      # deploy/Caddyfile's own header comment.
-      CADDY_UPLOAD_MAX_SIZE_MB: ${CADDY_UPLOAD_MAX_SIZE_MB:-21}
+      # The SAME variable backend Settings.upload_max_size_bytes reads --
+      # not a separate Caddy-only knob (see deploy/Caddyfile's own header
+      # comment). 20971520 (20 * 1024 * 1024) matches that field's own
+      # literal default exactly -- found live that Compose's own
+      # `${VAR:-}` (empty, not omitted) would pass an EMPTY string into
+      # the container when .env leaves this unset, which Caddy's
+      # `{$VAR:default}` placeholder treats as "set to empty", NOT
+      # "unset" -- confirmed live this breaks `max_size`'s own parsing
+      # ("wrong argument count"), unlike a genuinely absent variable.
+      # A real numeric default here avoids that trap entirely.
+      UPLOAD_MAX_SIZE_BYTES: ${UPLOAD_MAX_SIZE_BYTES:-20971520}
     volumes:
       - ../deploy/Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy-data:/data

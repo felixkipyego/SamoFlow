@@ -11,11 +11,17 @@
 #   API_HOSTNAME        e.g. api.softwareske.com
 #   WIDGET_HOSTNAME     e.g. widget.softwareske.com
 #   CADDY_ACME_EMAIL    operator contact for Let's Encrypt
-#   CADDY_UPLOAD_MAX_SIZE_MB  must track backend Settings.upload_max_size_
-#                             bytes (currently 20MB); kept as its own knob
-#                             here since Caddy cannot read backend Settings
-#                             directly -- update both together if the
-#                             upload cap ever changes.
+#
+# Request body limits reuse UPLOAD_MAX_SIZE_BYTES -- the SAME env var
+# backend Settings.upload_max_size_bytes already reads (field name
+# upper-cased, confirmed against app/config.py) -- not a second,
+# Caddy-only variable: one source of truth for the upload cap, not two
+# numbers that can drift apart. The `:20971520` fallback in each
+# `max_size` line below is Caddy's own placeholder-default syntax
+# (verified live: `caddy validate` resolves it correctly whether or not
+# the env var is set) and must match Settings.upload_max_size_bytes's
+# own literal default (20 * 1024 * 1024) -- update both together if
+# either changes.
 #
 # Automatic TLS: every site address below is a real hostname (not an IP or
 # ":port"), which is what makes Caddy provision and renew certificates via
@@ -73,7 +79,7 @@
 	header Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; font-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'"
 
 	request_body {
-		max_size {$CADDY_UPLOAD_MAX_SIZE_MB}MB
+		max_size {$UPLOAD_MAX_SIZE_BYTES:20971520}
 	}
 
 	handle /api/* {
@@ -109,7 +115,7 @@
 	import security_headers
 
 	request_body {
-		max_size {$CADDY_UPLOAD_MAX_SIZE_MB}MB
+		max_size {$UPLOAD_MAX_SIZE_BYTES:20971520}
 	}
 
 	# docs/SPEC.md §14: "buffering off for /api/v1/chat, long idle

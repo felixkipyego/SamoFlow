@@ -25,6 +25,50 @@ EXTRA_EXAMPLE_KEYS: tuple[str, ...] = (
     # optional (has a default, so REQUIRED_VARS excludes it), but
     # .env.example still declares it (empty) so an operator sees it.
     "PHOENIX_COLLECTOR_ENDPOINT",
+    # Step 7.3 prep (ops track): SMTP_* (Task 4.3, backend/app/
+    # notifications/service.py) and UPLOAD_MAX_SIZE_BYTES (Task 2.7.a)
+    # are the identical "optional Settings field, has a default, but
+    # .env.example still declares it" shape as the entries above -- not
+    # new variable NAMES, just newly documented ones. UPLOAD_MAX_SIZE_
+    # BYTES is declared now specifically because deploy/Caddyfile's own
+    # request_body limit reads this SAME variable (one source of truth
+    # for the upload cap, never a second Caddy-only number).
+    "SMTP_HOST",
+    "SMTP_PORT",
+    "SMTP_USERNAME",
+    "SMTP_PASSWORD",
+    "SMTP_FROM_ADDRESS",
+    "UPLOAD_MAX_SIZE_BYTES",
+)
+
+# Step 7.3 prep (ops track): genuinely new deploy/ops-layer configuration
+# with NO backend Settings field at all -- Caddy hostnames, backup/S3
+# credentials, monitoring thresholds. Kept in a SEPARATELY named tuple
+# from EXTRA_EXAMPLE_KEYS above on purpose: every EXTRA_EXAMPLE_KEYS
+# entry corresponds to a real (optional) Settings field sharing that
+# exact env var name; every OPS_ONLY_EXAMPLE_KEYS entry does not, and
+# never should -- a name landing in the wrong tuple would hide a real
+# "this duplicates a Settings field under a new name" mistake. See
+# docs/deploy/RUNBOOK.md for what each one configures.
+OPS_ONLY_EXAMPLE_KEYS: tuple[str, ...] = (
+    "DASHBOARD_HOSTNAME",
+    "API_HOSTNAME",
+    "WIDGET_HOSTNAME",
+    "CADDY_ACME_EMAIL",
+    "DASHBOARD_DIST_DIR",
+    "WIDGET_DIST_DIR",
+    "BACKUP_AGE_PUBLIC_KEY",
+    "QDRANT_COLLECTION_NAME",
+    "S3_BACKUP_BUCKET",
+    "S3_BACKUP_ENDPOINT_URL",
+    "S3_BACKUP_RETENTION_DAYS",
+    "AWS_ACCESS_KEY_ID",
+    "AWS_SECRET_ACCESS_KEY",
+    "AWS_DEFAULT_REGION",
+    "MONITORING_DISK_PATH",
+    "MONITORING_DISK_THRESHOLD_PERCENT",
+    "MONITORING_MEMORY_THRESHOLD_PERCENT",
+    "MONITORING_ALERT_EMAIL",
 )
 
 HEADER_WARNING = "# Copy to .env and edit. Never commit .env."
@@ -110,7 +154,7 @@ def test_no_settings_field_has_a_custom_alias():
 
 
 def test_variable_names_match_settings_fields_plus_extras():
-    required = set(REQUIRED_VARS) | set(EXTRA_EXAMPLE_KEYS)
+    required = set(REQUIRED_VARS) | set(EXTRA_EXAMPLE_KEYS) | set(OPS_ONLY_EXAMPLE_KEYS)
     lines = _lines()
     found = {lines[i].partition("=")[0].strip() for i in _variable_line_indexes(lines)}
     assert found == required
