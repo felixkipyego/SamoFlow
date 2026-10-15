@@ -18,8 +18,11 @@ dist/
 .coverage
 htmlcov/
 
-# Node (widget/dashboard tooling, not chosen yet)
+# Node (widget: esbuild/Playwright/ESLint, chosen at Step 5.1; dashboard
+# tooling not chosen yet)
 node_modules/
+playwright-report/
+test-results/
 
 # Task 3.7.d: per-run answer-eval output (manual_run_answer_eval.py) --
 # real LLM output, timestamped, non-reproducible (a different run can

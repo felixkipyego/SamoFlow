@@ -1,0 +1,47 @@
+/* Task 5.1: the launcher's styles, inside the shadow root.
+ *
+ * Loaded as a real external stylesheet (<link rel="stylesheet">), not an
+ * inline <style> element: an inline <style> is governed by the page's
+ * CSP style-src directive the same way an inline style="" attribute is,
+ * which would fail under a strict tenant CSP with no 'unsafe-inline'. An
+ * external stylesheet from an allowed origin needs no such allowance --
+ * the same reasoning script-src already requires for <script src>.
+ * Proven live under a real strict CSP response header (style-src 'self',
+ * no 'unsafe-inline') by this step's own Playwright test
+ * (test/e2e/widget.spec.mjs): zero CSP violations reported while this
+ * stylesheet loads and applies.
+ *
+ * `:host { all: initial }` is what stops the HOST PAGE's own inherited
+ * CSS (color, font-family, line-height, ...) from crossing into this
+ * shadow tree -- shadow DOM isolates selectors by construction, but
+ * inherited properties still cascade through :host unless reset.
+ */
+:host {
+  all: initial;
+  position: fixed;
+  right: 20px;
+  bottom: 20px;
+  z-index: 2147483000;
+}
+
+.samoflow-launcher {
+  all: initial;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 56px;
+  height: 56px;
+  padding: 0 16px;
+  border-radius: 28px;
+  background: #4f46e5;
+  color: #fff;
+  border: none;
+  cursor: pointer;
+  font: 14px/1 system-ui, -apple-system, sans-serif;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.25);
+}
+
+.samoflow-launcher:focus-visible {
+  outline: 2px solid #fff;
+  outline-offset: 2px;
+}

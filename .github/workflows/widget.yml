@@ -1,0 +1,71 @@
+# Task 5.1: the widget track's own CI, kept out of ci.yml per the
+# parallel-track protocol (PROJECT_SPEC.md §11.5) -- the widget track
+# never edits ci.yml, which backend/tests/test_ci_guard.py's own
+# ci-specific checks are scoped to. This file is still covered by that
+# same test's GENERIC checks (test_every_workflow_file_passes_generic_checks),
+# which apply to every workflow file under .github/workflows/, not just
+# ci.yml/security.yml -- so it follows the identical shape: pinned SHAs,
+# read-only permissions, a job timeout, persist-credentials: false.
+name: Widget
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "widget/**"
+      - ".github/workflows/widget.yml"
+  pull_request:
+    paths:
+      - "widget/**"
+      - ".github/workflows/widget.yml"
+
+concurrency:
+  group: widget-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  widget:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: widget
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Node
+        uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        with:
+          node-version-file: widget/.nvmrc
+          cache: npm
+          cache-dependency-path: widget/package-lock.json
+
+      - name: Install
+        run: npm ci
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Unit tests
+        run: npm test
+
+      - name: Build
+        run: npm run build
+
+      - name: Size budget
+        run: npm run size
+
+      - name: Install Playwright browsers
+        run: npx playwright install --with-deps chromium
+
+      - name: Headless-browser (Playwright) tests
+        run: npm run test:e2e
+
+      - name: Audit
+        run: npm audit

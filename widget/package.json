@@ -1,0 +1,20 @@
+{
+  "name": "samoflow-widget",
+  "version": "0.1.0",
+  "private": true,
+  "description": "SamoFlow embeddable widget: loader (widget.js) and chat UI, bundled with esbuild (PROJECT_SPEC.md kickoff decision #1).",
+  "type": "module",
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "test": "node --test loader/test/*.test.mjs",
+    "test:e2e": "playwright test",
+    "lint": "eslint .",
+    "size": "node scripts/check-size.mjs"
+  },
+  "devDependencies": {
+    "@eslint/js": "10.0.1",
+    "@playwright/test": "1.64.1",
+    "esbuild": "0.28.2",
+    "eslint": "10.12.0"
+  }
+}

@@ -57,3 +57,17 @@ updates:
     # comes first.
     ignore:
       - dependency-name: "postgres"
+
+  # Task 5.1: npm lockfile for widget/, now that tooling is chosen
+  # (esbuild/Playwright/ESLint) -- a committed package-lock.json
+  # installed with npm ci, so Dependabot's own npm updater (unlike the
+  # Python gap above) can safely regenerate it; no known equivalent gap.
+  - package-ecosystem: "npm"
+    directory: "/widget"
+    schedule:
+      interval: "weekly"
+    groups:
+      widget-npm:
+        patterns:
+          - "*"
+    open-pull-requests-limit: 5

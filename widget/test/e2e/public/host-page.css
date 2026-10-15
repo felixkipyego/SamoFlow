@@ -1,0 +1,12 @@
+/* Task 5.1: the simulated tenant's own "ugly" styles -- deliberately
+ * clashing with the widget (Comic Sans, red text, yellow background) so
+ * the e2e test can prove these don't leak into the widget's shadow tree.
+ * An external stylesheet, not an inline <style> block, so the host page
+ * fixture itself also respects the same strict CSP (style-src 'self',
+ * no 'unsafe-inline') the widget is being tested against.
+ */
+body {
+  font-family: "Comic Sans MS", cursive;
+  color: red;
+  background: yellow;
+}

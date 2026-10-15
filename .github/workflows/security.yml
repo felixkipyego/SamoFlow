@@ -26,6 +26,8 @@ on:
       - deploy/docker-compose.yml
       - .grype.yaml
       - .github/workflows/security.yml
+      - widget/package.json
+      - widget/package-lock.json
   pull_request:
     paths:
       - backend/pyproject.toml
@@ -35,6 +37,8 @@ on:
       - deploy/docker-compose.yml
       - .grype.yaml
       - .github/workflows/security.yml
+      - widget/package.json
+      - widget/package-lock.json
 
 concurrency:
   group: security-${{ github.ref }}
@@ -107,3 +111,32 @@ jobs:
           only-fixed: true
           grype-version: v0.119.0
           config: ${{ github.workspace }}/.grype.yaml
+
+  # Task 5.1: the widget's own npm supply-chain audit, run on the same
+  # weekly schedule as python-audit above (not just at widget.yml's own
+  # CI time) so a newly disclosed vulnerability in an already-merged
+  # lockfile is still caught -- same rationale as python-audit.
+  npm-audit:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: widget
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Node
+        uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        with:
+          node-version-file: widget/.nvmrc
+          cache: npm
+          cache-dependency-path: widget/package-lock.json
+
+      - name: Install
+        run: npm ci
+
+      - name: Audit
+        run: npm audit

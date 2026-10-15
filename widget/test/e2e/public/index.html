@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>SamoFlow widget -- strict CSP fixture</title>
+    <!--
+      Deliberately ugly host-page styles (Task 5.1's own test
+      requirement: prove the page's own styles don't leak INTO the
+      widget's shadow tree, and the widget's styles don't leak OUT onto
+      the host page), loaded as an external stylesheet -- the real CSP
+      enforced here is a response header, set by test/e2e/server.mjs, and
+      this page has no inline script and no inline style anywhere,
+      matching what the widget must also avoid.
+    -->
+    <link rel="stylesheet" href="/host-page.css" />
+  </head>
+  <body>
+    <p id="host-page-marker">host page content</p>
+    <script
+      src="/widget.js"
+      data-site-key="sk_test_e2e"
+      data-base-url="http://127.0.0.1:4173"
+      data-chat-url="/chat-stub.js"
+    ></script>
+  </body>
+</html>
