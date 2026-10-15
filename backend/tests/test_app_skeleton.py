@@ -61,8 +61,13 @@ SUBPACKAGES = [
 # `await`) returns a coroutine object rather than raising anything at
 # all; removed from this list the same way, tested separately in
 # test_notifications_service.py.
+# app.handoff.routes.submit_escalation is no longer a raising stub as of
+# Step 4.4 -- it is now a real `async def` FastAPI endpoint requiring a
+# real `cid`/`payload`/`request` and real dependencies, tested
+# separately in test_handoff_routes.py; calling it with zero arguments
+# raises TypeError, not NotImplementedError, so it is removed from this
+# list the same way.
 STUB_ENTRY_POINTS = [
-    ("app.handoff.routes", "submit_escalation"),
     ("app.mcp.service", "search_knowledge_base"),
     ("app.admin.routes", "list_platform_tenants"),
     ("app.telemetry.service", "record_trace"),

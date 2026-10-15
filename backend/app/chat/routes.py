@@ -81,6 +81,7 @@ from app.plans import usage
 from app.plans.service import get_plan_limits
 from app.plans.usage import PendingUsageEvent, estimate_cost_usd
 from app.ratelimit import RateLimiter
+from app.request_limits import get_or_create_limiter
 from app.tenancy.models import Conversation
 from app.tenancy.repository import TenantScopedRepository
 
@@ -167,26 +168,9 @@ def _rate_limited_response(retry_after: float) -> JSONResponse:
     )
 
 
-def _get_or_create_limiter(
-    request: Request, attr: str, limit: int, window_seconds: float
-) -> RateLimiter:
-    # Identical shape to app/auth/routes.py's own _get_or_create_limiter()
-    # -- not imported/reused directly, since that one is a private,
-    # unexported helper of a different router module; duplicating one
-    # three-line function is below this project's own established 3rd-
-    # occurrence threshold (PROJECT_SPEC.md §3's duplication-check
-    # convention), and importing a private name across router modules
-    # would be a worse coupling than the few extra lines.
-    limiter = getattr(request.app.state, attr, None)
-    if limiter is None:
-        limiter = RateLimiter(limit=limit, window_seconds=window_seconds)
-        setattr(request.app.state, attr, limiter)
-    return limiter
-
-
 def _get_per_ip_limiter(request: Request) -> RateLimiter:
     settings = request.app.state.settings
-    return _get_or_create_limiter(
+    return get_or_create_limiter(
         request,
         "chat_per_ip_limiter",
         settings.chat_rate_limit_per_ip,
@@ -196,7 +180,7 @@ def _get_per_ip_limiter(request: Request) -> RateLimiter:
 
 def _get_per_visitor_limiter(request: Request) -> RateLimiter:
     settings = request.app.state.settings
-    return _get_or_create_limiter(
+    return get_or_create_limiter(
         request,
         "chat_per_visitor_limiter",
         settings.chat_rate_limit_per_visitor,

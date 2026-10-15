@@ -146,6 +146,17 @@ VALID_JOB_TYPES: frozenset[str] = frozenset(
         # alert_sweep_ticks_seeded()` and app/ingest/job_handlers.py's
         # own `handle_usage_alert_sweep()` for the real design/handler.
         "usage_alert_sweep",
+        # Step 4.4: "escalation_retention_sweep" added -- the identical
+        # shape as "retention_sweep"/"usage_alert_sweep" above. See
+        # app/ingest/scheduler.py's own `ensure_escalation_retention_
+        # sweep_ticks_seeded()` and app/ingest/job_handlers.py's own
+        # `handle_escalation_retention_sweep()` for the real
+        # design/handler -- this frozenset is the one this project has
+        # already forgotten to update for a new self-re-enqueuing job
+        # type twice before (Task 4.2's own found-live bug, named in the
+        # comment directly above), so it is added here deliberately,
+        # not an afterthought.
+        "escalation_retention_sweep",
     }
 )
 

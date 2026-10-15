@@ -58,6 +58,7 @@ from app.auth.secrets import generate_visitor_secret, hash_visitor_secret
 from app.auth.tokens import encode_session_token
 from app.db import get_db_session
 from app.ratelimit import RateLimiter
+from app.request_limits import get_or_create_limiter
 from app.tenancy.repository import TenantScopedRepository, get_site_key_by_key
 
 router = APIRouter(prefix="/api/v1")
@@ -144,23 +145,9 @@ def _site_key_rate_limit_key(ip: str, site_key: str) -> str:
     return f"{len(ip)}:{ip}:{site_key}"
 
 
-def _get_or_create_limiter(
-    request: Request, attr: str, limit: int, window_seconds: float
-) -> RateLimiter:
-    # Duplication check after 1.5.a-e: the shared getattr-fallback-
-    # construct-store shape both accessors below need, extracted once they
-    # turned out to differ only in the attribute name and which two
-    # Settings fields feed the constructor.
-    limiter = getattr(request.app.state, attr, None)
-    if limiter is None:
-        limiter = RateLimiter(limit=limit, window_seconds=window_seconds)
-        setattr(request.app.state, attr, limiter)
-    return limiter
-
-
 def _get_per_ip_limiter(request: Request) -> RateLimiter:
     settings = request.app.state.settings
-    return _get_or_create_limiter(
+    return get_or_create_limiter(
         request,
         "per_ip_limiter",
         settings.session_rate_limit_per_ip,
@@ -170,7 +157,7 @@ def _get_per_ip_limiter(request: Request) -> RateLimiter:
 
 def _get_site_key_limiter(request: Request) -> RateLimiter:
     settings = request.app.state.settings
-    return _get_or_create_limiter(
+    return get_or_create_limiter(
         request,
         "site_key_limiter",
         settings.session_rate_limit_per_site_key,

@@ -44,6 +44,7 @@ from pydantic import BaseModel, Field
 
 from app.agent.chat_model import get_chat_model
 from app.agent.context import quota_exhausted_from_config, tenant_id_from_config
+from app.agent.escalation_phrases import escalation_phrase_category
 from app.agent.greeting_phrases import is_greeting_or_thanks
 from app.agent.rewrite_trigger import needs_join
 from app.config import get_settings
@@ -262,10 +263,56 @@ def _is_unsafe_or_abusive(state: AgentState) -> bool:
     return False
 
 
+# docs/SPEC.md §7: one of the four rules-only escalation triggers is
+# "two fallbacks happen in a row" -- structurally different from the
+# other three (asks-for-a-person/complaint/negative), which are all
+# phrase/pattern matches against the CURRENT message. This one needs to
+# look at the PRIOR turns' own outcomes instead. Detected via a `name`
+# tag on the two "the bot could not help this turn" AIMessages
+# (`_no_answer_fallback_node`/`_dependency_failure_fallback_node` below)
+# -- never by matching their own VISIBLE TEXT: that text is a fixed
+# platform-default stand-in TODAY (see those nodes' own docstrings) but
+# is explicitly a future per-tenant dashboard template (Step 6.2's own
+# named gap) -- coupling detection to exact wording that is already
+# slated to become tenant-editable would silently break the moment that
+# template ships. `name` is a plain LangChain BaseMessage field,
+# persisted in the checkpoint like any other message attribute, never
+# rendered to the visitor.
+_TWO_FALLBACKS_NODE_NAMES = frozenset({"no_answer_fallback", "dependency_failure"})
+
+
+def _last_two_ai_turns_were_fallbacks(messages: list[BaseMessage]) -> bool:
+    ai_messages = [m for m in messages if isinstance(m, AIMessage)]
+    if len(ai_messages) < 2:
+        return False
+    return all(message.name in _TWO_FALLBACKS_NODE_NAMES for message in ai_messages[-2:])
+
+
 def _is_escalation_intent(state: AgentState) -> bool:
-    # TODO(4.4): real YAML trigger-phrase check (docs/SPEC.md §7) once
-    # Step 4.4 builds it.
-    return False
+    """docs/SPEC.md §7's own four rules-only triggers, two of which are
+    built here (the other two -- unsafe/abusive input, quota exhausted
+    -- are each already a SEPARATE `route()` rule of their own, checked
+    before this one ever runs): (1) the CURRENT message matches one of
+    config/escalation_phrases.yaml's own asks-for-a-person/complaint/
+    negative entries (`escalation_phrase_category()`, a pure, rules-
+    only, no-LLM-call text matcher -- see that module's own [SECURITY]
+    header comment for why this is structurally immune to prompt
+    injection in either direction); (2) the last two real AI turns on
+    this thread were both "could not help" fallbacks
+    (`_last_two_ai_turns_were_fallbacks()` above).
+
+    [SECURITY]: reads ONLY `state["messages"]` -- the real conversation
+    history this visitor's own turns produced -- NEVER `state[
+    "retrieved_chunks"]` (tenant corpus content). A tenant's own ingested
+    page containing escalation-trigger-shaped text can therefore never
+    force a route here; only something the VISITOR actually said (or two
+    real consecutive fallback turns) can. See tests/test_agent_graph.py's
+    own adversarial test proving this directly, not just this comment.
+    """
+    message = _latest_human_message_text(state["messages"])
+    if escalation_phrase_category(message) is not None:
+        return True
+    return _last_two_ai_turns_were_fallbacks(state["messages"])
 
 
 def route(state: AgentState, config: RunnableConfig = {}) -> str:  # noqa: B006 (never mutated -- see docstring)
@@ -339,10 +386,25 @@ def _guardrail_node(state: AgentState) -> dict:
     return {"messages": [AIMessage(content=_sanitize_answer_text(_GUARDRAIL_REPLY_TEXT))]}
 
 
+# docs/SPEC.md §6.1: "Escalation / Human Handoff Coordinator -- Detects
+# when a person is needed and offers the escalation flow (§7)." A FIXED
+# reply (never model-written), matching every other §6.1 specialist
+# reply -- the Coordinator's own job is DETECTION and OFFERING the
+# button; it is not the AI submitting anything (§7: "The AI cannot
+# submit anything"), so this text only ever tells the visitor the
+# button exists. The actual submission is a visitor-initiated,
+# server-side-authenticated POST to a separate endpoint
+# (app/handoff/routes.py's submit_escalation()), never anything this
+# node itself writes to.
+_COORDINATOR_REPLY_TEXT = (
+    "It looks like you'd like to speak with a person. "
+    "You can use the escalation button below to reach our team, "
+    "or let me know if there's anything else I can help with first."
+)
+
+
 def _coordinator_node(state: AgentState) -> dict:
-    raise NotImplementedError(
-        "Escalation / Human Handoff Coordinator not built yet (Step 4.4)"
-    )
+    return {"messages": [AIMessage(content=_sanitize_answer_text(_COORDINATOR_REPLY_TEXT))]}
 
 
 def _latest_human_message_text(messages: list[BaseMessage]) -> str:
@@ -1235,7 +1297,18 @@ def _no_answer_fallback_node(state: AgentState) -> dict:
     wording treats both as "the fallback", singular, not two different
     texts for two different triggers).
     """
-    return {"messages": [AIMessage(content=_sanitize_answer_text(_NO_ANSWER_FALLBACK_TEXT))]}
+    # `name="no_answer_fallback"`: Step 4.4's own "two fallbacks in a
+    # row" escalation trigger (`_last_two_ai_turns_were_fallbacks()`
+    # above) reads this tag, never this message's own visible TEXT
+    # (see that function's own comment for why).
+    return {
+        "messages": [
+            AIMessage(
+                content=_sanitize_answer_text(_NO_ANSWER_FALLBACK_TEXT),
+                name="no_answer_fallback",
+            )
+        ]
+    }
 
 
 def _dependency_failure_fallback_node(state: AgentState) -> dict:
@@ -1248,7 +1321,16 @@ def _dependency_failure_fallback_node(state: AgentState) -> dict:
     already begun) does NOT reach this node -- that stays Step 4.1's own
     job per the already-recorded §9 marker, unchanged by this task.
     """
-    return {"messages": [AIMessage(content=_sanitize_answer_text(_DEPENDENCY_FAILURE_TEXT))]}
+    # name="dependency_failure": see _no_answer_fallback_node's own
+    # comment directly above -- the identical Step 4.4 tagging reason.
+    return {
+        "messages": [
+            AIMessage(
+                content=_sanitize_answer_text(_DEPENDENCY_FAILURE_TEXT),
+                name="dependency_failure",
+            )
+        ]
+    }
 
 
 def _route_after_answer(state: AgentState) -> str:

@@ -1,0 +1,255 @@
+# backend/config/escalation_phrases.yaml
+# Step 4.4: docs/SPEC.md §7's own escalation trigger-phrase file --
+# "the phrases live in a YAML file in the backend config folder (English
+# only, roughly 50 to 200 entries; each entry has a phrase or pattern, a
+# category of asks-for-a-person, complaint or negative, and a reference
+# to its golden-set test). It is loaded at startup and validated against
+# a schema in the tests." Mirrors config/greeting_phrases.yaml's own
+# shape (Task 3.4.f), which itself was written anticipating this exact
+# file -- see that file's own header comment.
+#
+# UNLIKE greeting_phrases.yaml (exact-match only, each message is either
+# a greeting or it isn't): escalation intent needs to be found EMBEDDED
+# in a longer, real sentence ("I really need to talk to a human about
+# this") -- a bare exact-match rule would miss almost every real
+# message. Each entry therefore carries EXACTLY ONE of:
+#   - `phrase`: matched as a whole-word, case-insensitive SUBSTRING of
+#     the visitor's message (word-boundaried so "class" never matches
+#     "ass" -- see app/agent/escalation_phrases.py's own matching rule).
+#   - `pattern`: a Python `re` pattern (case-insensitive, `re.search`),
+#     for phrasings a flat phrase list covers poorly (e.g. "speak to a
+#     human" / "speak with a human" / "speak to a real person" as one
+#     rule instead of a dozen near-identical phrases).
+#
+# `golden_ref`: docs/SPEC.md names this per-entry requirement, but no
+# golden-set CATEGORY for routing/escalation phrases exists yet
+# (app/evals/golden_set.py's own `Route` literal is `answer`/
+# `gate_fallback`/`greeting` only -- confirmed by reading it directly,
+# not assumed). A deliberate, named scope decision, not silently worked
+# around: `golden_ref` below is a descriptive label only (NOT a live
+# foreign key into any golden-set loader) until that category is built.
+# See PROJECT_SPEC.md's own new §9 marker (owner: whoever next extends
+# the golden set) for the real follow-up.
+entries:
+  # --- asks_for_person ---------------------------------------------
+  - phrase: talk to a person
+    category: asks_for_person
+    golden_ref: "manual:asks_for_person:talk_to_a_person"
+  - phrase: speak to a person
+    category: asks_for_person
+    golden_ref: "manual:asks_for_person:speak_to_a_person"
+  - phrase: speak to someone
+    category: asks_for_person
+    golden_ref: "manual:asks_for_person:speak_to_someone"
+  - phrase: talk to someone
+    category: asks_for_person
+    golden_ref: "manual:asks_for_person:talk_to_someone"
+  - phrase: real person
+    category: asks_for_person
+    golden_ref: "manual:asks_for_person:real_person"
+  - phrase: actual person
+    category: asks_for_person
+    golden_ref: "manual:asks_for_person:actual_person"
+  - phrase: human agent
+    category: asks_for_person
+    golden_ref: "manual:asks_for_person:human_agent"
+  - phrase: live agent
+    category: asks_for_person
+    golden_ref: "manual:asks_for_person:live_agent"
+  - phrase: live person
+    category: asks_for_person
+    golden_ref: "manual:asks_for_person:live_person"
+  - phrase: human representative
+    category: asks_for_person
+    golden_ref: "manual:asks_for_person:human_representative"
+  - phrase: customer service rep
+    category: asks_for_person
+    golden_ref: "manual:asks_for_person:customer_service_rep"
+  - phrase: customer service representative
+    category: asks_for_person
+    golden_ref: "manual:asks_for_person:customer_service_representative"
+  - phrase: talk to your manager
+    category: asks_for_person
+    golden_ref: "manual:asks_for_person:talk_to_your_manager"
+  - phrase: speak to a manager
+    category: asks_for_person
+    golden_ref: "manual:asks_for_person:speak_to_a_manager"
+  - phrase: speak to your supervisor
+    category: asks_for_person
+    golden_ref: "manual:asks_for_person:speak_to_your_supervisor"
+  - phrase: get me a human
+    category: asks_for_person
+    golden_ref: "manual:asks_for_person:get_me_a_human"
+  - phrase: is there a human
+    category: asks_for_person
+    golden_ref: "manual:asks_for_person:is_there_a_human"
+  - phrase: not a bot
+    category: asks_for_person
+    golden_ref: "manual:asks_for_person:not_a_bot"
+  - phrase: stop talking to a bot
+    category: asks_for_person
+    golden_ref: "manual:asks_for_person:stop_talking_to_a_bot"
+  - phrase: connect me to a person
+    category: asks_for_person
+    golden_ref: "manual:asks_for_person:connect_me_to_a_person"
+  - pattern: '\b(talk|speak|chat)\s+(to|with)\s+(a\s+|an\s+)?(real\s+|live\s+|actual\s+)?(human|person|agent|representative|rep)\b'
+    category: asks_for_person
+    golden_ref: "manual:asks_for_person:pattern_talk_speak_to_human"
+  - pattern: '\b(connect|transfer|put)\s+me\s+(through\s+)?(to|with)\s+(a|an|your)\s+(human|person|agent|representative|manager|supervisor)\b'
+    category: asks_for_person
+    golden_ref: "manual:asks_for_person:pattern_connect_transfer_me"
+  - pattern: '\bcan\s+(i|you)\s+(talk|speak)\s+to\s+(a\s+|an\s+)?(human|person|agent|representative|someone)\b'
+    category: asks_for_person
+    golden_ref: "manual:asks_for_person:pattern_can_i_speak_to"
+  - pattern: '\bi\s+(need|want|would like)\s+to\s+(talk|speak)\s+to\s+(a\s+|an\s+)?(human|person|agent|representative|someone|manager)\b'
+    category: asks_for_person
+    golden_ref: "manual:asks_for_person:pattern_i_need_to_speak_to"
+
+  # --- complaint ----------------------------------------------------
+  - phrase: file a complaint
+    category: complaint
+    golden_ref: "manual:complaint:file_a_complaint"
+  - phrase: make a complaint
+    category: complaint
+    golden_ref: "manual:complaint:make_a_complaint"
+  - phrase: this is a complaint
+    category: complaint
+    golden_ref: "manual:complaint:this_is_a_complaint"
+  - phrase: want to complain
+    category: complaint
+    golden_ref: "manual:complaint:want_to_complain"
+  - phrase: i am very disappointed
+    category: complaint
+    golden_ref: "manual:complaint:i_am_very_disappointed"
+  - phrase: i am extremely disappointed
+    category: complaint
+    golden_ref: "manual:complaint:i_am_extremely_disappointed"
+  - phrase: not happy with
+    category: complaint
+    golden_ref: "manual:complaint:not_happy_with"
+  - phrase: this is unacceptable
+    category: complaint
+    golden_ref: "manual:complaint:this_is_unacceptable"
+  - phrase: completely unacceptable
+    category: complaint
+    golden_ref: "manual:complaint:completely_unacceptable"
+  - phrase: i demand a refund
+    category: complaint
+    golden_ref: "manual:complaint:i_demand_a_refund"
+  - phrase: i want a refund
+    category: complaint
+    golden_ref: "manual:complaint:i_want_a_refund"
+  - phrase: want my money back
+    category: complaint
+    golden_ref: "manual:complaint:want_my_money_back"
+  - phrase: this is ridiculous
+    category: complaint
+    golden_ref: "manual:complaint:this_is_ridiculous"
+  - phrase: i've had enough
+    category: complaint
+    golden_ref: "manual:complaint:ive_had_enough"
+  - phrase: i have had enough
+    category: complaint
+    golden_ref: "manual:complaint:i_have_had_enough"
+  - phrase: taking my business elsewhere
+    category: complaint
+    golden_ref: "manual:complaint:taking_my_business_elsewhere"
+  - phrase: cancel my subscription
+    category: complaint
+    golden_ref: "manual:complaint:cancel_my_subscription"
+  - phrase: cancel my account
+    category: complaint
+    golden_ref: "manual:complaint:cancel_my_account"
+  - phrase: i want to escalate this
+    category: complaint
+    golden_ref: "manual:complaint:i_want_to_escalate_this"
+  - pattern: '\b(file|make|lodge)\s+(a\s+)?complaint\b'
+    category: complaint
+    golden_ref: "manual:complaint:pattern_file_make_lodge_complaint"
+  - pattern: '\b(want|need|like)\s+to\s+complain\b'
+    category: complaint
+    golden_ref: "manual:complaint:pattern_want_to_complain"
+  - pattern: '\bi\s+(am|was)\s+(very\s+|extremely\s+|really\s+)?(disappointed|dissatisfied|unsatisfied)\b'
+    category: complaint
+    golden_ref: "manual:complaint:pattern_i_am_disappointed"
+  - pattern: '\b(demand|want|need)\s+(a\s+|my\s+)?refund\b'
+    category: complaint
+    golden_ref: "manual:complaint:pattern_demand_refund"
+
+  # --- negative (strongly negative wording, not necessarily a formal
+  # complaint or an explicit request for a person) ---------------------
+  - phrase: worst service
+    category: negative
+    golden_ref: "manual:negative:worst_service"
+  - phrase: worst experience
+    category: negative
+    golden_ref: "manual:negative:worst_experience"
+  - phrase: worst company
+    category: negative
+    golden_ref: "manual:negative:worst_company"
+  - phrase: absolutely terrible
+    category: negative
+    golden_ref: "manual:negative:absolutely_terrible"
+  - phrase: completely useless
+    category: negative
+    golden_ref: "manual:negative:completely_useless"
+  - phrase: this is garbage
+    category: negative
+    golden_ref: "manual:negative:this_is_garbage"
+  - phrase: this is trash
+    category: negative
+    golden_ref: "manual:negative:this_is_trash"
+  - phrase: waste of time
+    category: negative
+    golden_ref: "manual:negative:waste_of_time"
+  - phrase: waste of money
+    category: negative
+    golden_ref: "manual:negative:waste_of_money"
+  - phrase: never buying again
+    category: negative
+    golden_ref: "manual:negative:never_buying_again"
+  - phrase: never using this again
+    category: negative
+    golden_ref: "manual:negative:never_using_this_again"
+  - phrase: i hate this
+    category: negative
+    golden_ref: "manual:negative:i_hate_this"
+  - phrase: so frustrated
+    category: negative
+    golden_ref: "manual:negative:so_frustrated"
+  - phrase: extremely frustrated
+    category: negative
+    golden_ref: "manual:negative:extremely_frustrated"
+  - phrase: this is a joke
+    category: negative
+    golden_ref: "manual:negative:this_is_a_joke"
+  - phrase: you are useless
+    category: negative
+    golden_ref: "manual:negative:you_are_useless"
+  - phrase: you're useless
+    category: negative
+    golden_ref: "manual:negative:youre_useless"
+  - phrase: totally incompetent
+    category: negative
+    golden_ref: "manual:negative:totally_incompetent"
+  - phrase: disgusting service
+    category: negative
+    golden_ref: "manual:negative:disgusting_service"
+  - phrase: horrible experience
+    category: negative
+    golden_ref: "manual:negative:horrible_experience"
+  - phrase: feel ripped off
+    category: negative
+    golden_ref: "manual:negative:feel_ripped_off"
+  - phrase: this is a scam
+    category: negative
+    golden_ref: "manual:negative:this_is_a_scam"
+  - pattern: '\b(worst|terrible|horrible|awful|disgusting|appalling)\s+(service|experience|company|support|product)\b'
+    category: negative
+    golden_ref: "manual:negative:pattern_worst_terrible_service"
+  - pattern: '\b(so|extremely|really|incredibly)\s+(frustrated|angry|upset|furious|annoyed)\b'
+    category: negative
+    golden_ref: "manual:negative:pattern_so_frustrated_angry"
+  - pattern: '\b(ripped off|rip\s*off|scammed|being scammed)\b'
+    category: negative
+    golden_ref: "manual:negative:pattern_ripped_off_scammed"

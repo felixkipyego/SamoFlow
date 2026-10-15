@@ -319,7 +319,7 @@ from pathlib import Path
 
 import httpx
 from qdrant_client import AsyncQdrantClient
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.sql import func
 
@@ -328,6 +328,7 @@ from app.agent import checkpointer
 from app.agent.context import build_thread_id
 from app.config import get_settings
 from app.db import _session_factory
+from app.handoff.models import Escalation
 from app.ingest.crawl import run_crawl
 from app.ingest.database_adapter import (
     InvalidIdentifierError,
@@ -1070,12 +1071,13 @@ async def handle_retention_sweep(job: Job) -> None:
     (nothing else ever looks up a checkpoint thread for a `conversations`
     row that no longer exists).
 
-    **Escalation retention is OUT OF SCOPE here, not an oversight**:
-    docs/SPEC.md §13's own literal "a nightly sweep deletes expired
-    requests" line is about escalations specifically (§7's own 1-24-month
-    window) -- the `escalations` table does not exist yet (Step 4.4's own
-    job to create it); see PROJECT_SPEC.md's own new §9 marker, owner
-    Step 4.4.
+    **Escalation retention is a SEPARATE handler, not this one**:
+    docs/SPEC.md §7's own "a nightly sweep deletes expired requests" is
+    about escalations specifically (its own 1-24-month window, a
+    DIFFERENT setting from this function's own chat-retention window)
+    -- see `handle_escalation_retention_sweep()` directly below, Step
+    4.4's own job type, resolving the §9 marker this docstring used to
+    name.
     """
     settings = get_settings()
     async with _session_factory()() as session:
@@ -1118,6 +1120,78 @@ async def handle_retention_sweep(job: Job) -> None:
             len(expired),
             retention_days,
         )
+
+
+async def handle_escalation_retention_sweep(job: Job) -> None:
+    """Step 4.4: the nightly escalation-retention sweep's own
+    `JOB_HANDLERS["escalation_retention_sweep"]` entry -- mirrors
+    `handle_retention_sweep()` directly above exactly (per-tenant,
+    suspended-tenant check + self-re-enqueue FIRST via the shared
+    `_check_active_and_reenqueue_self()`), applied to `escalations`
+    instead of `conversations`.
+
+    `tenants.config.get("escalation_retention_months")`, falling back
+    to `Settings.default_escalation_retention_months` when absent or
+    out of the documented [1, 24] range -- the IDENTICAL "platform
+    default, future per-tenant override, clamp at read time" shape
+    `handle_retention_sweep()`'s own `retention_days` handling already
+    uses, applied to months instead of days (docs/SPEC.md §7: "separate
+    setting, default 12 months (allowed range 1 to 24 months)").
+
+    No checkpoint-thread pruning here (unlike `handle_retention_sweep()`
+    above): an escalation has no LangGraph checkpoint thread of its own
+    -- `transcript` is a self-contained snapshot, not a live reference
+    into one (app/handoff/models.py's own `transcript` column comment).
+    """
+    settings = get_settings()
+    async with _session_factory()() as session:
+        if not await _check_active_and_reenqueue_self(
+            session,
+            job,
+            job_type="escalation_retention_sweep",
+            interval_seconds=settings.retention_sweep_interval_seconds,
+        ):
+            return
+
+        repo = TenantScopedRepository(tenant_id=job.tenant_id, session=session)
+        tenant = await repo.get_tenant()
+        retention_months = tenant.config.get(
+            "escalation_retention_months", settings.default_escalation_retention_months
+        )
+        if not isinstance(retention_months, int) or not (1 <= retention_months <= 24):
+            logger.warning(
+                "handle_escalation_retention_sweep: tenant %s has an invalid "
+                "escalation_retention_months %r in config, using the platform "
+                "default %d instead",
+                job.tenant_id,
+                retention_months,
+                settings.default_escalation_retention_months,
+            )
+            retention_months = settings.default_escalation_retention_months
+
+        # 30-day months, matching this project's own existing
+        # retention_days-in-plain-days precedent (no calendar-month
+        # arithmetic anywhere else in this codebase to stay consistent
+        # with) -- a deliberate, stated approximation, not a bug: a
+        # "12 month" retention window is specified as roughly a year,
+        # not as a precise calendar boundary docs/SPEC.md ties any
+        # other behavior to.
+        cutoff = datetime.now(UTC) - timedelta(days=retention_months * 30)
+        result = await session.execute(
+            delete(Escalation).where(
+                Escalation.tenant_id == job.tenant_id, Escalation.created_at < cutoff
+            )
+        )
+        await session.commit()
+        deleted = result.rowcount
+        if deleted:
+            logger.info(
+                "handle_escalation_retention_sweep: tenant %s deleted %d expired "
+                "escalation(s) (escalation_retention_months=%d)",
+                job.tenant_id,
+                deleted,
+                retention_months,
+            )
 
 
 async def handle_usage_alert_sweep(job: Job) -> None:

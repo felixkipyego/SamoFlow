@@ -9,6 +9,7 @@ import uuid
 from sqlalchemy.dialects.postgresql import UUID
 
 from app.db import Base
+from app.handoff import models as handoff_models  # noqa: F401
 from app.ingest import models as ingest_models  # noqa: F401
 from app.plans import models as plans_models  # noqa: F401
 from app.tenancy import models as tenancy_models  # noqa: F401
@@ -19,6 +20,7 @@ from tests.conftest import (
     EXPECTED_TABLES,
     EXPECTED_UNIQUE_INDEXES,
     NO_ACTION_FK_COLUMNS,
+    SET_NULL_FK_COLUMNS,
 )
 
 
@@ -59,6 +61,14 @@ def test_non_tenant_foreign_keys_have_no_cascade():
         assert _fk_ondelete(table_name, column_name) is None, (
             f"{table_name}.{column_name} should not cascade "
             "(no delete feature needs it yet)"
+        )
+
+
+def test_set_null_foreign_keys_actually_set_null_on_delete():
+    for table_name, column_name in SET_NULL_FK_COLUMNS:
+        assert _fk_ondelete(table_name, column_name) == "SET NULL", (
+            f"{table_name}.{column_name} must SET NULL on delete -- see "
+            "tests/conftest.py's own SET_NULL_FK_COLUMNS comment"
         )
 
 

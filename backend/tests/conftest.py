@@ -637,6 +637,7 @@ EXPECTED_TABLES = {
     "audit_log",
     "usage_events",
     "email_log",
+    "escalations",
 }
 
 EXPECTED_PK_COLUMNS = {
@@ -653,6 +654,7 @@ EXPECTED_PK_COLUMNS = {
     "audit_log": "id",
     "usage_events": "id",
     "email_log": "id",
+    "escalations": "id",
 }
 
 # tenant_id columns cascade from tenants (PROJECT_SPEC.md decision: DB-level
@@ -681,6 +683,21 @@ CASCADE_FK_COLUMNS = {
     # survive the tenant row it describes.
     ("usage_events", "tenant_id"): "tenants",
     ("email_log", "tenant_id"): "tenants",
+    # Step 4.4: escalations.tenant_id -- the identical already-established
+    # rule (docs/SPEC.md §7: "tenant deletion cascades").
+    ("escalations", "tenant_id"): "tenants",
+}
+
+# Step 4.4: escalations.conversation_id is the FIRST column in this
+# project with ondelete="SET NULL" -- neither CASCADE (deleting the
+# conversation must not silently shorten the escalation's own LONGER,
+# separately-configured retention window) nor the NO_ACTION default
+# (which would make the conversation-retention sweep's own DELETE fail
+# outright while any escalation still referenced it). See app/handoff/
+# models.py's own `conversation_id` column comment for the full
+# reasoning.
+SET_NULL_FK_COLUMNS = {
+    ("escalations", "conversation_id"): "conversations",
 }
 
 # site_key_id (visitors) and vid (conversations) are a separate edge the
@@ -695,6 +712,9 @@ NO_ACTION_FK_COLUMNS = {
     # above, not a new decision.
     ("usage_events", "vid"),
     ("usage_events", "conversation_id"),
+    # Step 4.4: escalations.vid -- the identical "no cascade feature
+    # exists yet" reasoning as the entries above.
+    ("escalations", "vid"),
 }
 
 # Closed-vocabulary CHECK constraints, keyed by table (Task 1.4.d adds

@@ -38,22 +38,37 @@ def is_smtp_configured(settings: Settings) -> bool:
     return settings.smtp_host is not None and settings.smtp_from_address is not None
 
 
-async def send_email(to: str, subject: str, body: str) -> bool:
+async def send_email(to: str, subject: str, body: str, *, subtype: str = "plain") -> bool:
+    """`subtype`: Step 4.4 adds `"html"` (the escalation email -- a real
+    transcript needs more than one paragraph of plain text to stay
+    readable). `"plain"` stays the default so Task 4.3's own usage-alert
+    call site (plain text, no visitor content, no change needed) is
+    unaffected. Deliberately NOT a multipart/alternative (plain + html)
+    message: this project's whole email mechanism is intentionally
+    minimal (one direct stdlib smtplib call, docs/SPEC.md §14's own
+    "v1 records synchronous SMTP results only"), and a single-part
+    `text/html` message is a complete, widely-supported email on its
+    own -- building a second, parallel plain-text rendering of the same
+    content for every future HTML email is speculative complexity this
+    project does not need yet (rule 11).
+    """
     settings = get_settings()
     if not is_smtp_configured(settings):
         logger.warning(
             "SMTP is not configured -- email not sent (subject=%r)", subject
         )
         return False
-    return await asyncio.to_thread(_send_email_sync, settings, to, subject, body)
+    return await asyncio.to_thread(_send_email_sync, settings, to, subject, body, subtype)
 
 
-def _send_email_sync(settings: Settings, to: str, subject: str, body: str) -> bool:
+def _send_email_sync(
+    settings: Settings, to: str, subject: str, body: str, subtype: str = "plain"
+) -> bool:
     message = EmailMessage()
     message["From"] = settings.smtp_from_address
     message["To"] = to
     message["Subject"] = subject
-    message.set_content(body)
+    message.set_content(body, subtype=subtype)
     try:
         # A real 10s timeout -- an SMTP server that never responds must
         # not hang this call indefinitely (smtplib's own default is no

@@ -1365,12 +1365,19 @@ async def test_scheduler_tick_enqueues_one_job_per_due_source_and_reschedules_it
                     # tick" is -- this SAME run() iteration's own second
                     # bootstrap sweep (ensure_reconcile_ticks_seeded())
                     # also seeds one for this tenant, separate, expected
-                    # behavior, not what this test is about. Task 4.2/4.3:
-                    # "retention_sweep"/"usage_alert_sweep" excluded for
-                    # the identical reason -- a third and fourth bootstrap
-                    # sweep now run every iteration too.
+                    # behavior, not what this test is about. Task 4.2/4.3/
+                    # Step 4.4: "retention_sweep"/"usage_alert_sweep"/
+                    # "escalation_retention_sweep" excluded for the
+                    # identical reason -- a third, fourth and fifth
+                    # bootstrap sweep now run every iteration too.
                     Job.job_type.not_in(
-                        ("scheduler_tick", "reconcile", "retention_sweep", "usage_alert_sweep")
+                        (
+                            "scheduler_tick",
+                            "reconcile",
+                            "retention_sweep",
+                            "usage_alert_sweep",
+                            "escalation_retention_sweep",
+                        )
                     ),
                 )
             )
@@ -1496,23 +1503,32 @@ async def test_scheduler_tick_never_touches_another_tenants_sources(monkeypatch,
                     Job.tenant_id == tenant_b,
                     # Task 2.9.f: "reconcile" excluded too, for the
                     # identical already-established reason below. Task
-                    # 4.2/4.3: "retention_sweep"/"usage_alert_sweep"
-                    # excluded too, the identical reason -- a third and
-                    # fourth bootstrap sweep now run every run() iteration.
+                    # 4.2/4.3/Step 4.4: "retention_sweep"/"usage_alert_
+                    # sweep"/"escalation_retention_sweep" excluded too,
+                    # the identical reason -- a third, fourth and fifth
+                    # bootstrap sweep now run every run() iteration.
                     Job.job_type.not_in(
-                        ("scheduler_tick", "reconcile", "retention_sweep", "usage_alert_sweep")
+                        (
+                            "scheduler_tick",
+                            "reconcile",
+                            "retention_sweep",
+                            "usage_alert_sweep",
+                            "escalation_retention_sweep",
+                        )
                     ),
                 )
             )
         ).scalars().all()
     # Filtered to exclude "scheduler_tick"/"reconcile"/"retention_sweep"/
-    # "usage_alert_sweep" deliberately: tenant B has none of ITS OWN to
-    # begin with, so this same run() iteration's own bootstrap sweeps
-    # (ensure_scheduler_ticks_seeded()/ensure_reconcile_ticks_seeded()/
-    # ensure_retention_sweep_ticks_seeded()/ensure_usage_alert_sweep_
-    # ticks_seeded(), unrelated to handle_scheduler_tick() itself)
-    # correctly seed one of each of the four for tenant B too -- that
-    # is expected, separate behavior, not what this test is about. What
+    # "usage_alert_sweep"/"escalation_retention_sweep" deliberately:
+    # tenant B has none of ITS OWN to begin with, so this same run()
+    # iteration's own bootstrap sweeps (ensure_scheduler_ticks_seeded()/
+    # ensure_reconcile_ticks_seeded()/ensure_retention_sweep_ticks_
+    # seeded()/ensure_usage_alert_sweep_ticks_seeded()/ensure_escalation_
+    # retention_sweep_ticks_seeded(), unrelated to handle_scheduler_
+    # tick() itself) correctly seed one of each of the five for tenant B
+    # too -- that is expected, separate behavior, not what this test is
+    # about. What
     # must never happen, and is what this test actually checks: an
     # "ingest_url" job for tenant B's own source, which would mean tenant
     # A's own scheduler_tick leaked across the tenant boundary.

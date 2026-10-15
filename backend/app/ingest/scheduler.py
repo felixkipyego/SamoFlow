@@ -348,3 +348,23 @@ async def ensure_usage_alert_sweep_ticks_seeded(
     return await _ensure_ticks_seeded(
         session, job_type="usage_alert_sweep", interval_seconds=interval_seconds, clock=clock
     )
+
+
+async def ensure_escalation_retention_sweep_ticks_seeded(
+    session: AsyncSession,
+    *,
+    interval_seconds: float,
+    clock: DateTimeClock = lambda: datetime.now(UTC),
+) -> list[uuid.UUID]:
+    """Step 4.4: the escalation-retention sweep's own bootstrap/self-
+    healing tick for `escalation_retention_sweep` -- a fifth thin
+    wrapper over `_ensure_ticks_seeded()` above, the identical
+    established shape `ensure_usage_alert_sweep_ticks_seeded()`'s own
+    docstring already describes.
+    """
+    return await _ensure_ticks_seeded(
+        session,
+        job_type="escalation_retention_sweep",
+        interval_seconds=interval_seconds,
+        clock=clock,
+    )

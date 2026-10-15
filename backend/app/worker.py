@@ -53,6 +53,7 @@ from app.cli import configure_cli_logging
 from app.config import SettingsError, get_settings
 from app.db import _session_factory
 from app.ingest.job_handlers import (
+    handle_escalation_retention_sweep,
     handle_ingest_crawl,
     handle_ingest_db,
     handle_ingest_upload,
@@ -65,6 +66,7 @@ from app.ingest.job_handlers import (
 from app.ingest.models import Job
 from app.ingest.queue import claim_next_job, mark_job_failed, mark_job_succeeded, reap_stuck_jobs
 from app.ingest.scheduler import (
+    ensure_escalation_retention_sweep_ticks_seeded,
     ensure_reconcile_ticks_seeded,
     ensure_retention_sweep_ticks_seeded,
     ensure_scheduler_ticks_seeded,
@@ -192,6 +194,7 @@ JOB_HANDLERS: dict[str, Callable[[Job], Awaitable[None]]] = {
     "reconcile": handle_reconcile,
     "retention_sweep": handle_retention_sweep,
     "usage_alert_sweep": handle_usage_alert_sweep,
+    "escalation_retention_sweep": handle_escalation_retention_sweep,
 }
 
 
@@ -300,6 +303,19 @@ async def _ensure_usage_alert_sweep_ticks_seeded() -> list:
     # reasoning.
     return await _seed_ticks(
         ensure_usage_alert_sweep_ticks_seeded, get_settings().usage_alert_sweep_interval_seconds
+    )
+
+
+async def _ensure_escalation_retention_sweep_ticks_seeded() -> list:
+    # Step 4.4: the escalation-retention sweep's own bootstrap/self-
+    # healing tick, same cadence and same reasoning as
+    # _ensure_retention_sweep_ticks_seeded() above (reuses the identical
+    # Settings field -- both are nightly-shaped sweeps with no reason to
+    # carry two separately-tunable cadences for the same operational
+    # concept).
+    return await _seed_ticks(
+        ensure_escalation_retention_sweep_ticks_seeded,
+        get_settings().retention_sweep_interval_seconds,
     )
 
 
@@ -430,6 +446,10 @@ async def run(stop: asyncio.Event | None = None, max_iterations: int | None = No
             _log_if_seeded("reconcile", await _ensure_reconcile_ticks_seeded())
             _log_if_seeded("retention_sweep", await _ensure_retention_sweep_ticks_seeded())
             _log_if_seeded("usage_alert_sweep", await _ensure_usage_alert_sweep_ticks_seeded())
+            _log_if_seeded(
+                "escalation_retention_sweep",
+                await _ensure_escalation_retention_sweep_ticks_seeded(),
+            )
             claimed = await _claim_and_process_one_job()
         except Exception as exc:
             # A transient failure reaching the database (or claiming/

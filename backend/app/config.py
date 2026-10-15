@@ -279,6 +279,28 @@ class Settings(BaseSettings):
     chat_rate_limit_per_visitor_window_seconds: float = Field(default=60, gt=0)
     chat_rate_limit_per_ip: int = Field(default=30, gt=0)
     chat_rate_limit_per_ip_window_seconds: float = Field(default=60, gt=0)
+    # Step 4.4: docs/SPEC.md §7's own named limit, word for word -- "3
+    # escalations per rolling hour per visitor (a hard rejection with
+    # 429 and Retry-After at the limit)". The window is a real "rolling
+    # hour" (3600s), not an approximation -- matches this RateLimiter's
+    # own sliding-window-log design (app/ratelimit.py), which has no
+    # fixed-window boundary-straddling weakness to compensate for.
+    escalation_rate_limit_per_visitor: int = Field(default=3, gt=0)
+    escalation_rate_limit_window_seconds: float = Field(default=3600.0, gt=0)
+    # Step 4.4: docs/SPEC.md §7 names "a per-tenant hourly email cap" but
+    # no number -- an internal safety ceiling, the identical "generous
+    # but bounded, no corresponding spec number" treatment as
+    # `conversation_list_max_results` directly above (same reasoning:
+    # bounds the worst case -- many visitors on one tenant each hitting
+    # their own 3-per-hour cap could otherwise still flood that
+    # tenant's own escalation inbox/SMTP relay without SOME tenant-wide
+    # bound). Gates the EMAIL SEND only, never escalation-row creation
+    # (docs/SPEC.md §7: the record "also appears in the dashboard
+    # inbox" regardless of whether the email itself could be sent --
+    # the identical "skipped_not_configured, never dropped" treatment
+    # `app/notifications/service.py`'s own send_email() already gives a
+    # deployment with no SMTP server configured at all).
+    escalation_tenant_hourly_email_cap: int = Field(default=50, gt=0)
     # Task 4.1. The OVERALL wall-clock ceiling for one /chat turn (retrieve
     # + gate + the full answer stream), enforced via asyncio.wait_for() in
     # the endpoint itself -- a DIFFERENT timeout from chat_model_timeout_
@@ -569,6 +591,14 @@ class Settings(BaseSettings):
     # job_handlers.py), not validated here -- a value READ from JSONB has
     # no pydantic Field to enforce it the way this Settings default does.
     default_chat_retention_days: int = Field(default=30, ge=1, le=90)
+    # Step 4.4: docs/SPEC.md §7's own escalation retention -- "separate
+    # setting, default 12 months (allowed range 1 to 24 months)". The
+    # IDENTICAL "platform default in Settings, future per-tenant
+    # override in tenants.config" shape as `default_chat_retention_days`
+    # directly above (same reasoning, not repeated) -- a tenant has no
+    # dashboard to write a `tenants.config["escalation_retention_months"]`
+    # override yet, Step 6.2's own future job, same as that field's own.
+    default_escalation_retention_months: int = Field(default=12, ge=1, le=24)
     # Task 4.3: how often app/main.py's own lifespan background task
     # flushes pending usage events to `usage_events` and reloads the
     # authoritative per-tenant monthly count (app/plans/usage.py's own

@@ -58,6 +58,7 @@ from app.auth.routes import router as auth_router
 from app.chat.routes import router as chat_router
 from app.config import Settings, get_settings
 from app.db import _session_factory, get_engine
+from app.handoff.routes import router as handoff_router
 from app.health import router as health_router
 from app.plans.usage import sync_usage_counters
 from app.qdrant import get_qdrant_client
@@ -272,4 +273,5 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(health_router)
     app.include_router(auth_router)
     app.include_router(chat_router)
+    app.include_router(handoff_router)
     return app

@@ -34,6 +34,12 @@ class _FakeSMTP:
 
     calls: list[str] = []
     raise_on: str | None = None
+    # Step 4.4: the real EmailMessage objects passed to send_message(),
+    # additive to `calls` above (which only ever recorded To/Subject) --
+    # needed to prove the new `subtype` parameter actually changes the
+    # real message's own Content-Type, not just that send_message() was
+    # called.
+    sent_messages: list = []
 
     def __init__(self, host, port, timeout=None):
         _FakeSMTP.calls.append(f"__init__:{host}:{port}")
@@ -56,6 +62,7 @@ class _FakeSMTP:
 
     def send_message(self, message):
         _FakeSMTP.calls.append(f"send_message:{message['To']}:{message['Subject']}")
+        _FakeSMTP.sent_messages.append(message)
         if _FakeSMTP.raise_on == "send_message":
             raise RuntimeError("simulated send failure")
 
@@ -64,6 +71,7 @@ class _FakeSMTP:
 def _reset_fake_smtp():
     _FakeSMTP.calls = []
     _FakeSMTP.raise_on = None
+    _FakeSMTP.sent_messages = []
     yield
 
 
@@ -123,6 +131,34 @@ async def test_send_email_real_call_sequence_without_credentials(monkeypatch):
         "starttls",
         "send_message:tenant@example.com:Quota alert",
     ]
+    # Default subtype stays "plain" -- Task 4.3's own usage-alert call
+    # site passes no subtype at all, and must keep getting a plain-text
+    # message, unchanged by Step 4.4's new parameter.
+    assert _FakeSMTP.sent_messages[0].get_content_type() == "text/plain"
+
+
+async def test_send_email_with_subtype_html_sends_a_real_html_content_type(monkeypatch):
+    # Step 4.4: the escalation notification email is the first real
+    # caller to pass subtype="html" -- proves the parameter actually
+    # changes the real EmailMessage's own Content-Type, not just that
+    # it is accepted.
+    set_valid_env(
+        monkeypatch,
+        VALID_ENV,
+        SMTP_HOST="smtp.example.com",
+        SMTP_PORT="2525",
+        SMTP_FROM_ADDRESS="alerts@example.com",
+    )
+    get_settings.cache_clear()
+    monkeypatch.setattr(notifications_service, "SMTP", _FakeSMTP)
+
+    result = await send_email(
+        "tenant@example.com", "New escalation request", "<p>hello</p>", subtype="html"
+    )
+
+    assert result is True
+    assert _FakeSMTP.sent_messages[0].get_content_type() == "text/html"
+    assert _FakeSMTP.sent_messages[0].get_content() == "<p>hello</p>\n"
 
 
 async def test_send_email_logs_in_when_credentials_are_configured(monkeypatch):
