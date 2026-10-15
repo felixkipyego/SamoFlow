@@ -792,6 +792,17 @@ class Settings(BaseSettings):
     # ever showing a wrong URL a tenant might paste onto a live site.
     public_api_base_url: str | None = Field(default=None)
 
+    @field_validator("public_api_base_url", mode="before")
+    @classmethod
+    def _empty_public_api_base_url_means_unset(cls, value: object) -> object:
+        # Same established convention as anthropic_api_key's own before-
+        # validator: an empty string (.env.example's own "not configured
+        # yet" default for this field) means unset, not a validation
+        # error.
+        if value == "":
+            return None
+        return value
+
     @field_validator("public_api_base_url")
     @classmethod
     def _require_https_url_if_set(cls, value: str | None) -> str | None:
