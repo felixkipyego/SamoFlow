@@ -1230,6 +1230,117 @@ async def test_stop_with_nothing_streaming_is_a_harmless_no_op(monkeypatch, _see
     assert chat_response.status_code == 200
 
 
+async def test_a_different_visitors_token_cannot_stop_this_visitors_stream(monkeypatch, _seeded):
+    # [SECURITY] PART 0 audit: POST /chat/stop takes no conversation_id
+    # and no lease_token (by design -- see stop_chat_turn()'s own
+    # docstring), so the only identity it can possibly act on is the
+    # CALLER'S OWN `identity.vid` from their own Bearer token. This is
+    # the live, adversarial proof that this is actually safe, not merely
+    # argued from reading the code: a SECOND, genuinely different,
+    # legitimately-authenticated visitor (same tenant, `other_visitor`
+    # from `_seeded` -- a real token, not a forged or malformed one)
+    # calls /chat/stop while the FIRST visitor's own turn is paused
+    # mid-answer. The first visitor's turn must complete NORMALLY,
+    # `answer_stopped=False` -- a different visitor's own token, a
+    # guessed conversation_id, or a stale lease_token structurally
+    # cannot stop someone else's turn here, because none of the three
+    # is ever read by this endpoint at all.
+    full_answer = "This is a long answer that another visitor's own stop call must never cut short."
+    chunks = build_fake_answer_arg_chunks(
+        can_answer=True, used_chunk_ids=["c1"], answer=full_answer
+    )
+    pause_after = len(chunks) // 2
+    paused_signal = asyncio.Event()
+    resume_event = asyncio.Event()
+
+    class _PausingPartwayModel(FakeAnswerToolChatModel):
+        async def _astream(self, messages, stop=None, run_manager=None, **kwargs):
+            upstream = super()._astream(messages, stop=stop, run_manager=run_manager, **kwargs)
+            count = 0
+            async for chunk in upstream:
+                yield chunk
+                count += 1
+                if count == pause_after:
+                    paused_signal.set()
+                    await resume_event.wait()
+
+    app = await _build_app(
+        monkeypatch,
+        chat_model=_PausingPartwayModel(arg_chunks=chunks),
+        retrieve_chunks=_answer_chunks(),
+    )
+    victim_token = _token_for(_seeded)
+    attacker_token = _token_for(_seeded, vid_key="other_visitor")
+
+    received_text = ""
+    done_payload: dict | None = None
+
+    async def _consume(client):
+        nonlocal received_text, done_payload
+        async with client.stream(
+            "POST",
+            "/api/v1/chat",
+            json={
+                "message": "what is your refund policy",
+                "client_message_id": str(uuid.uuid4()),
+            },
+            headers={"Authorization": f"Bearer {victim_token}", "Origin": ORIGIN},
+        ) as response:
+            event_name = None
+            async for line in response.aiter_lines():
+                if line.startswith("event: "):
+                    event_name = line[len("event: ") :]
+                elif line.startswith("data: "):
+                    data = json.loads(line[len("data: ") :])
+                    if event_name == "token":
+                        received_text += data["text"]
+                    elif event_name == "done":
+                        done_payload = data
+
+    async with await http_client(app) as client, await http_client(app) as attacker_client:
+        consume_task = asyncio.create_task(_consume(client))
+        await paused_signal.wait()
+
+        attacker_response = await attacker_client.post(
+            "/api/v1/chat/stop",
+            headers={"Authorization": f"Bearer {attacker_token}", "Origin": ORIGIN},
+        )
+        assert attacker_response.status_code == 204  # the uniform no-op response, no leak
+
+        resume_event.set()
+        await consume_task
+
+    assert received_text == full_answer
+    assert done_payload is not None
+    assert done_payload["stopped"] is False
+
+
+async def test_stop_with_no_authorization_header_at_all_is_a_plain_401(monkeypatch, _seeded):
+    app = await _build_app(monkeypatch)
+    async with await http_client(app) as client:
+        response = await client.post("/api/v1/chat/stop", headers={"Origin": ORIGIN})
+    assert response.status_code == 401
+    assert "access-control-allow-origin" not in {k.lower() for k in response.headers}
+
+
+async def test_stop_rate_limited_per_visitor_gets_429_with_retry_after(monkeypatch, _seeded):
+    set_valid_env(monkeypatch, VALID_ENV, CHAT_STOP_RATE_LIMIT_PER_VISITOR="1")
+    get_settings.cache_clear()
+    app = await _build_app(monkeypatch)
+    token = _token_for(_seeded)
+    async with await http_client(app) as client:
+        first = await client.post(
+            "/api/v1/chat/stop", headers={"Authorization": f"Bearer {token}", "Origin": ORIGIN}
+        )
+        assert first.status_code == 204
+        limited = await client.post(
+            "/api/v1/chat/stop", headers={"Authorization": f"Bearer {token}", "Origin": ORIGIN}
+        )
+    assert limited.status_code == 429
+    assert "retry-after" in {k.lower() for k in limited.headers}
+    assert limited.headers["access-control-allow-origin"] == ORIGIN
+
+
 # --- Task 4.2: GET /conversations, GET /conversations/{cid}/messages -------
 
 

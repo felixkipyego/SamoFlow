@@ -195,6 +195,31 @@ def _get_per_visitor_limiter(request: Request) -> RateLimiter:
     )
 
 
+def _get_stop_per_visitor_limiter(request: Request) -> RateLimiter:
+    # [SECURITY] batch follow-up (2026-10-16): POST /chat/stop had NO
+    # rate limiting at all -- a real, confirmed gap. A SEPARATE instance
+    # from `_get_per_visitor_limiter()` above (its own disjoint key
+    # space/state) -- hammering /chat/stop must never consume a
+    # visitor's own /chat quota, and vice versa.
+    settings = request.app.state.settings
+    return get_or_create_limiter(
+        request,
+        "chat_stop_per_visitor_limiter",
+        settings.chat_stop_rate_limit_per_visitor,
+        settings.chat_stop_rate_limit_per_visitor_window_seconds,
+    )
+
+
+def _get_stop_per_ip_limiter(request: Request) -> RateLimiter:
+    settings = request.app.state.settings
+    return get_or_create_limiter(
+        request,
+        "chat_stop_per_ip_limiter",
+        settings.chat_stop_rate_limit_per_ip,
+        settings.chat_stop_rate_limit_per_ip_window_seconds,
+    )
+
+
 def _get_active_streams(request: Request) -> set[uuid.UUID]:
     # docs/SPEC.md §9: "1 concurrent stream per visitor" -- an in-process
     # set of vids CURRENTLY streaming, the same app.state-lazy-singleton
@@ -877,8 +902,31 @@ async def stop_chat_turn(
     comparable failure mode worth reporting, and a visitor's own stop
     click racing the stream's natural completion is a normal, expected
     timing, not an error.
+
+    [SECURITY] batch follow-up (2026-10-16): rate-limited like every
+    other authenticated widget endpoint -- a real, confirmed gap this
+    endpoint shipped with none of (every OTHER route here has at least
+    one limiter). Checked AFTER identity resolves (unlike `/chat`'s own
+    manual ordering, which checks before -- this handler uses a plain
+    `Depends(get_current_visitor)`, so identity is already resolved, or
+    the request already 401'd, before this body ever runs; this
+    endpoint does no expensive work either way, so there is no DoS-cost
+    reason to restructure around that), set AFTER `request.state.cors_
+    allowed_origin` so a 429 still carries the real verified-origin
+    header, matching `/chat`'s own 429 branch.
     """
     request.state.cors_allowed_origin = identity.org
+
+    ip = request.client.host if request.client else "unknown"
+    per_ip_limiter = _get_stop_per_ip_limiter(request)
+    if not per_ip_limiter.check(ip):
+        return _rate_limited_response(per_ip_limiter.get_retry_after(ip))
+
+    per_visitor_limiter = _get_stop_per_visitor_limiter(request)
+    visitor_key = str(identity.vid)
+    if not per_visitor_limiter.check(visitor_key):
+        return _rate_limited_response(per_visitor_limiter.get_retry_after(visitor_key))
+
     active_streams = _get_active_streams(request)
     if identity.vid in active_streams:
         _get_stop_requests(request).add(identity.vid)

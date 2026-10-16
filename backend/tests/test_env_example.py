@@ -59,6 +59,12 @@ EXTRA_EXAMPLE_KEYS: tuple[str, ...] = (
     "WIDGET_APPEARANCE_RATE_LIMIT_PER_SITE_KEY_WINDOW_SECONDS",
     "WIDGET_APPEARANCE_RATE_LIMIT_PER_IP",
     "WIDGET_APPEARANCE_RATE_LIMIT_PER_IP_WINDOW_SECONDS",
+    # [SECURITY] batch follow-up (2026-10-16): POST /chat/stop's own new
+    # rate limits -- same shape as the two blocks above.
+    "CHAT_STOP_RATE_LIMIT_PER_VISITOR",
+    "CHAT_STOP_RATE_LIMIT_PER_VISITOR_WINDOW_SECONDS",
+    "CHAT_STOP_RATE_LIMIT_PER_IP",
+    "CHAT_STOP_RATE_LIMIT_PER_IP_WINDOW_SECONDS",
 )
 
 # Step 7.3 prep (ops track): genuinely new deploy/ops-layer configuration
