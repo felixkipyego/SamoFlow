@@ -21,7 +21,7 @@
 #   - Questions paraphrase the corpus's own wording rather than quoting
 #     it, except where a question is itself an exact greeting/thanks
 #     phrase (category=greeting) -- that category's own expected_route
-#     depends on an EXACT, already-built match against backend/config/
+#     depends on an EXACT, already-built match against app/agent/phrases/
 #     greeting_phrases.yaml, which is a fixed-phrase lookup, not fuzzy
 #     matching, so paraphrasing or adding typos there would make the
 #     item's own expected_route wrong, not just harder.
@@ -789,7 +789,7 @@ items:
       - document: gift-cards
         evidence_passage: "Enter the gift card code at checkout in the \"Gift card or promo code\" field."
 
-  # --- greeting (15) -- exact-match against backend/config/
+  # --- greeting (15) -- exact-match against app/agent/phrases/
   # greeting_phrases.yaml's own normalisation rule (lowercase, trailing
   # punctuation stripped, whitespace collapsed); deliberately NOT
   # paraphrased or typo'd, since a typo would make expected_route wrong,

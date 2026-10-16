@@ -4,7 +4,15 @@
 # prints one PASS/FAIL line; the first FAIL exits non-zero immediately. The
 # trap below always removes every container and temp file this script
 # started, even on failure or an early exit.
+#
+# Extended for the config-path bug fix (2026-10-16, checks (g)/(h) below):
+# resolved relative to this script's own location (not the caller's cwd)
+# so it keeps working whether invoked from the repo root (CI's own usage)
+# or anywhere else.
 set -eu
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 image="${1:?usage: smoke-image.sh <image>}"
 containers=""
@@ -15,6 +23,13 @@ cleanup() {
     for c in $containers; do
         docker rm -f "$c" >/dev/null 2>&1 || true
     done
+    # --profile test down -v: always attempted, even if checks (g)/(h)
+    # below never started these services (e.g. an earlier check already
+    # failed) -- `docker compose down` on services that were never
+    # created is a no-op, not an error, matching this trap's own existing
+    # "always safe to call" style for container removal above.
+    (cd "$REPO_ROOT" && docker compose --env-file .env -f deploy/docker-compose.yml \
+        --profile test down -v >/dev/null 2>&1) || true
     rm -f "$tmp_headers" "$tmp_body"
 }
 trap cleanup EXIT
@@ -116,3 +131,144 @@ case "$out" in
     *change-me*) fail "migrate output leaked the database password" ;;
 esac
 echo "PASS: migrate against an unreachable host fails without leaking the password"
+
+# (g) the config-path bug fix (2026-10-16): the built image's own venv is
+# a real NON-EDITABLE install (site-packages, exactly like the Dockerfile
+# builder stage's `pip install --no-deps .`) -- the one scenario the
+# original bug only showed up in (Path(__file__)-relative arithmetic
+# resolves correctly from a source checkout, which is all backend/tests
+# ever exercised, but lands on site-packages itself once installed for
+# real). No database/Qdrant needed: these three modules do nothing but
+# parse yaml and validate a schema. See backend/app/agent/greeting_
+# phrases.py's own header comment for the full reasoning.
+set +e
+out=$(docker run --rm --entrypoint python3 "$image" -c "
+from app.agent.escalation_phrases import escalation_phrase_category
+from app.agent.greeting_phrases import is_greeting_or_thanks
+from app.agent.rewrite_trigger import needs_join
+assert escalation_phrase_category('I want to speak to a human please') == 'asks_for_person'
+assert is_greeting_or_thanks('hi') is True
+assert needs_join('what about it') is True
+print('OK')
+" 2>&1)
+rc=$?
+set -e
+[ "$rc" -eq 0 ] && [ "$out" = "OK" ] || fail "built image failed to load escalation/greeting/rewrite-trigger phrase data: $out"
+echo "PASS: built image loads escalation/greeting/rewrite-trigger phrase data via importlib.resources"
+
+# (h) a REAL greeting turn through POST /chat, against a disposable
+# postgres+qdrant and this script's own migrate/admin/api invocations of
+# the SAME image under test, returns the fixed Guardrail reply ("Hello!
+# How can I help you today?", backend/app/agent/graph.py's own
+# _GUARDRAIL_REPLY_TEXT) -- not an error. This is the end-to-end proof
+# the config-path bug is actually fixed inside the real built image, not
+# only unit-tested: before the fix, is_greeting_or_thanks() raised
+# FileNotFoundError deep inside the graph, which create_chat_turn()'s
+# own generic exception handler converted into a generic "error" SSE
+# event instead of the greeting reply -- every chat turn in the real
+# container was affected (every message passes through this same
+# detection first), not only greetings; a greeting is simply the
+# cheapest one to prove end to end, needing no real OPENAI_API_KEY.
+#
+# test-db/test-qdrant (deploy/docker-compose.yml's own disposable
+# `--profile test` services, the same ones `make test-all` uses) stand
+# in for postgres/qdrant here -- resolved relative to REPO_ROOT, not the
+# caller's cwd, matching this script's own SCRIPT_DIR/REPO_ROOT
+# resolution above.
+echo "--- (h) starting a disposable postgres+qdrant for a real chat-turn check ---"
+(cd "$REPO_ROOT" && docker compose --env-file .env -f deploy/docker-compose.yml \
+    --profile test up -d test-db test-qdrant)
+
+i=0
+until (cd "$REPO_ROOT" && docker compose --env-file .env -f deploy/docker-compose.yml \
+    --profile test exec -T test-db pg_isready -U widgetplatform -d widgetplatform_test) \
+    >/dev/null 2>&1; do
+    i=$((i + 1))
+    [ "$i" -lt 30 ] || fail "test-db did not become ready within 30s"
+    sleep 1
+done
+test_db_cid=$(cd "$REPO_ROOT" && docker compose --env-file .env -f deploy/docker-compose.yml \
+    --profile test ps -q test-db)
+test_qdrant_cid=$(cd "$REPO_ROOT" && docker compose --env-file .env -f deploy/docker-compose.yml \
+    --profile test ps -q test-qdrant)
+i=0
+until [ "$(docker inspect -f '{{.State.Health.Status}}' "$test_qdrant_cid")" = "healthy" ]; do
+    i=$((i + 1))
+    [ "$i" -lt 30 ] || fail "test-qdrant did not become healthy within 30s"
+    sleep 1
+done
+
+# The real Compose network name, read from the real test-db container --
+# not hard-coded (deploy/docker-compose.yml's own top-level `name:` sets
+# it today, but re-deriving it this way keeps this check correct even if
+# that ever changes) -- so the migrate/admin/api containers below can
+# reach test-db/test-qdrant by their Compose service name.
+NETWORK=$(docker inspect "$test_db_cid" --format '{{range $k, $v := .NetworkSettings.Networks}}{{$k}}{{end}}')
+[ -n "$NETWORK" ] || fail "could not determine the compose network test-db is attached to"
+
+STACK_ENV="-e APP_ENV=development -e DATABASE_URL=postgresql+psycopg://widgetplatform:change-me@test-db:5432/widgetplatform_test -e QDRANT_URL=http://test-qdrant:6333 -e QDRANT_API_KEY=test-qdrant-key -e QDRANT_READ_ONLY_API_KEY=test-qdrant-readonly-key -e JWT_SIGNING_KEY=smoke-test-jwt-signing-key-32-chars-ok -e DB_CONNECTION_ENCRYPTION_KEY=smoke-test-db-connection-key-32-chars-ok -e OPENAI_API_KEY=smoke-test-openai-key -e API_HOST=0.0.0.0 -e API_PORT=8000"
+
+set +e
+out=$(docker run --rm --network "$NETWORK" $STACK_ENV "$image" migrate 2>&1)
+rc=$?
+set -e
+[ "$rc" -eq 0 ] || fail "migrate failed against the disposable test-db/test-qdrant stack: $out"
+
+set +e
+tenant_out=$(docker run --rm --network "$NETWORK" $STACK_ENV "$image" admin create-tenant --name "Smoke Test" 2>&1)
+rc=$?
+set -e
+[ "$rc" -eq 0 ] || fail "admin create-tenant failed: $tenant_out"
+tenant_id=$(printf '%s' "$tenant_out" | sed -n 's/.*(\(.*\))$/\1/p')
+[ -n "$tenant_id" ] || fail "could not parse a tenant id from: $tenant_out"
+
+origin="http://smoke-test.invalid"
+set +e
+sitekey_out=$(docker run --rm --network "$NETWORK" $STACK_ENV "$image" admin issue-site-key \
+    --tenant-id "$tenant_id" --allowed-origin "$origin" 2>&1)
+rc=$?
+set -e
+[ "$rc" -eq 0 ] || fail "admin issue-site-key failed: $sitekey_out"
+site_key=$(printf '%s' "$sitekey_out" | awk '{print $4}')
+[ -n "$site_key" ] || fail "could not parse a site key from: $sitekey_out"
+
+cid_chat=$(docker run --rm -d --network "$NETWORK" -p 127.0.0.1:18081:8000 $STACK_ENV "$image" api)
+containers="$containers $cid_chat"
+i=0
+until curl -fsS http://127.0.0.1:18081/ready >/dev/null 2>&1; do
+    i=$((i + 1))
+    [ "$i" -lt 30 ] || fail "GET /ready did not respond within 30s for the chat-turn check"
+    sleep 1
+done
+
+session_body=$(printf '{"site_key":"%s"}' "$site_key")
+set +e
+session_resp=$(curl -fsS -X POST "http://127.0.0.1:18081/api/v1/session" \
+    -H "Origin: ${origin}" -H "Content-Type: application/json" -d "$session_body")
+rc=$?
+set -e
+[ "$rc" -eq 0 ] || fail "POST /session failed: $session_resp"
+session_token=$(printf '%s' "$session_resp" | python3 -c "import json, sys; print(json.load(sys.stdin)['session_token'])")
+[ -n "$session_token" ] || fail "could not parse a session_token from: $session_resp"
+
+client_message_id=$(python3 -c "import uuid; print(uuid.uuid4())")
+chat_body=$(printf '{"message":"hi","client_message_id":"%s"}' "$client_message_id")
+set +e
+chat_out=$(curl -fsS -X POST "http://127.0.0.1:18081/api/v1/chat" \
+    -H "Origin: ${origin}" -H "Authorization: Bearer ${session_token}" \
+    -H "Content-Type: application/json" -d "$chat_body")
+rc=$?
+set -e
+[ "$rc" -eq 0 ] || fail "POST /chat failed: $chat_out"
+# Literal \\! (TWO backslashes, not one): _sanitize_answer_text()
+# (backend/app/agent/graph.py) escapes every "!" in visitor-facing text
+# to a literal single backslash + "!" to defuse markdown image syntax
+# ("![...]") -- the real HTTP response body then JSON-escapes THAT
+# literal backslash a second time, so the raw bytes on the wire carry
+# two backslashes before "!". Confirmed live against the real response
+# before fixing this pattern, not assumed.
+case "$chat_out" in
+    *'Hello\\! How can I help you today?'*) : ;;
+    *) fail "a real greeting chat turn did not return the guardrail reply: $chat_out" ;;
+esac
+echo "PASS: a real greeting turn through POST /chat returns the fixed guardrail reply, not an error"

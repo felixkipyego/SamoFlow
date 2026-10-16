@@ -86,27 +86,27 @@ def _write_phrases_file(tmp_path, content: str):
 
 def test_malformed_yaml_raises(tmp_path, monkeypatch):
     path = _write_phrases_file(tmp_path, "entries: [this is not a list of mappings")
-    monkeypatch.setattr(rewrite_trigger, "_PHRASES_PATH", path)
+    monkeypatch.setattr(rewrite_trigger, "_PHRASES_RESOURCE", path)
     with pytest.raises(yaml.YAMLError):
         rewrite_trigger._load_phrase_patterns()
 
 
 def test_entry_missing_required_key_raises(tmp_path, monkeypatch):
     path = _write_phrases_file(tmp_path, "entries:\n  - not_phrase: it\n")
-    monkeypatch.setattr(rewrite_trigger, "_PHRASES_PATH", path)
+    monkeypatch.setattr(rewrite_trigger, "_PHRASES_RESOURCE", path)
     with pytest.raises(Exception, match="phrase"):
         rewrite_trigger._load_phrase_patterns()
 
 
 def test_missing_entries_key_raises(tmp_path, monkeypatch):
     path = _write_phrases_file(tmp_path, "not_entries: []\n")
-    monkeypatch.setattr(rewrite_trigger, "_PHRASES_PATH", path)
+    monkeypatch.setattr(rewrite_trigger, "_PHRASES_RESOURCE", path)
     with pytest.raises(Exception, match="entries"):
         rewrite_trigger._load_phrase_patterns()
 
 
 def test_the_real_committed_file_loads_and_validates_successfully():
-    # No monkeypatch -- the real backend/config/rewrite_trigger_
+    # No monkeypatch -- the real app/agent/phrases/rewrite_trigger_
     # phrases.yaml, proving it is itself valid against its own schema.
     patterns = rewrite_trigger._load_phrase_patterns()
     assert len(patterns) >= 10

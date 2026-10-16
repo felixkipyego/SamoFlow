@@ -339,6 +339,17 @@ dev = [
 
 [tool.hatch.build.targets.wheel]
 packages = ["app"]
+# The config-path bug fix (2026-10-16): app/agent/phrases/*.yaml is real
+# package data now (escalation/greeting/rewrite-trigger phrase lists,
+# loaded via importlib.resources, see each module's own header comment),
+# not a backend/config/ sibling directory a plain `packages = ["app"]`
+# wheel build would already include by default -- `include` here makes
+# that non-default inclusion explicit instead of relying on hatchling's
+# own default file-selection rules, which are not specific to data files
+# and could change. Verified live (not assumed): `python -m build --wheel`
+# + `unzip -l` on the built wheel confirms all three .yaml files are
+# present under app/agent/phrases/.
+include = ["app/agent/phrases/*.yaml"]
 
 [tool.ruff]
 target-version = "py312"

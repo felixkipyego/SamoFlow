@@ -1,6 +1,6 @@
 # backend/app/agent/escalation_phrases.py
 # Step 4.4: docs/SPEC.md §6.2 Rule 3 ("Escalation intent -> Coordinator")
-# and §7's own trigger-phrase mechanism. Loads backend/config/
+# and §7's own trigger-phrase mechanism. Loads app/agent/phrases/
 # escalation_phrases.yaml, the same `@lru_cache` singleton / schema-
 # validated-at-load shape as app/agent/greeting_phrases.py's own
 # is_greeting_or_thanks() (Task 3.4.f) -- a malformed file fails loudly
@@ -12,7 +12,7 @@
 # UNLIKE greeting_phrases.yaml's exact-whole-message match: escalation
 # intent must be found EMBEDDED in a real, possibly long sentence, so
 # matching here is substring/pattern-based, not exact-equality -- see
-# config/escalation_phrases.yaml's own header comment for the full
+# phrases/escalation_phrases.yaml's own header comment for the full
 # phrase-vs-pattern design, and this module's own MATCHING RULE below.
 #
 # [SECURITY]: this whole module is a PURE, RULES-ONLY text matcher --
@@ -28,16 +28,25 @@
 import re
 from dataclasses import dataclass
 from functools import lru_cache
-from pathlib import Path
+from importlib import resources
 from typing import Literal
 
 import yaml
 from pydantic import BaseModel, model_validator
 
-# `parents[2]`: this file lives at app/agent/escalation_phrases.py --
-# identical derivation to greeting_phrases.py's own _PHRASES_PATH
-# (parents[0]=app/agent, parents[1]=app, parents[2]=the backend root).
-_PHRASES_PATH = Path(__file__).resolve().parents[2] / "config" / "escalation_phrases.yaml"
+# NOT Path(__file__).resolve().parents[N] or Path.cwd(): both are real
+# production bugs, found live inside the actual built image (2026-10-16)
+# -- see app/agent/greeting_phrases.py's own header comment for the
+# full reasoning (identical here). `importlib.resources` resolves a
+# package's own data file through Python's real import machinery
+# instead of hand-computed path arithmetic, so it is correct for an
+# editable install, a non-editable install and the built image alike --
+# the yaml file now lives INSIDE the `app` package (app/agent/phrases/)
+# specifically so it is real package data, not a sibling directory a
+# wheel build has no reason to include.
+_PHRASES_RESOURCE = resources.files("app.agent").joinpath(
+    "phrases", "escalation_phrases.yaml"
+)
 
 Category = Literal["asks_for_person", "complaint", "negative"]
 
@@ -101,7 +110,7 @@ def _compile_entry(entry: _PhraseEntry) -> _CompiledEntry:
 
 @lru_cache
 def _load_compiled_entries() -> tuple[_CompiledEntry, ...]:
-    raw = yaml.safe_load(_PHRASES_PATH.read_text(encoding="utf-8"))
+    raw = yaml.safe_load(_PHRASES_RESOURCE.read_text(encoding="utf-8"))
     parsed = _PhraseFile.model_validate(raw)
     return tuple(_compile_entry(entry) for entry in parsed.entries)
 
@@ -110,8 +119,8 @@ def escalation_phrase_category(message: str) -> Category | None:
     """The category of the FIRST entry (file order) whose phrase/pattern
     is found anywhere in `message` -- `re.search()`, never `fullmatch()`:
     this is "does this phrase/pattern appear in the message", not "is
-    the whole message exactly this phrase" (config/escalation_phrases.
-    yaml's own escalation_phrases.yaml header comment, and the module
+    the whole message exactly this phrase" (phrases/escalation_phrases.
+    yaml's own header comment, and the module
     docstring above, both state why this differs from greeting_phrases.
     py's own exact-match rule). Returns `None` for a message matching
     none of this file's entries -- the normal case for most messages.

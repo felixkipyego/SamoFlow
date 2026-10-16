@@ -408,7 +408,7 @@ async def test_run_turn_reaches_the_real_fallback_reply_when_quota_exhausted(mon
 
 async def test_run_turn_reaches_the_real_guardrail_reply_for_a_real_greeting(monkeypatch):
     # Task 3.4.f: guardrail is real now -- no monkeypatch needed, "hi" is
-    # a real, listed phrase (backend/config/greeting_phrases.yaml) that
+    # a real, listed phrase (app/agent/phrases/greeting_phrases.yaml) that
     # the real `_is_greeting_or_thanks()` matches through the actual
     # route()/guardrail_node path, end to end.
     graph = await _fresh_real_graph(monkeypatch)

@@ -466,7 +466,7 @@ async def test_mid_stream_failure_leaves_no_completed_aimessage_in_the_checkpoin
     conversation_id = uuid.uuid4()
 
     # Task 3.4.f: NOT "hello" -- that is now a real, matched greeting
-    # phrase (backend/config/greeting_phrases.yaml), which would route
+    # phrase (app/agent/phrases/greeting_phrases.yaml), which would route
     # this turn to the real guardrail reply instead of retrieve/gate/
     # answer, never reaching the mid-stream failure this test exists to
     # prove at all.
