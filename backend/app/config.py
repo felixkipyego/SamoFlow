@@ -98,6 +98,21 @@ class Settings(BaseSettings):
     session_rate_limit_per_site_key_window_seconds: float = Field(default=60, gt=0)
     session_rate_limit_per_ip: int = Field(default=30, gt=0)
     session_rate_limit_per_ip_window_seconds: float = Field(default=60, gt=0)
+    # [SECURITY] Step 7-follow-up, Part C: GET /api/v1/widget-appearance
+    # (no visitor session, no conversation, no LLM call -- just the
+    # tenant's own public primary color/text color/position) is called
+    # on EVERY page view, not only on a chat open like /session is --
+    # higher limits than session's own, same (limit, window) shape,
+    # reasoned explicitly rather than reusing session's numbers blindly:
+    # a real, popular tenant site under genuine traffic could see many
+    # concurrent FIRST-time visitors each firing this once; the browser's
+    # own HTTP cache (Cache-Control/ETag, see the route itself) already
+    # absorbs almost all repeat load within the cache window, so this
+    # only needs to bound the genuinely-uncached case.
+    widget_appearance_rate_limit_per_site_key: int = Field(default=120, gt=0)
+    widget_appearance_rate_limit_per_site_key_window_seconds: float = Field(default=60, gt=0)
+    widget_appearance_rate_limit_per_ip: int = Field(default=60, gt=0)
+    widget_appearance_rate_limit_per_ip_window_seconds: float = Field(default=60, gt=0)
     # Task 2.1.a: the pgcrypto passphrase for db_connections.
     # encrypted_credentials (docs/SPEC.md §5.6: "Credentials are encrypted
     # at rest"). Required, same discipline as qdrant_api_key/

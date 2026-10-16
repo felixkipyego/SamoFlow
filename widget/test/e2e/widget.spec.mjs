@@ -18,6 +18,14 @@ test("mounts an open shadow root under a strict CSP, isolates styles both ways, 
 
   await page.goto("/");
 
+  // [SECURITY] Step 7-follow-up, Part C: the launcher's own creation
+  // now waits on an async GET /api/v1/widget-appearance fetch first
+  // (widget/loader/src/widget.js) -- a Locator-based wait (auto-
+  // retrying) is correct here, not a one-shot page.evaluate() snapshot
+  // taken before that fetch has necessarily resolved.
+  const launcher = page.locator("#samoflow-widget-host").locator("css=button.samoflow-launcher");
+  await expect(launcher).toBeVisible();
+
   const hasOpenShadowRoot = await page.evaluate(() => {
     const host = document.getElementById("samoflow-widget-host");
     return Boolean(host && host.shadowRoot && host.shadowRoot.querySelector("button"));
@@ -50,21 +58,11 @@ test("mounts an open shadow root under a strict CSP, isolates styles both ways, 
   );
   expect(loadedBeforeClick).toBeUndefined();
 
-  await page.evaluate(() => {
-    document
-      .getElementById("samoflow-widget-host")
-      .shadowRoot.querySelector("button")
-      .click();
-  });
+  await launcher.click();
   await page.waitForFunction(() => window.__SAMOFLOW_CHAT_STUB_LOADED__ === true);
 
   // Clicking again must not insert a second <script> tag for the same URL.
-  await page.evaluate(() => {
-    document
-      .getElementById("samoflow-widget-host")
-      .shadowRoot.querySelector("button")
-      .click();
-  });
+  await launcher.click();
   const chatScriptCount = await page.evaluate(
     () => document.querySelectorAll('script[data-samoflow-chat-url]').length,
   );

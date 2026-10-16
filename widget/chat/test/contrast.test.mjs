@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { pickReadableTextColor, toHexColor } from "../src/contrast.js";
+import { pickReadableTextColor } from "../src/contrast.js";
 
 test("a dark background picks white text", () => {
   assert.equal(pickReadableTextColor("#000000"), "#ffffff");
@@ -62,19 +62,4 @@ test("a very light tenant color (#ffff99) picks black text, readable on the laun
 
 test("a very dark tenant color (#111133) picks white text, readable on the launcher", () => {
   assert.equal(pickReadableTextColor("#111133"), "#ffffff");
-});
-
-// [ops bugfix]: toHexColor() -- the canonicalisation color-cache.js
-// relies on, reusing this file's own RGB parsing (never a second parser).
-test("toHexColor canonicalises hex/rgb/hsl inputs to a lowercase #rrggbb string", () => {
-  assert.equal(toHexColor("#14b8a6"), "#14b8a6");
-  assert.equal(toHexColor("#4F46E5"), "#4f46e5");
-  assert.equal(toHexColor("#fff"), "#ffffff");
-  assert.equal(toHexColor("rgb(20, 184, 166)"), "#14b8a6");
-  assert.equal(toHexColor("hsl(0, 0%, 0%)"), "#000000");
-});
-
-test("toHexColor returns null, never throws, for an unparseable color", () => {
-  assert.equal(toHexColor("not-a-color"), null);
-  assert.doesNotThrow(() => toHexColor("javascript:alert(1)"));
 });

@@ -17,8 +17,7 @@
 import { resolveConfig } from "./config.js";
 import { createLauncher } from "./dom.js";
 import { ensureChatLoaded } from "./chat-loader.js";
-import { getCachedPosition } from "./position-cache.js";
-import { getCachedColor } from "./color-cache.js";
+import { fetchAppearance } from "./appearance.js";
 
 // Captured synchronously, at top-level script execution -- NOT inside
 // any deferred callback. document.currentScript is only set while this
@@ -26,7 +25,7 @@ import { getCachedColor } from "./color-cache.js";
 // callback (e.g. DOMContentLoaded) fires, it has already reverted to null.
 const loaderScriptEl = document.currentScript;
 
-function mount() {
+async function mount() {
   if (!loaderScriptEl) {
     console.error(
       "[SamoFlow] widget.js could not find its own <script> tag " +
@@ -45,33 +44,24 @@ function mount() {
   const host = document.createElement("div");
   host.id = "samoflow-widget-host";
 
-  // Task 5.5: a RETURNING visitor's launcher starts on the correct side
-  // from first paint -- see loader/src/position-cache.js's own header
-  // for why the loader itself cannot know this on a visitor's very
-  // first-ever view (it never calls the backend; only the chat bundle
-  // does, and only after it loads). A plain class toggle, never an
-  // inline style mutation -- see widget.css's own `:host(.sf-position-
-  // left)` rule for why that distinction matters under a strict CSP.
-  if (getCachedPosition(config.siteKey) === "left") {
-    host.classList.add("sf-position-left");
-  }
-
-  // [ops bugfix]: same early-paint fix as the position cache immediately
-  // above, for the launcher's own brand color (docs/SPEC.md §11) --
-  // `host`, not the launcher button itself, because `host` is the one
-  // ancestor shared by the launcher AND the chat panel once the chat
-  // bundle mounts into the SAME shadow root (chat/src/mount.js sets the
-  // identical two custom properties on this exact element once it has a
-  // freshly-fetched, non-cached value to apply). CSS custom properties
-  // inherit across the shadow boundary from host to shadow tree by
-  // design (confirmed live, see widget.css's own header) -- setting them
-  // here, before createLauncher() below, is what lets a RETURNING
-  // visitor's launcher paint in the correct brand color immediately,
-  // with no flash, instead of the default indigo until their next click.
-  const cachedColor = getCachedColor(config.siteKey);
-  if (cachedColor) {
-    host.style.setProperty("--sf-primary", cachedColor.hex);
-    host.style.setProperty("--sf-primary-text", cachedColor.text);
+  // [SECURITY] Step 7-follow-up, Part C: the launcher's own real brand
+  // color/position, on EVERY page view -- including a visitor's very
+  // first-ever one, not only a returning visitor (the gap the retired
+  // color-cache.js/position-cache.js localStorage mechanism could only
+  // ever close for a returning visitor). Awaited before the launcher is
+  // ever created, bounded by appearance.js's own fetch timeout so a
+  // slow/unreachable API cannot meaningfully delay first paint -- on
+  // any failure, `appearance` is null and both widget.css's own
+  // hardcoded defaults (color) and the plain `sf-position-left` class
+  // omission (position, defaulting right) apply unchanged, exactly like
+  // a cache miss used to.
+  const appearance = await fetchAppearance(config.baseUrl, config.siteKey);
+  if (appearance) {
+    host.style.setProperty("--sf-primary", appearance.primary);
+    host.style.setProperty("--sf-primary-text", appearance.primaryText);
+    if (appearance.position === "left") {
+      host.classList.add("sf-position-left");
+    }
   }
 
   // Open, not closed (deliberate choice -- see docs/progress/widget.md):
