@@ -570,10 +570,11 @@ async def test_retry_after_is_a_real_countdown_not_the_static_window(_seeded):
 
 
 async def test_options_preflight_is_never_rate_limited(_seeded, monkeypatch):
-    # Folds in Task 1.5.d: confirms the OPTIONS preflight handler (1.4.g)
-    # is untouched by 1.5.c -- it has no rate-limit-checking code at all
-    # (see app/auth/routes.py's session_preflight), so it cannot be blocked
-    # regardless of how exhausted either limiter is.
+    # Folds in Task 1.5.d: confirms the OPTIONS preflight handling (1.4.g,
+    # now app.auth.cors.WidgetCORSMiddleware as of the Step 7 CORS
+    # follow-up) is untouched by 1.5.c -- it has no rate-limit-checking
+    # code at all (no route handler even runs for it), so it cannot be
+    # blocked regardless of how exhausted either limiter is.
     app = _create_app_with_env_override(monkeypatch, SESSION_RATE_LIMIT_PER_IP="1")
     async with await http_client(app) as client:
         await client.post(
