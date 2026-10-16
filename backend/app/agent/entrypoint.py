@@ -120,7 +120,11 @@ class NoResumableInterruptError(Exception):
 
 
 def _build_thread_config(
-    identity: VerifiedIdentity, conversation_id: uuid.UUID, *, quota_exhausted: bool = False
+    identity: VerifiedIdentity,
+    conversation_id: uuid.UUID,
+    *,
+    quota_exhausted: bool = False,
+    support_text: str | None = None,
 ) -> RunnableConfig:
     """The ONE place a LangGraph config dict is ever constructed in this
     codebase -- every public function below routes through this, nothing
@@ -167,6 +171,34 @@ def _build_thread_config(
     never recomputes this (resume_turn()/read_state() don't accept it) --
     quota is only ever relevant to routing a brand NEW turn's input, and
     a resume by definition continues a turn already past that decision.
+
+    Step 6.2: also carries `support_text` -- the tenant's own rendered
+    support-details fallback text (`app.agent.graph.render_support_
+    details_text()`, applied to `tenant.config` by THIS function's own
+    caller, `run_turn()` below, which already has it from `app/chat/
+    routes.py`), read back by the three fallback nodes via `app.agent.
+    context.support_text_from_config()`. Defaults to `None` for the
+    identical "every pre-Step-6.2 caller unaffected" reason as `quota_
+    exhausted` above; also not recomputed on resume, for the same
+    reasoning.
+
+    [SECURITY] Stored wrapped in a single-key dict (`{"text": ...}`),
+    NEVER a bare `str` -- confirmed live, not assumed: `langgraph.
+    checkpoint.base.get_checkpoint_metadata()` copies every
+    `configurable` entry whose value is `str`/`int`/`bool`/`float`
+    into the checkpoint's own PERSISTED metadata (the same mechanism
+    `app/agent/context.py`'s own header comment documents for
+    `tenant_id`) -- `EXCLUDED_METADATA_KEYS` is a fixed library
+    constant this project cannot extend, so a bare `support_text` str
+    would leak a tenant's own email/phone/contact-link into a database
+    column nothing else expects to hold tenant contact PII. A dict
+    value matches neither `isinstance` check, so it is silently
+    skipped by that same function -- confirmed live against the real
+    `get_checkpoint_metadata()`, not merely reasoned about. `quota_
+    exhausted` (a bare `bool`) is NOT similarly guarded and DOES leak
+    into persisted metadata today -- a pre-existing Task 4.3 gap, not
+    introduced here, left unfixed as out of this task's own scope
+    (non-sensitive, a boolean flag) but flagged in the register.
     """
     if not isinstance(identity.tenant_id, uuid.UUID):
         raise ValueError("identity.tenant_id must be a uuid.UUID")
@@ -181,6 +213,9 @@ def _build_thread_config(
             "thread_id": thread_id,
             "tenant_id": identity.tenant_id,
             "quota_exhausted": quota_exhausted,
+            # Wrapped, not a bare str -- see this function's own
+            # docstring for why (checkpoint-metadata leak guard).
+            "support_text": {"text": support_text},
         }
     }
 
@@ -231,6 +266,7 @@ async def run_turn(
     input: Any,  # noqa: A002 (matches astream()'s own `input` parameter name)
     *,
     quota_exhausted: bool = False,
+    support_text: str | None = None,
 ) -> AsyncIterator[Any]:
     """Runs one turn (`graph.astream`), yielding whatever the graph itself
     yields unchanged. `input` is forwarded to `astream()` exactly as
@@ -243,8 +279,15 @@ async def run_turn(
     verdict (`app/chat/routes.py`, which already resolved the tenant's
     plan/usage with a real DB session before calling this) -- forwarded
     straight into `_build_thread_config()`, never computed here.
+
+    Step 6.2: `support_text` is the SAME caller's own rendered support-
+    details fallback text (`app.agent.graph.render_support_details_
+    text()`, applied to the tenant's own `config` dict), forwarded
+    identically.
     """
-    config = _build_thread_config(identity, conversation_id, quota_exhausted=quota_exhausted)
+    config = _build_thread_config(
+        identity, conversation_id, quota_exhausted=quota_exhausted, support_text=support_text
+    )
     async for chunk in graph.astream(input, config, stream_mode=_STREAM_MODE):
         yield chunk
 

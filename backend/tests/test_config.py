@@ -476,3 +476,33 @@ def test_dashboard_field_rejects_zero_and_negative(monkeypatch, env_var, attr, b
     with pytest.raises(ValidationError) as exc_info:
         Settings()
     assert env_var.lower() in str(exc_info.value)
+
+
+# --- Step 6.2: public_api_base_url (the install-snippet screen's own base URL) --
+
+
+def test_public_api_base_url_defaults_to_none(monkeypatch):
+    set_valid_env(monkeypatch, VALID_ENV)
+    assert Settings().public_api_base_url is None
+
+
+def test_public_api_base_url_empty_string_means_unset(monkeypatch):
+    set_valid_env(monkeypatch, VALID_ENV, PUBLIC_API_BASE_URL="")
+    assert Settings().public_api_base_url is None
+
+
+def test_public_api_base_url_accepts_a_real_https_url(monkeypatch):
+    set_valid_env(monkeypatch, VALID_ENV, PUBLIC_API_BASE_URL="https://api.example.com")
+    assert Settings().public_api_base_url == "https://api.example.com"
+
+
+def test_public_api_base_url_rejects_http(monkeypatch):
+    set_valid_env(monkeypatch, VALID_ENV, PUBLIC_API_BASE_URL="http://api.example.com")
+    with pytest.raises(ValidationError):
+        Settings()
+
+
+def test_public_api_base_url_rejects_a_scheme_only_value_with_no_host(monkeypatch):
+    set_valid_env(monkeypatch, VALID_ENV, PUBLIC_API_BASE_URL="https:")
+    with pytest.raises(ValidationError):
+        Settings()

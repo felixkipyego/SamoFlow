@@ -777,6 +777,41 @@ class Settings(BaseSettings):
     # data, like every other estimate in this project.
     dashboard_session_idle_seconds: float = Field(default=1800.0, gt=0)
     dashboard_session_absolute_seconds: float = Field(default=43200.0, gt=0)
+    # Step 6.2: the dashboard's own install-snippet screen needs to show
+    # the tenant a real `data-base-url` value (widget/loader/src/
+    # config.js: "data-base-url has no built-in fallback... a missing
+    # data-base-url is treated as a configuration error" -- deliberately
+    # mandatory on the widget's own side, so the dashboard cannot just
+    # omit it either). This is a PLATFORM-WIDE constant (wherever this
+    # deployment's own API is publicly reachable), not per-tenant, and
+    # no Caddy/public-hosting routing exists yet to derive it from (that
+    # is Phase 7's own job) -- so it is a plain operator-set value, left
+    # unset by default rather than guessed. The install-snippet endpoint
+    # (app/dashboard/tenant_routes.py) returns None when unset and the
+    # screen tells the tenant to ask their platform admin, rather than
+    # ever showing a wrong URL a tenant might paste onto a live site.
+    public_api_base_url: str | None = Field(default=None)
+
+    @field_validator("public_api_base_url", mode="before")
+    @classmethod
+    def _empty_public_api_base_url_means_unset(cls, value: object) -> object:
+        # Same established convention as anthropic_api_key's own before-
+        # validator: an empty string (.env.example's own "not configured
+        # yet" default for this field) means unset, not a validation
+        # error.
+        if value == "":
+            return None
+        return value
+
+    @field_validator("public_api_base_url")
+    @classmethod
+    def _require_https_url_if_set(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        parts = urlsplit(value)
+        if parts.scheme != "https" or not parts.hostname:
+            raise ValueError("PUBLIC_API_BASE_URL must be an https:// URL with a hostname")
+        return value
 
     @field_validator("database_url")
     @classmethod

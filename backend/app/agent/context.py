@@ -92,6 +92,30 @@ def tenant_id_from_config(config: Mapping[str, Any]) -> uuid.UUID:
     return tenant_id
 
 
+def support_text_from_config(config: Mapping[str, Any]) -> str | None:
+    """Step 6.2: the ONE way a graph node may read the tenant's own
+    rendered support-details fallback text out of the LangGraph config.
+    Mirrors `quota_exhausted_from_config()`'s own reasoning exactly:
+    decided BEFORE the graph ever runs, by `app/chat/routes.py`'s
+    request handler (which already fetched `tenant.config` with a real
+    DB session open, for the quota/retention/trace-text checks right
+    next to it) -- a fallback node has no DB session of its own.
+    `None` (not missing/`KeyError`) means "this tenant has no contact
+    method configured yet" -- the caller then falls back to the fixed
+    platform-default text, matching every pre-Step-6.2 caller/test that
+    builds a config without this key at all.
+
+    [SECURITY] Unwraps the single-key `{"text": ...}` dict `app.agent.
+    entrypoint._build_thread_config()` stores this in -- see that
+    function's own docstring for why it is never a bare `str` (a real,
+    confirmed-live checkpoint-metadata PII leak otherwise).
+    """
+    wrapped = config.get("configurable", {}).get("support_text")
+    if wrapped is None:
+        return None
+    return wrapped.get("text")
+
+
 def quota_exhausted_from_config(config: Mapping[str, Any]) -> bool:
     """Task 4.3: the ONE way `route()`'s own `_quota_exhausted()` predicate
     (app/agent/graph.py) may read the pre-computed quota verdict out of

@@ -39,6 +39,18 @@ EXTRA_EXAMPLE_KEYS: tuple[str, ...] = (
     "SMTP_PASSWORD",
     "SMTP_FROM_ADDRESS",
     "UPLOAD_MAX_SIZE_BYTES",
+    # Step 6.2: the original Task 1.5.c §9 marker's own "document these
+    # four optional rate-limit fields in .env.example" -- optional
+    # (each has a default), declared non-empty (their real default
+    # values) so an operator sees both the variable and what it
+    # defaults to, matching the identical shape already established.
+    "SESSION_RATE_LIMIT_PER_SITE_KEY",
+    "SESSION_RATE_LIMIT_PER_SITE_KEY_WINDOW_SECONDS",
+    "SESSION_RATE_LIMIT_PER_IP",
+    "SESSION_RATE_LIMIT_PER_IP_WINDOW_SECONDS",
+    # Step 6.2: the install-snippet screen's own platform-wide base URL --
+    # optional (defaults to None), declared empty like ANTHROPIC_API_KEY.
+    "PUBLIC_API_BASE_URL",
 )
 
 # Step 7.3 prep (ops track): genuinely new deploy/ops-layer configuration

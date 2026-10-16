@@ -7,8 +7,8 @@
 // attaches the CSRF header on every state-changing request (backend/app/
 // dashboard/csrf.py's own double-submit pattern: the __Host-csrf cookie
 // is deliberately NOT HttpOnly specifically so this code can read it).
-const CSRF_COOKIE_NAME = "__Host-csrf";
-const CSRF_HEADER_NAME = "X-CSRF-Token";
+export const CSRF_COOKIE_NAME = "__Host-csrf";
+export const CSRF_HEADER_NAME = "X-CSRF-Token";
 
 export class ApiError extends Error {
   status: number;
@@ -19,7 +19,7 @@ export class ApiError extends Error {
   }
 }
 
-function readCookie(name: string): string | null {
+export function readCookie(name: string): string | null {
   const prefix = `${name}=`;
   for (const part of document.cookie.split("; ")) {
     if (part.startsWith(prefix)) {
@@ -41,7 +41,7 @@ export async function ensureCsrfCookie(): Promise<void> {
   });
 }
 
-async function apiFetch<T>(
+export async function apiFetch<T>(
   path: string,
   options: { method?: string; body?: unknown } = {},
 ): Promise<T> {

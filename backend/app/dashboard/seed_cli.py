@@ -109,8 +109,9 @@ async def seed_owner(
         except exceptions.UserAlreadyExists as exc:
             raise SeedOwnerError(
                 f"a user with email {email!r} already exists; this command does not "
-                "reset an existing password or promote an existing account -- use a "
-                "direct database update for that"
+                "reset an existing password or promote an existing account -- use "
+                "`python -m app.dashboard.admin_cli reset-password` or "
+                "`set-platform-admin`/`unset-platform-admin` for that"
             ) from exc
         except exceptions.InvalidPasswordException as exc:
             raise SeedOwnerError(str(exc.reason)) from exc

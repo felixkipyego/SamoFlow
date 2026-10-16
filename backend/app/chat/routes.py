@@ -68,6 +68,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sse_starlette.sse import EventSourceResponse
 
 from app.agent.entrypoint import read_state, run_turn
+from app.agent.graph import render_support_details_text
 from app.auth.dependencies import VerifiedIdentity, get_current_visitor
 from app.chat.schemas import (
     ChatRequest,
@@ -432,6 +433,7 @@ async def _stream_turn(
     chat_request_timeout_seconds: float,
     quota_exhausted: bool,
     trace_text_enabled: bool,
+    support_text: str | None,
 ) -> AsyncIterator[dict]:
     """The real SSE body. Holds NO database connection of its own for the
     main loop's own duration -- the lease and the idempotency check were
@@ -496,7 +498,12 @@ async def _stream_turn(
             yield _sse_event(
                 event_id,
                 "done",
-                {"message_id": str(uuid.uuid4()), "usage": None, "offer_escalation": False},
+                {
+                    "message_id": str(uuid.uuid4()),
+                    "usage": None,
+                    "offer_escalation": False,
+                    "conversation_id": str(conversation_id),
+                },
             )
             return
 
@@ -513,6 +520,7 @@ async def _stream_turn(
                     conversation_id,
                     graph_input,
                     quota_exhausted=quota_exhausted,
+                    support_text=support_text,
                 ):
                     if mode == "custom":
                         event_id += 1
@@ -594,6 +602,16 @@ async def _stream_turn(
                     else None
                 ),
                 "offer_escalation": last_node in _ESCALATION_OFFERED_NODES,
+                # Step 6.2, additive (Felix's own pre-authorisation,
+                # docs/DECISIONS_REGISTER.md "Backend contract gaps found
+                # by the widget track"): a NEW key on the existing `done`
+                # payload, present on every turn (not only the first) --
+                # the widget's own CURRENT workaround
+                # (ChatController._discoverConversationIdIfUnknown(),
+                # widget/chat/src/chat-controller.js) keeps working
+                # unchanged; it simply has a cheaper, direct way to learn
+                # this value available once it chooses to read it.
+                "conversation_id": str(conversation_id),
             },
         )
     finally:
@@ -694,6 +712,13 @@ async def create_chat_turn(payload: ChatRequest, request: Request) -> Response:
                 tenant.id, plan_limits
             )
 
+            # Step 6.2: the SAME already-fetched `tenant.config` the
+            # retention/trace-text checks right below also read --
+            # rendered here, with the real DB session open, never
+            # inside the graph itself (app.agent.context.support_text_
+            # from_config()'s own docstring has the full reasoning).
+            support_text = render_support_details_text(tenant.config)
+
             # Step 4.5: docs/SPEC.md §13's own per-tenant trace-text
             # switch -- resolved HERE, with the already-open session and
             # the already-fetched `tenant` row, the IDENTICAL "resolve
@@ -758,6 +783,7 @@ async def create_chat_turn(payload: ChatRequest, request: Request) -> Response:
             settings.chat_request_timeout_seconds,
             quota_exhausted,
             trace_text_enabled,
+            support_text,
         ),
         ping=15,
         headers={

@@ -58,7 +58,10 @@ from app.agent.graph import build_graph
 from app.auth.routes import router as auth_router
 from app.chat.routes import router as chat_router
 from app.config import Settings, get_settings
+from app.dashboard.escalation_routes import router as dashboard_escalation_router
 from app.dashboard.routes import router as dashboard_router
+from app.dashboard.source_routes import router as dashboard_source_router
+from app.dashboard.tenant_routes import router as dashboard_tenant_router
 from app.db import _session_factory, get_engine
 from app.handoff.routes import router as handoff_router
 from app.health import router as health_router
@@ -303,5 +306,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(chat_router)
     app.include_router(handoff_router)
     app.include_router(dashboard_router)
+    app.include_router(dashboard_tenant_router)
+    app.include_router(dashboard_source_router)
+    app.include_router(dashboard_escalation_router)
     app.include_router(admin_router)
     return app

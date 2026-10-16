@@ -144,6 +144,44 @@ async def test_tenant_id_is_never_persisted_in_checkpoint_metadata(monkeypatch):
     assert "tenant_id" not in row[0]
 
 
+async def test_support_text_is_never_persisted_in_checkpoint_metadata(monkeypatch):
+    # Step 6.2: the identical live finding/regression guard as the
+    # tenant_id test directly above, for a NEW, higher-stakes value --
+    # support_text can carry a tenant's own real email/phone/contact
+    # link. _build_thread_config() wraps it in {"text": ...} for
+    # exactly this reason (a bare str would NOT be skipped by
+    # get_checkpoint_metadata()'s own filter, confirmed live separately
+    # -- see that function's own docstring).
+    graph = await _fresh_graph(monkeypatch)
+    identity = _identity()
+    conversation_id = uuid.uuid4()
+
+    await _collect(
+        run_turn(
+            graph,
+            identity,
+            conversation_id,
+            {"messages": ["hi"]},
+            support_text="Email a-real-tenant-contact@example.com for help.",
+        )
+    )
+
+    expected_thread_id = f"{identity.tenant_id}:{identity.vid}:{conversation_id}"
+    conninfo = checkpointer.checkpointer_conninfo()
+    async with await psycopg.AsyncConnection.connect(conninfo, autocommit=True) as conn:
+        row = await (
+            await conn.execute(
+                "SELECT metadata FROM checkpoints WHERE thread_id = %s "
+                "ORDER BY checkpoint_id DESC LIMIT 1",
+                (expected_thread_id,),
+            )
+        ).fetchone()
+
+    assert row is not None
+    assert "support_text" not in row[0]
+    assert "a-real-tenant-contact@example.com" not in str(row[0])
+
+
 # --- (b) two visitors, same tenant, same conversation_id -> separate threads
 
 

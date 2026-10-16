@@ -104,13 +104,13 @@ class UserManager(UUIDIDMixin, BaseUserManager[User, uuid.UUID]):
         # hashing) -- "password" here means a new password was requested,
         # not that `hashed_password` already changed.
         #
-        # Does NOT close seed_cli.py's own named gap ("a user with email
-        # ... already exists; this command does not reset an existing
-        # password... use a direct database update for that") -- a
-        # hand-edited database row never calls update() at all, so no
-        # amount of code here can enforce this invariant for that
-        # specific documented workaround; flagged plainly, not silently
-        # assumed solved.
+        # RESOLVED at Step 6.2 (2026-10-15): the gap this comment used to
+        # name ("seed_cli.py's own 'use a direct database update for
+        # that' workaround never calls update()") is closed -- real
+        # `reset-password`/`set-platform-admin`/`unset-platform-admin`
+        # commands now exist (app/dashboard/admin_cli.py), each built on
+        # `UserManager.update()` specifically, and seed_cli.py's own
+        # error message points at them instead of a database workaround.
         if "password" in update_dict or "is_superuser" in update_dict:
             await invalidate_all_sessions_for_user(self.user_db.session, user.id)
 

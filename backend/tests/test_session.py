@@ -372,6 +372,10 @@ async def test_success_response_never_leaks_private_tenant_config_fields(_seeded
         "logo_url": "https://cdn.example/logo.png",
         "position": "right",
         "privacy_notice_url": "https://acme.example/privacy",
+        # Step 6.2, additive: no verified domain exists for this
+        # fixture's own tenant, so the new key is present but empty --
+        # proves the field is always included, not only when non-empty.
+        "verified_domains": [],
     }
     assert "escalation_email" not in body["widget_config"]
     assert "relevance_threshold" not in body["widget_config"]
@@ -629,3 +633,43 @@ def test_site_key_rate_limit_key_encoding_prevents_the_collision_it_was_designed
     real_a = _site_key_rate_limit_key(*pair_a)
     real_b = _site_key_rate_limit_key(*pair_b)
     assert real_a != real_b
+
+
+async def test_session_response_includes_verified_domains_but_not_revoked_ones(_seeded):
+    # Step 6.2, additive contract change: `widget_config.verified_domains`
+    # must reflect ONLY domains with status="verified" -- never a
+    # "pending" or "revoked" one, which would let the widget's own future
+    # link-allowlisting feature trust a domain that was never (or no
+    # longer) actually verified.
+    from app.ingest.models import VerifiedDomain
+
+    async with db_session() as session:
+        session.add_all(
+            [
+                VerifiedDomain(
+                    tenant_id=_seeded["ids"]["tenant_active"],
+                    domain="verified.example.com",
+                    method="dns",
+                    status="verified",
+                    verification_token="tok-verified",  # noqa: S106 (test fixture value)
+                ),
+                VerifiedDomain(
+                    tenant_id=_seeded["ids"]["tenant_active"],
+                    domain="revoked.example.com",
+                    method="dns",
+                    status="revoked",
+                    verification_token="tok-revoked",  # noqa: S106 (test fixture value)
+                ),
+            ]
+        )
+        await session.commit()
+
+    app = create_app()
+    async with await http_client(app) as client:
+        response = await client.post(
+            "/api/v1/session",
+            json={"site_key": "pk_live_live_key"},
+            headers={"Origin": ALLOWED_ORIGIN},
+        )
+    assert response.status_code == 200
+    assert response.json()["widget_config"]["verified_domains"] == ["verified.example.com"]

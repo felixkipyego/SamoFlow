@@ -33,6 +33,7 @@ from pathlib import Path
 
 import httpx
 from qdrant_client import AsyncQdrantClient
+from sqlalchemy import delete as sa_delete
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -50,11 +51,13 @@ from app.ingest.models import (
     REFRESH_INTERVAL_DELTAS,
     AuditLog,
     DbConnection,
+    Document,
     Job,
     Source,
     VerifiedDomain,
 )
 from app.ingest.qdrant_writer import (
+    delete_points_for_document,
     delete_points_for_source,
     hide_points_for_source,
     unhide_points_for_source,
@@ -716,6 +719,24 @@ class IngestRepository:
         await self.session.flush()
         return source
 
+    async def list_sources(self) -> list[Source]:
+        """Step 6.3: the dashboard's own sources table. No arguments
+        beyond self -- tenant scoping is automatic, matching
+        TenantScopedRepository.list_site_keys()'s own established shape.
+        """
+        result = await self.session.execute(
+            select(Source).where(Source.tenant_id == self.tenant_id)
+        )
+        return list(result.scalars().all())
+
+    async def get_source(self, source_id: uuid.UUID) -> Source:
+        """Step 6.3: a public name for `_get_owned_source()` below, for
+        callers outside this module (app/dashboard/source_routes.py)
+        that need the identical "exists and belongs to this tenant, or
+        raise UnknownSourceError" lookup without reaching into a
+        private method."""
+        return await self._get_owned_source(source_id)
+
     async def _get_owned_source(self, source_id: uuid.UUID) -> Source:
         # Shared by update_source()/disable_source() below -- the one real
         # place both look up a source scoped to this repository's own
@@ -739,6 +760,8 @@ class IngestRepository:
         *,
         config: dict | None = None,
         refresh_interval: str | None = None,
+        client: AsyncQdrantClient | None = None,
+        collection_name: str | None = None,
     ) -> Source:
         """Task 2.9.b. `config`/`refresh_interval` are both optional and
         independently applied -- `None` means "leave unchanged," matching
@@ -759,12 +782,53 @@ class IngestRepository:
         `source.refresh_interval`, so a rejected update leaves the
         already-persistent row completely untouched (no dirty attribute to
         roll back).
+
+        Step 6.3 fix: for a `urls`-type source, a `config` update that
+        DROPS one or more URLs from `config["urls"]` used to leave that
+        URL's own `Document` row and Qdrant points behind indefinitely --
+        the exact sibling gap `crawl`'s own `_cleanup_stale_crawl_
+        documents()` already closes for crawled pages, confirmed missing
+        here by reading this method's own prior body directly (a bare
+        `source.config = config` with no cleanup at all). `client`/
+        `collection_name` are therefore now required whenever `config` is
+        provided for a `urls` source (the caller, app/dashboard/
+        source_routes.py, always has both in hand) -- optional only so
+        every OTHER call shape (refresh_interval-only updates; config
+        updates for `crawl`/`upload` sources, which do not use a flat
+        `urls` list the same way) keeps working unchanged.
         """
         source = await self._get_owned_source(source_id)
         if refresh_interval is not None:
             _validate_refresh_interval(refresh_interval)
             source.refresh_interval = refresh_interval
         if config is not None:
+            if source.type == "urls" and client is not None and collection_name is not None:
+                old_urls = set(source.config.get("urls", []))
+                new_urls = set(config.get("urls", []))
+                removed = old_urls - new_urls
+                if removed:
+                    stale_doc_ids = (
+                        (
+                            await self.session.execute(
+                                select(Document.id).where(
+                                    Document.source_id == source.id, Document.url.in_(removed)
+                                )
+                            )
+                        )
+                        .scalars()
+                        .all()
+                    )
+                    for document_id in stale_doc_ids:
+                        await delete_points_for_document(
+                            client,
+                            collection_name,
+                            tenant_id=self.tenant_id,
+                            document_id=document_id,
+                        )
+                    if stale_doc_ids:
+                        await self.session.execute(
+                            sa_delete(Document).where(Document.id.in_(stale_doc_ids))
+                        )
             source.config = config
         await self.session.flush()
         return source
@@ -933,11 +997,39 @@ class IngestRepository:
             for entry in uploads:
                 upload_storage.delete(uuid.UUID(entry["upload_id"]), storage_dir=storage_dir)
             upload_count = len(uploads)
+        # Felix decision B (D-pilot-dbconn-cleanup, PROJECT_SPEC.md §5
+        # "Felix's decisions, ratified (2026-10-15)"): a deleted `database`
+        # source's own referenced `db_connections` row is cleaned up too --
+        # but only after confirming no OTHER source still references the
+        # same connection (the schema does not enforce one connection per
+        # source, confirmed by reading DbConnection's own model directly).
+        db_connection_id_raw = (
+            source.config.get("db_connection_id") if source.type == "database" else None
+        )
         await delete_points_for_source(
             client, collection_name, tenant_id=self.tenant_id, source_id=source.id
         )
         await self.session.delete(source)
         await self.session.flush()
+        if db_connection_id_raw is not None:
+            db_connection_id = uuid.UUID(db_connection_id_raw)
+            still_referenced = (
+                await self.session.execute(
+                    select(Source.id).where(
+                        Source.tenant_id == self.tenant_id,
+                        Source.type == "database",
+                        Source.config["db_connection_id"].astext == str(db_connection_id),
+                    )
+                )
+            ).scalar_one_or_none()
+            if still_referenced is None:
+                await self.session.execute(
+                    sa_delete(DbConnection).where(
+                        DbConnection.id == db_connection_id,
+                        DbConnection.tenant_id == self.tenant_id,
+                    )
+                )
+                await self.session.flush()
         logger.info(
             "delete_source: tenant %s source %s deleted (type=%s, %d upload file(s) removed)",
             self.tenant_id,

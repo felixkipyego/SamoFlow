@@ -57,6 +57,7 @@ from app.auth.schemas import SessionRequest, SessionResponse
 from app.auth.secrets import generate_visitor_secret, hash_visitor_secret
 from app.auth.tokens import encode_session_token
 from app.db import get_db_session
+from app.ingest.repository import IngestRepository
 from app.ratelimit import RateLimiter
 from app.request_limits import get_or_create_limiter
 from app.tenancy.repository import TenantScopedRepository, get_site_key_by_key
@@ -81,11 +82,10 @@ _RATE_LIMITED_STATUS = 429
 # PRIVATE fields (escalation_email, relevance_threshold, support details,
 # retention_days, trace_text_enabled -- docs/SPEC.md §4.1's own data-model
 # table) that must never reach this response.
-# ASSUMPTION: docs/SPEC.md names these fields by description, not by a
-# fixed JSON key -- no prior task defines tenants.config's actual key
-# names (the dashboard, which will actually write them, is a later phase),
-# so these six key names are this task's own choice, not a spec-mandated
-# schema.
+# VERIFIED at Step 5.1 Part C (2026-10-15): the widget track, the first
+# real consumer, confirmed these six key names are exactly what Step 5.2
+# needs -- see app/auth/schemas.py's own SessionResponse for the full
+# verification note (rule 10, "verify then remove ASSUMPTION").
 _PUBLIC_WIDGET_CONFIG_FIELDS = (
     "title",
     "greeting",
@@ -96,11 +96,21 @@ _PUBLIC_WIDGET_CONFIG_FIELDS = (
 )
 
 
-def _public_widget_config(config: dict) -> dict:
+def _public_widget_config(config: dict, verified_domains: list[str]) -> dict:
     # Picks named keys one at a time -- never spreads/passes through the
     # raw dict -- so a private key structurally cannot leak here regardless
     # of what tenant.config actually holds.
-    return {field: config[field] for field in _PUBLIC_WIDGET_CONFIG_FIELDS if field in config}
+    #
+    # Step 6.2, additive (Felix's own pre-authorisation, docs/DECISIONS_
+    # REGISTER.md "Backend contract gaps found by the widget track"):
+    # `verified_domains` is a NEW key alongside the existing six, never a
+    # replacement -- the widget's own renderer (Step 5.2) already works
+    # safely without it (citation-only linking) and can widen to also
+    # allow these domains once it chooses to read this new key; this
+    # response change needs no coordinated widget-side deploy.
+    public = {field: config[field] for field in _PUBLIC_WIDGET_CONFIG_FIELDS if field in config}
+    public["verified_domains"] = verified_domains
+    return public
 
 
 def _failure_response() -> JSONResponse:
@@ -249,13 +259,19 @@ async def create_session(
         )
 
     token = encode_session_token(tenant_id=site_key.tenant_id, vid=visitor.vid, origin=origin)
+
+    ingest_repo = IngestRepository(tenant_id=site_key.tenant_id, session=session)
+    verified_domains = [
+        domain.domain for domain in await ingest_repo.list_domains() if domain.status == "verified"
+    ]
+
     await session.commit()
 
     body = SessionResponse(
         session_token=token,
         visitor_secret=new_secret,
         test_mode=test_mode,
-        widget_config=_public_widget_config(tenant.config),
+        widget_config=_public_widget_config(tenant.config, verified_domains),
     )
     return JSONResponse(
         status_code=200,

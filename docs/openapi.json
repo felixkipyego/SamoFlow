@@ -1,6 +1,69 @@
 {
   "components": {
     "schemas": {
+      "AlertEmailsUpdate": {
+        "additionalProperties": false,
+        "properties": {
+          "alert_email": {
+            "anyOf": [
+              {
+                "format": "email",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Alert Email"
+          },
+          "escalation_email": {
+            "anyOf": [
+              {
+                "format": "email",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Escalation Email"
+          }
+        },
+        "title": "AlertEmailsUpdate",
+        "type": "object"
+      },
+      "AllowedOriginsUpdate": {
+        "additionalProperties": false,
+        "properties": {
+          "allowed_origins": {
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 20,
+            "title": "Allowed Origins",
+            "type": "array"
+          }
+        },
+        "required": [
+          "allowed_origins"
+        ],
+        "title": "AllowedOriginsUpdate",
+        "type": "object"
+      },
+      "Body_upload_source_api_v1_dashboard_sources_upload_post": {
+        "properties": {
+          "file": {
+            "contentMediaType": "application/octet-stream",
+            "title": "File",
+            "type": "string"
+          }
+        },
+        "required": [
+          "file"
+        ],
+        "title": "Body_upload_source_api_v1_dashboard_sources_upload_post",
+        "type": "object"
+      },
       "ChatRequest": {
         "additionalProperties": false,
         "properties": {
@@ -32,6 +95,30 @@
           "client_message_id"
         ],
         "title": "ChatRequest",
+        "type": "object"
+      },
+      "ClaimDomainRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "domain": {
+            "title": "Domain",
+            "type": "string"
+          },
+          "method": {
+            "default": "dns",
+            "enum": [
+              "dns",
+              "file",
+              "meta_tag"
+            ],
+            "title": "Method",
+            "type": "string"
+          }
+        },
+        "required": [
+          "domain"
+        ],
+        "title": "ClaimDomainRequest",
         "type": "object"
       },
       "ConversationListResponse": {
@@ -122,6 +209,61 @@
         "title": "ConversationSummary",
         "type": "object"
       },
+      "CreateCrawlSourceRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "refresh_interval": {
+            "default": "daily",
+            "title": "Refresh Interval",
+            "type": "string"
+          },
+          "seed_url": {
+            "title": "Seed Url",
+            "type": "string"
+          },
+          "type": {
+            "const": "crawl",
+            "title": "Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "seed_url"
+        ],
+        "title": "CreateCrawlSourceRequest",
+        "type": "object"
+      },
+      "CreateUrlsSourceRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "refresh_interval": {
+            "default": "daily",
+            "title": "Refresh Interval",
+            "type": "string"
+          },
+          "type": {
+            "const": "urls",
+            "title": "Type",
+            "type": "string"
+          },
+          "urls": {
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 200,
+            "minItems": 1,
+            "title": "Urls",
+            "type": "array"
+          }
+        },
+        "required": [
+          "type",
+          "urls"
+        ],
+        "title": "CreateUrlsSourceRequest",
+        "type": "object"
+      },
       "DashboardSessionResponse": {
         "properties": {
           "tenant": {
@@ -174,6 +316,132 @@
           "email"
         ],
         "title": "DashboardUser",
+        "type": "object"
+      },
+      "DomainResponse": {
+        "properties": {
+          "domain": {
+            "title": "Domain",
+            "type": "string"
+          },
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
+          "method": {
+            "title": "Method",
+            "type": "string"
+          },
+          "revoked_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Revoked At"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "verification_token": {
+            "title": "Verification Token",
+            "type": "string"
+          },
+          "verified_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Verified At"
+          }
+        },
+        "required": [
+          "id",
+          "domain",
+          "method",
+          "status",
+          "verification_token",
+          "verified_at",
+          "revoked_at"
+        ],
+        "title": "DomainResponse",
+        "type": "object"
+      },
+      "EscalationDetailResponse": {
+        "properties": {
+          "contact_email": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Contact Email"
+          },
+          "contact_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Contact Name"
+          },
+          "contact_phone": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Contact Phone"
+          },
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "transcript": {
+            "title": "Transcript",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "status",
+          "contact_name",
+          "contact_email",
+          "contact_phone",
+          "created_at",
+          "transcript"
+        ],
+        "title": "EscalationDetailResponse",
         "type": "object"
       },
       "EscalationRequest": {
@@ -238,6 +506,116 @@
         "title": "EscalationResponse",
         "type": "object"
       },
+      "EscalationSummaryResponse": {
+        "properties": {
+          "contact_email": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Contact Email"
+          },
+          "contact_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Contact Name"
+          },
+          "contact_phone": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Contact Phone"
+          },
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "status",
+          "contact_name",
+          "contact_email",
+          "contact_phone",
+          "created_at"
+        ],
+        "title": "EscalationSummaryResponse",
+        "type": "object"
+      },
+      "EscalationsListResponse": {
+        "properties": {
+          "escalations": {
+            "items": {
+              "$ref": "#/components/schemas/EscalationSummaryResponse"
+            },
+            "title": "Escalations",
+            "type": "array"
+          }
+        },
+        "required": [
+          "escalations"
+        ],
+        "title": "EscalationsListResponse",
+        "type": "object"
+      },
+      "GoLiveCheckResponse": {
+        "properties": {
+          "has_allowed_origin": {
+            "title": "Has Allowed Origin",
+            "type": "boolean"
+          },
+          "has_contact_method": {
+            "title": "Has Contact Method",
+            "type": "boolean"
+          },
+          "has_enabled_source": {
+            "title": "Has Enabled Source",
+            "type": "boolean"
+          },
+          "has_verified_domain": {
+            "title": "Has Verified Domain",
+            "type": "boolean"
+          },
+          "ready_for_go_live": {
+            "title": "Ready For Go Live",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "has_contact_method",
+          "has_allowed_origin",
+          "has_verified_domain",
+          "has_enabled_source",
+          "ready_for_go_live"
+        ],
+        "title": "GoLiveCheckResponse",
+        "type": "object"
+      },
       "HTTPValidationError": {
         "properties": {
           "detail": {
@@ -249,6 +627,31 @@
           }
         },
         "title": "HTTPValidationError",
+        "type": "object"
+      },
+      "InstallSnippetResponse": {
+        "properties": {
+          "base_url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Base Url"
+          },
+          "site_key": {
+            "title": "Site Key",
+            "type": "string"
+          }
+        },
+        "required": [
+          "site_key",
+          "base_url"
+        ],
+        "title": "InstallSnippetResponse",
         "type": "object"
       },
       "LoginRequest": {
@@ -268,6 +671,42 @@
           "password"
         ],
         "title": "LoginRequest",
+        "type": "object"
+      },
+      "OpenEscalationCountResponse": {
+        "properties": {
+          "count": {
+            "title": "Count",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "count"
+        ],
+        "title": "OpenEscalationCountResponse",
+        "type": "object"
+      },
+      "RetentionUpdate": {
+        "additionalProperties": false,
+        "properties": {
+          "escalation_retention_months": {
+            "maximum": 24.0,
+            "minimum": 1.0,
+            "title": "Escalation Retention Months",
+            "type": "integer"
+          },
+          "retention_days": {
+            "maximum": 90.0,
+            "minimum": 1.0,
+            "title": "Retention Days",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "retention_days",
+          "escalation_retention_months"
+        ],
+        "title": "RetentionUpdate",
         "type": "object"
       },
       "SessionRequest": {
@@ -331,6 +770,499 @@
         "title": "SessionResponse",
         "type": "object"
       },
+      "SiteKeyResponse": {
+        "properties": {
+          "allowed_origins": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Allowed Origins",
+            "type": "array"
+          },
+          "environment": {
+            "title": "Environment",
+            "type": "string"
+          },
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
+          "key": {
+            "title": "Key",
+            "type": "string"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "key",
+          "allowed_origins",
+          "environment",
+          "status"
+        ],
+        "title": "SiteKeyResponse",
+        "type": "object"
+      },
+      "SourceResponse": {
+        "properties": {
+          "config": {
+            "additionalProperties": true,
+            "title": "Config",
+            "type": "object"
+          },
+          "document_count": {
+            "title": "Document Count",
+            "type": "integer"
+          },
+          "enabled": {
+            "title": "Enabled",
+            "type": "boolean"
+          },
+          "exceeds_plan": {
+            "title": "Exceeds Plan",
+            "type": "boolean"
+          },
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
+          "last_run_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Run At"
+          },
+          "may_need_javascript": {
+            "title": "May Need Javascript",
+            "type": "boolean"
+          },
+          "next_run_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Next Run At"
+          },
+          "refresh_interval": {
+            "title": "Refresh Interval",
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "ok",
+              "syncing",
+              "error",
+              "disabled"
+            ],
+            "title": "Status",
+            "type": "string"
+          },
+          "type": {
+            "title": "Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "type",
+          "status",
+          "enabled",
+          "refresh_interval",
+          "last_run_at",
+          "next_run_at",
+          "exceeds_plan",
+          "document_count",
+          "may_need_javascript",
+          "config"
+        ],
+        "title": "SourceResponse",
+        "type": "object"
+      },
+      "SourcesListResponse": {
+        "properties": {
+          "sources": {
+            "items": {
+              "$ref": "#/components/schemas/SourceResponse"
+            },
+            "title": "Sources",
+            "type": "array"
+          },
+          "total_indexed_pages": {
+            "title": "Total Indexed Pages",
+            "type": "integer"
+          },
+          "total_indexed_pages_limit": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Total Indexed Pages Limit"
+          }
+        },
+        "required": [
+          "sources",
+          "total_indexed_pages",
+          "total_indexed_pages_limit"
+        ],
+        "title": "SourcesListResponse",
+        "type": "object"
+      },
+      "SupportDetailsUpdate": {
+        "additionalProperties": false,
+        "properties": {
+          "support_contact_link": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Support Contact Link"
+          },
+          "support_email": {
+            "anyOf": [
+              {
+                "format": "email",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Support Email"
+          },
+          "support_hours": {
+            "anyOf": [
+              {
+                "maxLength": 200,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Support Hours"
+          },
+          "support_message": {
+            "anyOf": [
+              {
+                "maxLength": 1000,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Support Message"
+          },
+          "support_phone": {
+            "anyOf": [
+              {
+                "maxLength": 40,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Support Phone"
+          }
+        },
+        "title": "SupportDetailsUpdate",
+        "type": "object"
+      },
+      "TenantConfigResponse": {
+        "properties": {
+          "alert_email": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Alert Email"
+          },
+          "colors": {
+            "additionalProperties": true,
+            "title": "Colors",
+            "type": "object"
+          },
+          "escalation_email": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Escalation Email"
+          },
+          "escalation_retention_months": {
+            "title": "Escalation Retention Months",
+            "type": "integer"
+          },
+          "greeting": {
+            "title": "Greeting",
+            "type": "string"
+          },
+          "logo_url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Logo Url"
+          },
+          "position": {
+            "title": "Position",
+            "type": "string"
+          },
+          "privacy_notice_url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Privacy Notice Url"
+          },
+          "retention_days": {
+            "title": "Retention Days",
+            "type": "integer"
+          },
+          "support_contact_link": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Support Contact Link"
+          },
+          "support_email": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Support Email"
+          },
+          "support_hours": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Support Hours"
+          },
+          "support_message": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Support Message"
+          },
+          "support_phone": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Support Phone"
+          },
+          "title": {
+            "title": "Title",
+            "type": "string"
+          },
+          "trace_text_enabled": {
+            "title": "Trace Text Enabled",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "support_email",
+          "support_phone",
+          "support_contact_link",
+          "support_hours",
+          "support_message",
+          "alert_email",
+          "escalation_email",
+          "title",
+          "greeting",
+          "colors",
+          "logo_url",
+          "position",
+          "privacy_notice_url",
+          "retention_days",
+          "escalation_retention_months",
+          "trace_text_enabled"
+        ],
+        "title": "TenantConfigResponse",
+        "type": "object"
+      },
+      "TraceTextUpdate": {
+        "additionalProperties": false,
+        "properties": {
+          "trace_text_enabled": {
+            "title": "Trace Text Enabled",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "trace_text_enabled"
+        ],
+        "title": "TraceTextUpdate",
+        "type": "object"
+      },
+      "UpdateEscalationStatusRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "status": {
+            "enum": [
+              "seen",
+              "resolved"
+            ],
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "status"
+        ],
+        "title": "UpdateEscalationStatusRequest",
+        "type": "object"
+      },
+      "UpdateUrlsSourceRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "refresh_interval": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Refresh Interval"
+          },
+          "urls": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "maxItems": 200,
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Urls"
+          }
+        },
+        "title": "UpdateUrlsSourceRequest",
+        "type": "object"
+      },
+      "UsageResponse": {
+        "properties": {
+          "fraction_used": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Fraction Used"
+          },
+          "plan_assigned": {
+            "title": "Plan Assigned",
+            "type": "boolean"
+          },
+          "quota": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Quota"
+          },
+          "state": {
+            "enum": [
+              "no_plan",
+              "normal",
+              "warning",
+              "exceeded"
+            ],
+            "title": "State",
+            "type": "string"
+          },
+          "used_this_month": {
+            "title": "Used This Month",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "plan_assigned",
+          "quota",
+          "used_this_month",
+          "fraction_used",
+          "state"
+        ],
+        "title": "UsageResponse",
+        "type": "object"
+      },
       "ValidationError": {
         "properties": {
           "ctx": {
@@ -369,6 +1301,78 @@
           "type"
         ],
         "title": "ValidationError",
+        "type": "object"
+      },
+      "WidgetColors": {
+        "additionalProperties": false,
+        "properties": {
+          "primary": {
+            "title": "Primary",
+            "type": "string"
+          }
+        },
+        "required": [
+          "primary"
+        ],
+        "title": "WidgetColors",
+        "type": "object"
+      },
+      "WidgetLookUpdate": {
+        "additionalProperties": false,
+        "properties": {
+          "colors": {
+            "$ref": "#/components/schemas/WidgetColors"
+          },
+          "greeting": {
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Greeting",
+            "type": "string"
+          },
+          "logo_url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Logo Url"
+          },
+          "position": {
+            "enum": [
+              "left",
+              "right"
+            ],
+            "title": "Position",
+            "type": "string"
+          },
+          "privacy_notice_url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Privacy Notice Url"
+          },
+          "title": {
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Title",
+            "type": "string"
+          }
+        },
+        "required": [
+          "title",
+          "greeting",
+          "colors",
+          "position"
+        ],
+        "title": "WidgetLookUpdate",
         "type": "object"
       }
     },
@@ -690,6 +1694,1092 @@
           }
         ],
         "summary": "Me"
+      }
+    },
+    "/api/v1/dashboard/domains": {
+      "get": {
+        "operationId": "list_domains_api_v1_dashboard_domains_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/DomainResponse"
+                  },
+                  "title": "Response List Domains Api V1 Dashboard Domains Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "security": [
+          {
+            "APIKeyCookie": []
+          }
+        ],
+        "summary": "List Domains"
+      },
+      "post": {
+        "operationId": "claim_domain_api_v1_dashboard_domains_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ClaimDomainRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DomainResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "APIKeyCookie": []
+          }
+        ],
+        "summary": "Claim Domain"
+      }
+    },
+    "/api/v1/dashboard/domains/{domain_id}/verify": {
+      "post": {
+        "operationId": "verify_domain_api_v1_dashboard_domains__domain_id__verify_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "domain_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Domain Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DomainResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "APIKeyCookie": []
+          }
+        ],
+        "summary": "Verify Domain"
+      }
+    },
+    "/api/v1/dashboard/escalations": {
+      "get": {
+        "operationId": "list_escalations_api_v1_dashboard_escalations_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EscalationsListResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "security": [
+          {
+            "APIKeyCookie": []
+          }
+        ],
+        "summary": "List Escalations"
+      }
+    },
+    "/api/v1/dashboard/escalations/open-count": {
+      "get": {
+        "operationId": "get_open_escalation_count_api_v1_dashboard_escalations_open_count_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OpenEscalationCountResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "security": [
+          {
+            "APIKeyCookie": []
+          }
+        ],
+        "summary": "Get Open Escalation Count"
+      }
+    },
+    "/api/v1/dashboard/escalations/{escalation_id}": {
+      "delete": {
+        "operationId": "delete_escalation_api_v1_dashboard_escalations__escalation_id__delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "escalation_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Escalation Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "APIKeyCookie": []
+          }
+        ],
+        "summary": "Delete Escalation"
+      },
+      "get": {
+        "operationId": "get_escalation_api_v1_dashboard_escalations__escalation_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "escalation_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Escalation Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EscalationDetailResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "APIKeyCookie": []
+          }
+        ],
+        "summary": "Get Escalation"
+      }
+    },
+    "/api/v1/dashboard/escalations/{escalation_id}/status": {
+      "patch": {
+        "operationId": "update_escalation_status_api_v1_dashboard_escalations__escalation_id__status_patch",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "escalation_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Escalation Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateEscalationStatusRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EscalationSummaryResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "APIKeyCookie": []
+          }
+        ],
+        "summary": "Update Escalation Status"
+      }
+    },
+    "/api/v1/dashboard/sources": {
+      "get": {
+        "operationId": "list_sources_api_v1_dashboard_sources_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SourcesListResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "security": [
+          {
+            "APIKeyCookie": []
+          }
+        ],
+        "summary": "List Sources"
+      },
+      "post": {
+        "operationId": "create_source_api_v1_dashboard_sources_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/CreateUrlsSourceRequest"
+                  },
+                  {
+                    "$ref": "#/components/schemas/CreateCrawlSourceRequest"
+                  }
+                ],
+                "title": "Payload"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SourceResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "APIKeyCookie": []
+          }
+        ],
+        "summary": "Create Source"
+      }
+    },
+    "/api/v1/dashboard/sources/database": {
+      "post": {
+        "operationId": "create_database_source_rejected_api_v1_dashboard_sources_database_post",
+        "responses": {
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Create Database Source Rejected Api V1 Dashboard Sources Database Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Create Database Source Rejected"
+      }
+    },
+    "/api/v1/dashboard/sources/upload": {
+      "post": {
+        "description": "Step 6.3 [SECURITY]. `upload_id` is generated here and looked up\nONLY through this tenant's own source (via `get_source()`, never a\nclient-supplied storage id); the size cap is enforced WHILE\nSTREAMING (`save_streaming()`, never buffering the whole body\nfirst); the existing `sniff_file_type()` is reused, against the\nbytes actually written to disk, never the client's own Content-Type\nheader or filename extension; the filename is never used as a path\n(`save_streaming()` structurally cannot accept one); and a re-upload\nunder the same `original_filename` deletes the PREVIOUS upload_id's\nown on-disk bytes before adopting the new one.",
+        "operationId": "upload_source_api_v1_dashboard_sources_upload_post",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "source_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Source Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_upload_source_api_v1_dashboard_sources_upload_post"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SourceResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "APIKeyCookie": []
+          }
+        ],
+        "summary": "Upload Source"
+      }
+    },
+    "/api/v1/dashboard/sources/{source_id}": {
+      "delete": {
+        "operationId": "delete_source_api_v1_dashboard_sources__source_id__delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "source_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Source Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "APIKeyCookie": []
+          }
+        ],
+        "summary": "Delete Source"
+      },
+      "patch": {
+        "operationId": "update_source_api_v1_dashboard_sources__source_id__patch",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "source_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Source Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateUrlsSourceRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SourceResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "APIKeyCookie": []
+          }
+        ],
+        "summary": "Update Source"
+      }
+    },
+    "/api/v1/dashboard/sources/{source_id}/disable": {
+      "post": {
+        "operationId": "disable_source_api_v1_dashboard_sources__source_id__disable_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "source_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Source Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SourceResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "APIKeyCookie": []
+          }
+        ],
+        "summary": "Disable Source"
+      }
+    },
+    "/api/v1/dashboard/sources/{source_id}/enable": {
+      "post": {
+        "operationId": "enable_source_api_v1_dashboard_sources__source_id__enable_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "source_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Source Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SourceResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "APIKeyCookie": []
+          }
+        ],
+        "summary": "Enable Source"
+      }
+    },
+    "/api/v1/dashboard/sources/{source_id}/refresh-now": {
+      "post": {
+        "operationId": "refresh_source_now_api_v1_dashboard_sources__source_id__refresh_now_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "source_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Source Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SourceResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "APIKeyCookie": []
+          }
+        ],
+        "summary": "Refresh Source Now"
+      }
+    },
+    "/api/v1/dashboard/tenant": {
+      "get": {
+        "operationId": "get_tenant_config_api_v1_dashboard_tenant_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TenantConfigResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "security": [
+          {
+            "APIKeyCookie": []
+          }
+        ],
+        "summary": "Get Tenant Config"
+      }
+    },
+    "/api/v1/dashboard/tenant/alert-emails": {
+      "patch": {
+        "operationId": "update_alert_emails_api_v1_dashboard_tenant_alert_emails_patch",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AlertEmailsUpdate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TenantConfigResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "APIKeyCookie": []
+          }
+        ],
+        "summary": "Update Alert Emails"
+      }
+    },
+    "/api/v1/dashboard/tenant/go-live-check": {
+      "get": {
+        "operationId": "get_go_live_check_api_v1_dashboard_tenant_go_live_check_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GoLiveCheckResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "security": [
+          {
+            "APIKeyCookie": []
+          }
+        ],
+        "summary": "Get Go Live Check"
+      }
+    },
+    "/api/v1/dashboard/tenant/install-snippet": {
+      "get": {
+        "operationId": "get_install_snippet_api_v1_dashboard_tenant_install_snippet_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InstallSnippetResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "security": [
+          {
+            "APIKeyCookie": []
+          }
+        ],
+        "summary": "Get Install Snippet"
+      }
+    },
+    "/api/v1/dashboard/tenant/retention": {
+      "patch": {
+        "operationId": "update_retention_api_v1_dashboard_tenant_retention_patch",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RetentionUpdate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TenantConfigResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "APIKeyCookie": []
+          }
+        ],
+        "summary": "Update Retention"
+      }
+    },
+    "/api/v1/dashboard/tenant/site-keys": {
+      "get": {
+        "operationId": "list_site_keys_api_v1_dashboard_tenant_site_keys_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/SiteKeyResponse"
+                  },
+                  "title": "Response List Site Keys Api V1 Dashboard Tenant Site Keys Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "security": [
+          {
+            "APIKeyCookie": []
+          }
+        ],
+        "summary": "List Site Keys"
+      },
+      "post": {
+        "operationId": "create_site_key_api_v1_dashboard_tenant_site_keys_post",
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SiteKeyResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "security": [
+          {
+            "APIKeyCookie": []
+          }
+        ],
+        "summary": "Create Site Key"
+      }
+    },
+    "/api/v1/dashboard/tenant/site-keys/{site_key_id}/origins": {
+      "patch": {
+        "operationId": "update_site_key_origins_api_v1_dashboard_tenant_site_keys__site_key_id__origins_patch",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "site_key_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Site Key Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AllowedOriginsUpdate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SiteKeyResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "APIKeyCookie": []
+          }
+        ],
+        "summary": "Update Site Key Origins"
+      }
+    },
+    "/api/v1/dashboard/tenant/support-details": {
+      "patch": {
+        "operationId": "update_support_details_api_v1_dashboard_tenant_support_details_patch",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SupportDetailsUpdate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TenantConfigResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "APIKeyCookie": []
+          }
+        ],
+        "summary": "Update Support Details"
+      }
+    },
+    "/api/v1/dashboard/tenant/trace-text": {
+      "patch": {
+        "operationId": "update_trace_text_api_v1_dashboard_tenant_trace_text_patch",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TraceTextUpdate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TenantConfigResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "APIKeyCookie": []
+          }
+        ],
+        "summary": "Update Trace Text"
+      }
+    },
+    "/api/v1/dashboard/tenant/widget-look": {
+      "patch": {
+        "operationId": "update_widget_look_api_v1_dashboard_tenant_widget_look_patch",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WidgetLookUpdate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TenantConfigResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "APIKeyCookie": []
+          }
+        ],
+        "summary": "Update Widget Look"
+      }
+    },
+    "/api/v1/dashboard/usage": {
+      "get": {
+        "operationId": "get_usage_api_v1_dashboard_usage_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UsageResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "security": [
+          {
+            "APIKeyCookie": []
+          }
+        ],
+        "summary": "Get Usage"
       }
     },
     "/api/v1/session": {

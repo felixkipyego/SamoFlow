@@ -2,21 +2,34 @@
 # Step 6.1: app/dashboard/admin_cli.py -- the platform-admin CLI commands
 # (create-tenant, assign-plan, issue-site-key, revoke-site-key,
 # revoke-domain, seed-plans), against the live test database.
+#
+# reset-password/set-platform-admin/unset-platform-admin (alignment task,
+# 2026-10-15) are tested below too: built on UserManager.update()
+# specifically, so the session-invalidation hook (on_after_update(),
+# app/dashboard/auth_backend.py) fires for free -- proven directly here,
+# not merely assumed from reading the hook's own already-passing tests.
+import getpass
 import uuid
 from argparse import Namespace
 
 import pytest
 import sqlalchemy as sa
+from fastapi_users.db import SQLAlchemyUserDatabase
 
 from app.dashboard.admin_cli import (
     AdminCliError,
     cmd_assign_plan,
     cmd_create_tenant,
     cmd_issue_site_key,
+    cmd_reset_password,
     cmd_revoke_domain,
     cmd_revoke_site_key,
     cmd_seed_plans,
+    cmd_set_platform_admin,
+    cmd_unset_platform_admin,
 )
+from app.dashboard.models import DashboardSession, User
+from app.dashboard.passwords import password_helper
 from app.ingest.models import VerifiedDomain
 from app.plans.models import Plan
 from app.plans.schemas import PlanLimits
@@ -220,3 +233,105 @@ async def test_revoke_domain_revokes_a_real_domain(reset_test_database):
 async def test_revoke_domain_rejects_an_unknown_id(reset_test_database):
     with pytest.raises(AdminCliError):
         await cmd_revoke_domain(Namespace(domain_id=uuid.uuid4(), actor="admin@example.com"))
+
+
+# --- reset-password / set-platform-admin / unset-platform-admin ------------
+
+_OLD_PASSWORD = "correct horse battery staple 1"  # noqa: S105
+_NEW_PASSWORD = "a brand new password long enough"  # noqa: S105
+
+
+async def _seed_user_with_a_session(email: str, *, is_superuser: bool = False) -> uuid.UUID:
+    async with db_session() as session:
+        user_db = SQLAlchemyUserDatabase(session, User)
+        user = await user_db.create(
+            {
+                "email": email,
+                "hashed_password": password_helper.hash(_OLD_PASSWORD),
+                "is_superuser": is_superuser,
+            }
+        )
+        session.add(
+            DashboardSession(
+                token=uuid.uuid4().hex + uuid.uuid4().hex,
+                user_id=user.id,
+                last_seen_at=sa.func.now(),
+            )
+        )
+        await session.commit()
+        return user.id
+
+
+async def _session_count(user_id: uuid.UUID) -> int:
+    async with db_session() as session:
+        result = await session.execute(
+            sa.select(sa.func.count())
+            .select_from(DashboardSession)
+            .where(DashboardSession.user_id == user_id)
+        )
+        return result.scalar_one()
+
+
+async def test_reset_password_changes_the_hash_and_invalidates_sessions(
+    reset_test_database, monkeypatch
+):
+    user_id = await _seed_user_with_a_session("reset-me@example.com")
+    assert await _session_count(user_id) == 1
+
+    monkeypatch.setattr(getpass, "getpass", lambda *_a, **_k: _NEW_PASSWORD)
+    await cmd_reset_password(Namespace(email="reset-me@example.com"))
+
+    async with db_session() as session:
+        user_db = SQLAlchemyUserDatabase(session, User)
+        real_user = await user_db.get(user_id)
+        verified, _ = password_helper.verify_and_update(_NEW_PASSWORD, real_user.hashed_password)
+        assert verified is True
+    assert await _session_count(user_id) == 0
+
+
+async def test_reset_password_for_an_unknown_email_raises(reset_test_database, monkeypatch):
+    monkeypatch.setattr(getpass, "getpass", lambda *_a, **_k: _NEW_PASSWORD)
+    with pytest.raises(AdminCliError):
+        await cmd_reset_password(Namespace(email="nobody@example.com"))
+
+
+async def test_reset_password_rejects_a_too_short_new_password(reset_test_database, monkeypatch):
+    user_id = await _seed_user_with_a_session("short-pw@example.com")
+    monkeypatch.setattr(getpass, "getpass", lambda *_a, **_k: "short")
+    with pytest.raises(AdminCliError):
+        await cmd_reset_password(Namespace(email="short-pw@example.com"))
+    # Rejected before any update -- the session must still be alive.
+    assert await _session_count(user_id) == 1
+
+
+async def test_set_platform_admin_grants_the_role_and_invalidates_sessions(reset_test_database):
+    user_id = await _seed_user_with_a_session("promote-me@example.com")
+    assert await _session_count(user_id) == 1
+
+    await cmd_set_platform_admin(Namespace(email="promote-me@example.com"))
+
+    async with db_session() as session:
+        user_db = SQLAlchemyUserDatabase(session, User)
+        real_user = await user_db.get(user_id)
+        assert real_user.is_superuser is True
+    assert await _session_count(user_id) == 0
+
+
+async def test_unset_platform_admin_revokes_the_role_and_invalidates_sessions(
+    reset_test_database,
+):
+    user_id = await _seed_user_with_a_session("demote-me@example.com", is_superuser=True)
+    assert await _session_count(user_id) == 1
+
+    await cmd_unset_platform_admin(Namespace(email="demote-me@example.com"))
+
+    async with db_session() as session:
+        user_db = SQLAlchemyUserDatabase(session, User)
+        real_user = await user_db.get(user_id)
+        assert real_user.is_superuser is False
+    assert await _session_count(user_id) == 0
+
+
+async def test_set_platform_admin_for_an_unknown_email_raises(reset_test_database):
+    with pytest.raises(AdminCliError):
+        await cmd_set_platform_admin(Namespace(email="nobody@example.com"))

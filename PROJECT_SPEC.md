@@ -95,12 +95,12 @@ A production-ready, multi-tenant, embeddable AI widget platform: one website is 
 | 5.4 | Escalation panel and fallback UI | Done | Completed 2026-10-15; "Talk to a person" + consent panel + validated contact fields + `POST /conversations/{cid}/escalate`; the three required security-adjacent checks (no submission without consent, injection-through-fields stays inert, double-submit prevented) each a committed, live-passing test; see the Phase 5 closure, §5 |
 | 5.5 | Theming, accessibility and CSP | Done | Completed 2026-10-15; tenant branding + automatic text-contrast, keyboard operability, visible focus, a mobile-sheet-only focus trap, a decoupled live region announcing only completed turns, `prefers-reduced-motion`, a zero-serious-finding axe scan, the 5.1 FOUC fix; see the Phase 5 closure, §5 |
 | 5.6 | Phase 5 acceptance | Done | Completed 2026-10-15; docs/SPEC.md §18's Phase 5 accept line checked clause by clause against real evidence; §9/register reconciled; Phase 5 closure in §5 (archived detail in `docs/progress/widget.md`) |
-| 6.1 | Dashboard authentication [SECURITY] | Not started | – |
-| 6.2 | Tenant settings | Not started | – |
-| 6.3 | Sources screens | Not started | – |
-| 6.4 | Escalation inbox and usage | Not started | – |
-| 6.5 | Platform admin | Not started | – |
-| 6.6 | Phase 6 acceptance | Not started | – |
+| 6.1 | Dashboard authentication [SECURITY] | Done | Completed 2026-10-15; fastapi-users login core, hashed+idle-expiring sessions, CSRF, tenant-scoped dependencies, recent-auth dependency, admin CLI replacing the temporary admin key; see the Phase 6 closure, §5 (track/dashboard, folded in at close-out; archived detail in `docs/progress/dashboard.md`) |
+| 6.2 | Tenant settings | Done | Completed 2026-10-16; support details/alert emails/widget look/retention/trace-text config, site keys + allowed origins, install snippet, the real per-tenant support-details fallback template threaded through the chat graph; see the Phase 6 closure, §5 |
+| 6.3 | Sources screens | Done | Completed 2026-10-16; sources CRUD/disable/enable/refresh-now, the real streaming upload endpoint, domain verification, database-type rejected server-side (Felix decision A), full adversarial pass; see the Phase 6 closure, §5 |
+| 6.4 | Escalation inbox and usage | Done | Completed 2026-10-16; the real dashboard escalation inbox (list/transcript/status/delete) and usage meter against plan quota; see the Phase 6 closure, §5 |
+| 6.5 | Platform admin | Not started | POST-PILOT by Felix's own decision G — see §9/§11.1 |
+| 6.6 | Phase 6 acceptance | Done | Completed 2026-10-16; docs/SPEC.md §18's Phase 6 accept line checked clause by clause against real evidence; §9/register reconciled; Phase 6 closure in §5 (archived detail in `docs/progress/dashboard.md`) |
 | 7.1 | Load tests | Not started | – |
 | 7.2 | Full security and injection run [SECURITY] | Not started | – |
 | 7.3 | Backups, restore drill and monitoring | Not started | – |
@@ -6487,6 +6487,1098 @@ docs/SPEC.md §18's own Phase 5 accept line, checked clause by clause against re
 
 **Phase 5 is Done.** All six §4 rows updated accordingly.
 
+### Phase 6 (Dashboard track) — folded in from `docs/progress/dashboard.md` at track close-out (2026-10-16)
+
+Per §11.5 point 3: the dashboard track's own progress/decision log lived at `docs/progress/dashboard.md` while `track/widget` and `track/dashboard` were both in flight (the widget track closed out first; this track continued alone from Step 6.1 through 6.6). The track's own work is complete as of this close-out, rebased onto `origin/main` and pushed only once every test passed, per this project's own zero-failing-tests push gate (§11.5 point 7). The full dated record below is folded in verbatim from that file; `docs/progress/dashboard.md` itself is kept as archived detail per §11.5 point 3's own instruction, not deleted.
+
+#### Step 6.1 — Dashboard authentication [SECURITY] (2026-10-15)
+
+##### Correction to §11.2, recorded here per direct instruction
+
+The dashboard track is **not** frontend-only. Phase 6 needs new backend
+work (users/memberships deferred from 1.2 to 6.1, auth endpoints, then
+settings/sources/upload/domain-verification/inbox/usage endpoints in
+6.2+). This track may edit `backend/`, under limits Felix stated
+directly: API changes are additive-only (proven below, not just
+asserted); this track owns every Alembic migration during the parallel
+period.
+
+##### Environment fix (mid-task, direct instruction)
+
+Both worktrees were sharing ONE conda env (`widgetplatform`), whose
+editable install pointed at whichever worktree ran `pip install -e`
+most recently — confirmed live: `python -c "import app; print(app.__file__)"`
+resolved to the **widget** worktree's `backend/app` before the fix.
+Fixed: a per-worktree `.venv` here (`.venv/`, gitignored, pinned Python
+3.12 from the same conda env), `make install` run against it. Re-
+confirmed after the fix: the same import check now resolves to THIS
+worktree's `backend/app`. Every verification command in this log below
+ran through `source .venv/bin/activate` first.
+
+##### Kickoff decisions ratified directly by Felix (mid-task, superseding §11.3)
+
+1. **UI framework**: §11.3 kickoff decision #2 (Vite + React + CSS
+   Modules) is REPLACED by shadcn/ui, per the 2026-09-28 decision log
+   entry ("Dashboard component model: shadcn/ui is the leading
+   candidate, NOT yet approved... final decision... at the Step 6.1
+   breakdown"). That entry's own constraints, followed exactly:
+   - Vite template (`npm create vite@6.5.0 . -- --template react-ts`),
+     not Next.js.
+   - ONE primitives library, chosen deliberately: **Radix**, not Base
+     UI — `npx shadcn@4.21.5 init --base radix`. Justification (rule
+     8): Radix is the longer-established, more broadly registry-
+     covered of the two as of this task; Base UI (the MUI team's newer
+     project) has a shorter track record. Pinned explicitly in every
+     CLI invocation (`@4.21.5`), not `@latest`.
+   - Official registry only — every component came from
+     `npx shadcn@4.21.5 add <name>`, nothing hand-copied from a
+     third-party source.
+   - Generated diffs reviewed before commit — read directly, file by
+     file (button/input/label/card/dialog), before this entry was
+     written.
+   - Components added one at a time (`button` from `init`, then
+     `input label card dialog` in one `add` call per the official
+     CLI's own batching, each file reviewed individually) — no
+     "blocks" ever used.
+   - No charting library — not needed by any 6.1 screen.
+   - Never used in the widget — widget/ is Preact in a shadow root, a
+     completely separate track; nothing shared.
+   - §12's visual system: theme tokens as CSS custom properties
+     (`src/index.css`'s own `:root`/`.dark` blocks, shadcn's own
+     generated output — not hand-written), light and dark from the
+     first screen, self-hosted fonts (`@fontsource-variable/geist` —
+     real `.woff2` files bundled into `dist/assets/`, confirmed via a
+     real `npm run build`, never fetched from a third-party host at
+     runtime), no third-party requests (confirmed by the live strict-
+     CSP Playwright test below, which runs with NO allowance for any
+     external host at all).
+   - npm supply-chain setup (the 2026-09-28 entry's own "due at 5.1,
+     not 6.1" line): superseded by this task's own direct, later
+     instruction naming "pinned Node, committed lockfile, npm audit
+     clean" as explicit 6.1 deliverables — each track now gets its own
+     independent npm setup (a natural consequence of the 2026-10-15
+     parallel-track split, which postdates that 2026-09-28 note).
+     `.github/dependabot.yml` gets its own `npm`/`/dashboard` entry
+     here, not deferred to widget's own 5.1.
+
+2. **Auth implementation**: docs/SPEC.md §12's own "use a maintained
+   auth library rather than hand-rolling" — Felix named **fastapi-users**
+   (15.0.5) directly. Full rule-8 justification, the real extension
+   points needed on top of it, and the real footprint cost are all in
+   `backend/pyproject.toml`'s own dependency comment and `app/dashboard/
+   auth_backend.py`'s own header comment — not duplicated here. Every
+   security requirement this task's own prompt named stays layered on
+   top of the library, not replaced by it: CSRF (app/dashboard/csrf.py,
+   the library has none), per-IP/per-account rate limiting (app/
+   dashboard/routes.py, reuses the existing `RateLimiter`), hashed
+   session tokens and idle expiry (`HashedDatabaseStrategy`, extending
+   the library's own `DatabaseStrategy`, which stores the raw token
+   with absolute-only expiry — confirmed by reading its source before
+   deciding to extend it), tenant-scoping via Membership (app/
+   dashboard/dependencies.py, a concept the library has no equivalent
+   of at all).
+
+3. **Temporary admin key**: docs/SPEC.md §12 says Step 6.1 removes it
+   outright and replaces it with `platform_admin` accounts on the same
+   login system — this OVERRIDES this task's own original "keep the
+   admin key" line. Done in this same task (not split, since
+   `require_admin_key()`/`AdminKeyVerified`/`Settings.admin_api_key` had
+   **zero real callers** anywhere in this codebase, confirmed by
+   grepping before removing — `revoke_domain()` had never been wired to
+   an endpoint at all): `app/admin/dependencies.py` deleted;
+   `Settings.admin_api_key` and its validator/accessor deleted;
+   `.env.example`/`deploy/docker-compose.yml`/`deploy/smoke-image.sh`/
+   every test referencing `ADMIN_API_KEY` updated or removed;
+   `app/admin/routes.py` rebuilt with `current_platform_admin` (fastapi-
+   users' own `is_superuser` semantics, reused directly, not a second
+   parallel admin-identity mechanism) as the only gate on `/api/v1/admin`.
+   The CLI admin commands Felix named (create a tenant, assign a plan,
+   issue/revoke a site key, revoke a domain, seed an owner) are all
+   built now too (not split to 6.2 — the backend half was small once
+   the repository primitives already existed): `app/dashboard/
+   seed_cli.py` (seed an owner, `--platform-admin` flag) and `app/
+   dashboard/admin_cli.py` (the other five), wired into `entrypoint.sh`'s
+   new `seed-owner`/`admin` modes, run via `docker compose run --rm
+   migrate <mode> ...` (reusing that service's own env/network wiring,
+   no new Compose service).
+
+##### Additional items named directly, resolved or re-owned below
+
+4. **Re-point `revoke_domain()` and every `/api/v1/admin` endpoint at
+   platform_admin sessions; fix the stale `TODO(6.5)`.** RESOLVED:
+   `POST /api/v1/admin/domains/{domain_id}/revoke`, gated by
+   `current_platform_admin`, `actor` is the real admin's own email (no
+   more generic placeholder string). `app/admin/routes.py`'s own stale
+   comment (which named the now-deleted admin-key mechanism as the
+   reason to wait) is rewritten to name the real, current reason 6.5's
+   full tenant-management screen still waits (feature scope, still
+   POST-PILOT — unchanged from the existing decision).
+
+5. **`backend/tests/test_layout_placeholders.py`.** RESOLVED: dashboard/
+   entries removed (it is no longer a placeholder); widget/'s two
+   entries are untouched (a separate, concurrently-running track).
+
+6. **CORS/OPTIONS for dashboard and admin endpoints.** RESOLVED by the
+   same-origin design itself, not by writing CORS-handling code: the
+   dashboard SPA and its API are served from the same origin in
+   production (Caddy routes `/api` on the dashboard hostname — a Phase 7
+   deployment step, not yet built) and in dev (Vite's own proxy,
+   `dashboard/vite.config.ts`). Neither `app/dashboard/routes.py` nor
+   `app/admin/routes.py` sets any `Access-Control-*` header or answers
+   `OPTIONS` — there is structurally no cross-origin request for either
+   surface to handle. The marker's own "today OPTIONS returns 405" is
+   now the CORRECT, intended behavior for these two routers specifically
+   (never cross-origin, so no preflight is ever legitimately needed) —
+   closed, not deferred again.
+
+7. **`require_recent_auth` dependency.** Built now
+   (`app/dashboard/dependencies.py`), not consumed by any 6.1 endpoint
+   (6.1 has no action needing it) — a parameterized dependency factory
+   (default 900s/15min, the upper end of docs/SPEC.md §12's own "10 to
+   15 minutes"), reading a NEW `DashboardIdentity.authenticated_at`
+   field (the real `dashboard_sessions.created_at`, set only at a real
+   login — never touched again, unlike the idle-expiry `last_seen_at`).
+   6.2+ endpoints (delete tenant, change roles, replace DB credentials,
+   change site keys/allowed origins) add `Depends(require_recent_auth())`
+   directly — the mechanism is done, not redesigned per call site.
+
+8. **Dashboard sessions separate from widget tokens; a widget JWT on a
+   dashboard/admin endpoint returns 401.** Tested directly (`test_
+   dashboard_routes.py`): a real, validly-signed widget JWT presented as
+   the `__Host-session` cookie value fails (hashed-token lookup, no
+   match); the same JWT presented as an `Authorization: Bearer` header
+   also fails (`CookieTransport` only ever reads the cookie, never looks
+   at `Authorization` at all).
+
+9. **CLI admin commands' own three named requirements:**
+   - (a) **Real `pk_live_...` generator**: `app/tenancy/repository.py`'s
+     new `generate_site_key()` — reuses `generate_visitor_secret()`'s
+     own 256-bit primitive (`app.auth.secrets`), not a second
+     implementation. Closes the §9 marker recorded at the Step 1.4
+     breakdown (2026-09-28).
+   - (b) **Origin/domain normalization on save**: `app/auth/origin.py`'s
+     new `normalize_origin()` (scheme://host[:port], lowercase, no
+     path, no wildcard — for `allowed_origins`) and `app/ingest/
+     domain_verification.py`'s new `normalize_domain()` (a bare
+     hostname, a genuinely different shape — confirmed by reading every
+     real caller of `claim_domain()` before writing this, not assumed).
+     Both are real, tested, pure functions with a real caller today
+     (`admin_cli.py`'s `issue-site-key` normalizes every `--allowed-
+     origin` before `create_site_key()`) — closes the §9 marker
+     recorded at the Step 1.4 breakdown (2026-09-28, extended to
+     `verified_domains.domain` at Task 2.2.a). **Not yet closed**: Step
+     6.3's own "add a source"/domain-claim dashboard form must call
+     `normalize_domain()` too, once it exists — the function is ready,
+     the UI call site isn't built yet (6.3's own job, not invented
+     ahead of it here).
+   - (c) **Seed the two pilot Plan rows**: `admin_cli.py`'s new
+     `seed-plans` command — "Starter" (10,000 msgs/month) and "Growth"
+     (25,000 msgs/month), the real numbers from the Task 3.7.i/§11
+     marker's own ~21%-headroom derivation (not re-derived here). The
+     other five `PlanLimits` fields reuse the existing Settings
+     defaults verbatim (`crawl_page_cap=500`, `upload_max_size_bytes=
+     20MB`, `db_sync_row_cap=10_000`, `refresh_interval_min_allowed=
+     "daily"`, `refresh_now_daily_allowance=5`) — no new numbers
+     invented. Closes the "whoever next builds real Plan-row creation"
+     §9 marker (narrowed from Task 4.3 at that task's own close-out).
+
+10. **§12's acceptance additions, from the login screen onward.**
+    Automated, live, via the Playwright suite (`dashboard/e2e/
+    csp.spec.ts`): a keyboard-only pass (tab order through email →
+    password → submit, each focus state asserted); an automated
+    accessibility check (`@axe-core/playwright`, zero serious/critical
+    violations on both the login screen and the open Dialog); loading/
+    error states (the login screen's own `submitting`/`error` React
+    state, exercised by `LoginScreen.test.tsx`'s Vitest suite).
+    Screenshots in light AND dark theme: **not captured as a separate
+    artifact in this pass** — the theme tokens exist and are real
+    (`:root`/`.dark` in `src/index.css`), but no automated visual-diff
+    tooling was wired up to produce committed screenshots, and this
+    task has no vision-capable step to review them manually either.
+    Re-owned: whoever next touches the dashboard's visual design (6.2's
+    own theming/polish pass is the natural point) should add real
+    light/dark screenshots to the acceptance record. Permission-denied
+    states: not applicable yet (6.1 has no screen that can be reached
+    without a tenant membership at all — the one place this matters,
+    `get_current_dashboard_user`'s own 403 for a membership-less user,
+    is covered by a real test, but no SCREEN renders that state yet,
+    since 6.1 only ships login + shell).
+
+##### A real finding: CSP and the Dialog scroll-lock (investigated live, not assumed)
+
+Opening the required Dialog under the live strict-CSP Playwright test
+surfaced a real violation: Radix's `Dialog` uses `react-remove-scroll`
+→ `react-remove-scroll-bar` → `react-style-singleton`, which inserts a
+real `<style>` element (`document.createElement('style')` +
+`appendChild(textNode)`) for its own scrollbar-gap-compensation CSS.
+That is the ONE DOM operation `style-src` actually governs — confirmed
+live with a throwaway strict-CSP page before relying on this: direct
+`element.style.setProperty()`/`element.style.cssText =` mutations are
+NOT affected by `style-src` at all (tested both, neither produced a
+violation and both visibly applied); only inserting a real `<style>`
+element was blocked.
+
+Radix's own `Dialog` API does not expose a way to pass `removeScrollBar
+={false}` through to disable just the cosmetic half (confirmed by
+reading `@radix-ui/react-dialog`'s own source: it hardcodes the props
+it forwards to `RemoveScroll`, and the overlay+scroll-lock only renders
+at all when `modal={true}`, which also controls the backdrop and focus
+trap — setting `modal={false}` to dodge this would be a real, much
+bigger UX regression, not a scoped fix).
+
+**Resolution shipped, with the policy itself untouched (no hash, no
+'unsafe-inline' added anywhere):** `src/index.css` adds one static,
+build-time-compiled CSS rule (`body[data-scroll-locked] { overflow:
+hidden !important; }`) that restores the REAL functional behavior (the
+actual scroll lock) independently of whether the browser blocks the
+library's own injected stylesheet. The Playwright test asserts this
+real property directly (`getComputedStyle(document.body).overflow ===
+"hidden"` while the dialog is open) and tolerates ONLY that one named,
+investigated violation by exact message pattern — any OTHER violation
+still fails the suite outright.
+
+**What remains open, named plainly:** the one cosmetic violation itself
+(the scrollbar-width compensation padding, which fixes a usually-small
+layout shift when a scrollbar disappears) is not silenced. The textbook
+fix is a real, per-response CSP nonce (`react-style-singleton` already
+supports one natively via the `get-nonce` package — confirmed by
+reading its source: it calls `getNonce()` and sets a `nonce` attribute
+on the `<style>` tag automatically if one is set via `setNonce()`) —
+but that needs the SERVED HTML and the CSP header to share a freshly
+generated random value per request, which needs dynamic response
+templating (e.g. Caddy's own `templates` directive) that this project's
+production deployment does not build yet (Phase 7). A CSP hash
+allowlist was considered and rejected: the padding value is computed
+from the real, measured scrollbar width (`window.innerWidth -
+document.documentElement.clientWidth`), which is genuinely different
+across browsers/OSes (confirmed live: macOS's own overlay scrollbars
+measure 0, unlike Windows) — a hash pinned in one environment would
+silently stop applying (CSP-block, with no functional harm after the
+static-CSS fix above, but also no longer silencing the console warning)
+in another. **Owner: Phase 7's own deployment step, or whoever next
+wires Caddy's real production config** — add a per-response nonce,
+call `setNonce()` from `get-nonce` at app startup reading it from a
+`<meta>` tag the server injects, once dynamic HTML templating exists.
+
+##### Duplication check (n=0 → check due at 4; ran now, after Step 6.1's own code, which is more than 4 sub-steps)
+
+Given the sheer size of this single batched step (new package, new
+tables, a library migration, two CLIs, a full frontend), the check ran
+at the END of the step rather than strictly every 4 sub-steps —
+recorded here as a deliberate deviation from the letter of the rule,
+not a skipped check. Findings:
+- `generate_visitor_secret()`/`hash_visitor_secret()` (app/auth/
+  secrets.py) are now used by THREE callers for non-widget-visitor
+  secrets (dashboard session tokens via `HashedDatabaseStrategy`, and
+  implicitly by `generate_site_key()`) — a real, accepted reuse, not a
+  duplication; flagged here per this project's own "reuse, don't
+  duplicate" convention, no action needed (the names are slightly
+  visitor-specific but the implementation is fully generic, confirmed
+  by reading it).
+- No other near-duplicate logic found between the new `app/dashboard/`
+  package and existing `app/auth/`/`app/tenancy/` code.
+
+##### Verified (final, authoritative pass)
+
+- `make lint`: clean.
+- Offline suite (`cd backend && python -m pytest tests -q`, no
+  `TEST_DATABASE_URL`): 1082 passed, 452 skipped (DB-dependent), 0
+  failed.
+- `make test-all` (real test-db + test-qdrant, COMPOSE_PROJECT_NAME=
+  samoflow-dashboard): see below for the final run's real pass count.
+- `make lock-check`: clean (no drift).
+- `make audit`: 0 known vulnerabilities (backend).
+- `make hooks`: 64 markers (down from 67 — a real, diffed, explained
+  change; see `test_hooks.py`'s own updated comment).
+- Image job: `docker compose ... config --services` names postgres/
+  qdrant/api/worker; `docker build`; `deploy/smoke-image.sh` — all 8
+  checks PASS.
+- `dashboard/`: `npm run build`/`npm run lint`/`npm run test` (8/8) all
+  clean; `npm run audit` (`--omit=dev`) 0 vulnerabilities (see
+  dashboard/README.md for the one dev-only, never-shipped finding this
+  scoping excludes, and why).
+- `dashboard/e2e` (Playwright, real production build, real strict CSP,
+  real backend + a real seeded owner): 4/4 passing, including the
+  authenticated-shell/Dialog test (not skipped).
+- New test files run live 3x individually before trusting them
+  (project convention): `test_dashboard_routes.py`, `test_dashboard_
+  repository.py`, `test_dashboard_passwords.py`, `test_dashboard_
+  seed_cli.py`, `test_dashboard_admin_cli.py` — all stable across 3
+  consecutive runs.
+- A second real bug found live, this one in `test_admin_routes.py`
+  itself, not production code: `POST /auth/login` (app/dashboard/
+  routes.py) unconditionally requires a real tenant membership to
+  succeed -- confirmed by direct, isolated reproduction (`manager.
+  authenticate()` called directly returns a real user; the SAME
+  credentials through the real HTTP endpoint 401s, because the test's
+  own platform-admin fixture user had no membership at all). This is
+  consistent, not a gap: every real admin account this project's own
+  tooling can create (`seed_cli.py`'s `--platform-admin` flag) already
+  creates a membership alongside the user, so a platform admin who is
+  ALSO the pilot tenant's owner (the only real shape this pilot needs)
+  can always log in. **Named plainly, not silently absorbed**: there is
+  no "platform-admin-only, no tenant at all" account shape today --
+  re-owned to whoever builds a second, non-tenant-owning admin account
+  (6.5's own post-pilot scope is the natural point, if ever needed).
+  Fixed the test (not the production code, which is correct as shipped)
+  to create a membership for every fixture user, matching the real
+  path.
+- A real bug found and fixed live, not caught by any in-process test:
+  `app/dashboard/seed_cli.py`/`admin_cli.py` originally omitted `from
+  app import all_models`, so a real standalone invocation (outside
+  pytest, where `tests/conftest.py` itself masks this by importing
+  `all_models` for every test) raised `NoReferencedTableError` on
+  `tenants.plan_id -> plans`. Fixed by adding the import to both
+  modules; a new subprocess-based regression test (`test_dashboard_
+  seed_cli.py`'s own `test_seed_owner_works_as_a_real_standalone_
+  subprocess`) now catches this class of bug directly, matching
+  `test_alembic.py`'s own established "a subprocess run with a minimal
+  env is the only thing that actually proves this" precedent.
+- OpenAPI additive-only proof (this task's own direct instruction):
+  `backend/scripts/check_openapi_additive.py` (new, tested in
+  `test_openapi_additive_check.py`), run against the committed contract
+  before this task's own changes vs. the regenerated one after:
+  **confirmed additive-only — 6 new paths added
+  (`/api/v1/admin/domains/{domain_id}/revoke`, `/api/v1/admin/me`,
+  `/api/v1/dashboard/auth/{csrf,login,logout,me}`), zero existing
+  paths or schemas changed.** Every widget-facing path (`/session`,
+  `/chat`, `/conversations*`, `/escalate`) is byte-identical.
+
+##### Rebase/push status (direct heads-up from Felix, mid-task)
+
+`origin/main` is currently RED: `backend/tests/test_layout_placeholders.py`
+(at `a12792d`) was restructured by the widget track at Step 5.1 to
+narrow as `widget/loader` shed its own placeholder status, then broken
+again by Step 5.2 making `widget/chat` real too — the widget track's
+own commit message names this directly ("2 known test_layout_
+placeholders.py collisions, not 1"). Felix's own instruction: this
+track touches ONLY the `dashboard/` entries in that file (already done,
+above) — never the `widget/` ones, even if a rebase surfaces a conflict
+there before the widget track's own fix lands on `main`. Push gate
+(rule 4/§2.18): never push while any test fails, so this track's own
+rebase+push waits for `origin/main` to go green on its own widget-side
+fix first, re-fetching before every rebase attempt.
+
+##### Rebase/push outcome (final)
+
+By the time this track rebased, `origin/main` had already gone green
+at `6eea542` ("Alignment: fix CI (narrow test_layout_placeholders.py to
+dashboard/ only)...") — the widget track's own fix for the collision
+above landed first, exactly as the heads-up anticipated, so no second
+wait was needed.
+
+`git rebase origin/main` replayed this track's 5 commits (Parts A-E)
+cleanly except for two conflicts, both resolved by hand, both
+mechanical (no logic changed on either side):
+
+- `backend/tests/test_layout_placeholders.py` (commit 3, Part C): the
+  widget track's own `6eea542` had already renamed/restructured the
+  same file this track's own 6.1 change touched (narrowing
+  `_STILL_PLACEHOLDER_READMES`/`_PLACEHOLDER_ROOTS` for `widget/chat`).
+  Resolved by taking that structure as the base and applying this
+  track's own change on top: both dicts/tuples now empty (dashboard/
+  also has real tooling as of this task), the generic test name
+  `test_placeholder_roots_contain_only_readmes_and_folders` kept (no
+  folder this file tracks is still a placeholder), all three README
+  entries kept permanently in `_READMES` (established convention —
+  real folders stay listed). Verified immediately: `pytest tests/
+  test_layout_placeholders.py -q` — 4 passed.
+- `.gitignore` (commit 4, Part D): both tracks added a Node-tooling
+  comment line over the same pre-existing blank slot (widget's own
+  "chosen at Step 5.1" wording vs. this track's "not chosen yet").
+  Resolved by merging both into one true statement naming both
+  tracks' own real, now-chosen tooling (esbuild/Playwright/ESLint for
+  widget at 5.1; Vite/React/TypeScript/shadcn-ui/Playwright/Vitest for
+  dashboard at 6.1) — content merge, not a pick-one-side resolution.
+
+Full verification re-run from scratch after the rebase (this
+worktree's own `.venv`, confirmed pointed at this worktree's `backend/`
+before running anything):
+
+- `make lint`: clean.
+- `make test-all` (real test-db/test-qdrant): **1568 passed, 0
+  failed**, both services confirmed stopped/removed afterward.
+- `make hooks`: unchanged shape (64 markers).
+- `make lock-check`: clean.
+- `make audit`: 0 known vulnerabilities.
+- Image job: fresh `docker build` of `backend/`, `deploy/
+  smoke-image.sh` — all 8 checks PASS.
+- `dashboard/`: lint (0 errors, 1 pre-existing shadcn-template
+  warning), `npm run test` (8/8), `npm run build`, `npm run audit
+  --omit=dev` (0 vulnerabilities) — all clean.
+- `dashboard/e2e`: real backend stack (`make up`/`make migrate`, a
+  real seeded owner via piped stdin), full Playwright suite — **4/4
+  passing**, including the authenticated-shell/Dialog test. One
+  self-inflicted false alarm during this run, not a real bug: an
+  earlier `make up &` was started as a detached background shell
+  outside this session's own background-task tracking and killed
+  before the `api`/`worker` containers finished starting (only
+  postgres/qdrant/phoenix came up); the resulting e2e run correctly
+  failed on "Email or password is incorrect" (login had nowhere to
+  go). Re-ran `make up` properly, confirmed `/health` returns 200
+  first, then re-ran the suite clean. No code or test change was
+  needed — recorded here so the failure isn't mistaken for a real
+  login/session bug on a future read of this log.
+- `git status --short`: clean; `.env` confirmed present only as an
+  ignored (`!!`) local file, never staged.
+
+Pushed straight to `main` (rule 4): `6eea542..195de3a`, five commits —
+`7519325` (Part A), `1202972` (Part B), `a98cd09` (Part C), `29b444b`
+(Part D), `195de3a` (Part E). Not rejected; `origin/main` had not moved
+again since the rebase base, so only one push attempt was needed.
+
+#### Alignment task (2026-10-15, no 6.2 work)
+
+Re-read CLAUDE.md (including the new "Sync before work" rule),
+PROJECT_SPEC.md §2 rules 19-22 and §11.5, and the full
+docs/DECISIONS_REGISTER.md, per direct instruction, before touching
+anything. `git fetch origin && git rebase origin/main` was a no-op —
+`origin/main` had not moved since Step 6.1's own push (`2295fa9`).
+
+##### Prior decisions applied (rule 19 sweep)
+
+- D-shadcn (CANDIDATE, unresolved as of the register's own last sweep)
+  and D-113-dashboard-tooling (ratified without citing/superseding
+  D-shadcn) — both already resolved by Step 6.1's own prior work
+  (`29b444b`), but the register itself was never updated to say so.
+  Resolved in the register now, citing supersession (rule 20) rather
+  than leaving the gap the register's own prior note already flagged.
+- D-6.1-admin, D-6.1-site-key-generator, D-6.1-origin-domain-normalise,
+  D-6.1-cors-same-origin, D-6.1-test-layout-placeholders,
+  D-6.1-session-field-na, D-6.1-recent-auth, D-6.1-recent-auth-scope,
+  D-6.1-pilot-plans — all newly recorded rows for work Step 6.1 already
+  built but the register never carried forward (the register was built
+  2026-10-15, BEFORE Step 6.1 shipped later the same day; this is the
+  first sweep since).
+- §11.5 point 4 ("neither track edits `backend/`, except through a
+  stop condition") — re-confirmed this alignment task's own backend
+  changes (the session-invalidation hook, item 5 below) fall under
+  Step 6.1's own already-granted exception (§11.2's own corrected
+  scope: Step 6.1 may edit `backend/`), not a new stop condition.
+- §11.5 point 6 (a new workflow file is unproven until its first real
+  CI run is green) and point 7 (zero failing tests before any push) —
+  both apply directly to this task's own push gate; see Verified,
+  below. No `gh` CLI is available in this environment to check Actions
+  runs directly — Felix is told exactly which runs to check in the
+  final report instead of this track claiming to have confirmed green.
+
+##### 1. Per-worktree Python environment
+
+Already built at Step 6.1 (`.venv/`, pinned Python 3.12 from
+`/opt/miniconda3/envs/widgetplatform`, gitignored). Re-confirmed this
+task: `pip install -e backend` plus both lockfiles re-run clean;
+`python -c "import app, os; print(os.path.dirname(app.__file__))"`
+resolves to this worktree's own `backend/app`, not the shared conda
+env. No change needed.
+
+##### 2. Register updates
+
+docs/DECISIONS_REGISTER.md updated in the same commit as this report:
+D-shadcn APPROVED (supersedes D-113-dashboard-tooling); a new "Step 6.1
+close-out" decisions-table section (12 rows) covering every item Step
+6.1 actually built; the stale "6.1" forward-commitments list (§2) and
+the "In-flight (5.1, 6.1)" audit (§5) both annotated RESOLVED, citing
+commits, per the file's own "RESOLVED items live in the decisions
+table, not repeated as forward-only" convention; ownership of the
+three widget-track-found backend contract gaps formally taken and
+scheduled for Step 6.2, with Felix's own additive-authorisation for
+(a) `verified_domains` in `widget_config` and (b) `conversation_id` on
+`/chat`'s `done` event recorded explicitly; a new POST-PILOT entry
+(D-postpilot-admin-no-tenant-shape) for the "platform-admin-only, no
+tenant" account-shape gap found live during Step 6.1's own adversarial
+pass. Matching PROJECT_SPEC.md §9 markers resolved in place (the
+admin-key-replacement, `revoke_domain()`-endpoint, CORS/OPTIONS, and
+`test_layout_placeholders.py` markers) and four new §9 markers appended
+(the two below, the POST-PILOT account-shape gap, and the
+session-invalidation residual gap, item 5 below) — not touching §4/§5/
+§7, per §11.5 point 3's own "not touched while either track is in
+flight" rule; §9 itself is append-safe (the widget track already
+appended there mid-flight, confirmed by reading its own 6991-6993
+entries before deciding this was safe).
+
+##### 3. CSP tolerance made exact
+
+The prior tolerance (`dashboard/e2e/csp.spec.ts`) matched a free-text
+console regex (`/Applying inline style violates/i`) — too loose: it
+would have silently swallowed ANY future inline-style violation
+anywhere in the app, not just the one known, investigated case.
+
+Captured the real violation's exact shape live (a throwaway debug
+script, not committed, deleted after use) via the browser's own
+structured `securitypolicyviolation` DOM event rather than the
+free-text console message. Confirmed the message DOES carry a SHA-256
+hash (`sha256-nzTgYzXYDNe6BAHiiI7NNlfK8n/auuOAhh2t92YvuXo=` in this
+run), but deliberately did NOT match on it: the hash is computed over
+react-style-singleton's own injected CSS text, which embeds the real
+MEASURED scrollbar-gap width — platform/browser dependent (this file's
+own prior entry already names macOS-overlay-scrollbars-measure-0 vs
+Windows as a concrete case) — so a hash-based match would pass locally
+and silently fail to match in CI's own different Chromium/OS
+combination, for the identical reason this project's CSP already
+rejects hash-pinning as non-portable.
+
+The new tolerance (`isKnownScrollLockViolation()`) matches instead on
+structural fields that do NOT depend on the gap width at all:
+`effectiveDirective === "style-src-elem"`, `blockedURI === "inline"`,
+`disposition === "enforce"`, and `sourceFile` under the page's own
+`/assets/*.js` (same-origin bundle, not a specific content-hashed
+filename, so it survives the next build). The authenticated-shell test
+also now asserts the known violation fires EXACTLY once per Dialog
+open (not zero — which would mean the library stopped doing this and
+the tolerance should be deleted — and not more than one).
+
+**Proof, committed as a permanent regression test**: a new test
+deliberately injects a SECOND, differently-shaped violation (an
+external `<script src="https://example.invalid/...">`, nowhere near
+the Dialog/scroll-lock code path) on the plain login screen, and
+asserts it IS reported as unexpected — `effectiveDirective ===
+"script-src-elem"`, a different blocked URI. If the exact tolerance
+above ever regressed into something broader, this test would start
+failing. Verified live: `make dashboard-e2e` against the real backend
+stack — 5/5 passing (the 3 original login-screen tests, the new proof
+test, and the authenticated-shell/Dialog test with the new structural
+matcher).
+
+##### 4. fastapi-users maintenance status (checked live, 2026-10-15)
+
+- PyPI (`https://pypi.org/project/fastapi-users/`, and
+  `https://pypi.org/pypi/fastapi-users/json` for the machine-readable
+  form): latest release v15.0.5, published 2026-03-27 (matches this
+  project's own pin exactly); classifier `Development Status :: 5 -
+  Production/Stable`.
+- GitHub README (`https://raw.githubusercontent.com/fastapi-users/
+  fastapi-users/master/README.md`), quoted verbatim: *"This project is
+  now in maintenance mode. While we'll continue to provide security
+  updates and dependency maintenance, no new features will be added.
+  We encourage you to explore the project and use it as-is, knowing it
+  will remain stable and secure. We're currently working on a new
+  Python authentication toolkit that will ultimately supersede FastAPI
+  Users. Stay tuned for updates!"*
+- GitHub API (`https://api.github.com/repos/fastapi-users/
+  fastapi-users`): not archived; last pushed 2026-08-17 (after the
+  maintenance-mode announcement — consistent with "we'll continue to
+  provide security updates"); 10 open issues.
+
+**Conclusion, stated plainly**: in maintenance mode means security
+fixes and dependency-compatibility updates continue; no new features
+will land, and an unnamed, undated successor project is in
+development. This does not change this task's own library choice —
+the security floor this project needs does not depend on new library
+features — but it is a real fact Felix should know, not a detail
+buried in a dependency comment. Not swapped in this task, per direct
+instruction. Register entry + §9 marker recorded, owner Phase 7
+(re-check before pilot go-live).
+
+##### 5. Session invalidation on credential/role change
+
+**Challenged the prompt's own literal wording first, per CLAUDE.md's
+senior-engineer-judgment rule**: the task named three CLI commands —
+"a password reset, an owner re-seed, or removing platform_admin
+through the CLI" — as the triggers requiring session invalidation.
+None of those three commands exist anywhere in this codebase
+(`app/dashboard/admin_cli.py`'s own command list is create-tenant/
+assign-plan/issue-or-revoke-site-key/revoke-domain/seed-owner/
+seed-plans only; `seed_cli.py`'s own `seed_owner()` explicitly REFUSES
+to reset an existing account: *"this command does not reset an
+existing password or promote an existing account — use a direct
+database update for that"*). Building three new, unrequested CLI
+commands to satisfy this literally would itself be new feature work —
+the same sentence in the prompt explicitly rules that out ("not new
+features").
+
+**What was built instead**: the real, generic mechanism underneath all
+three named cases. `UserManager.on_after_update()`
+(`app/dashboard/auth_backend.py`) now invalidates every one of a
+user's existing `DashboardSession` rows whenever an update changes
+`password` or `is_superuser` — hooked at `BaseUserManager.update()`,
+the one real path any future password-reset or platform_admin-removal
+command would be built on, matching `admin_cli.py`'s/`seed_cli.py`'s
+own established "built on the real path, not a second one" precedent
+(see those modules' own header comments). The new primitive,
+`invalidate_all_sessions_for_user()` (`app/dashboard/repository.py`), is
+a plain bulk `DELETE`, matching this module's own existing
+flush-not-commit convention (caller commits).
+
+The real payoff: whichever future step builds a real password-reset or
+platform_admin-removal CLI command inherits this invalidation
+automatically the moment it calls `UserManager.update()`, with zero
+code of its own — not three separate call sites each having to
+remember it individually.
+
+**Named residual gap, not silently solved**: `seed_cli.py`'s own
+documented workaround ("use a direct database update for that") never
+calls `update()` at all, so a hand-edited database row bypasses this
+hook entirely. Flagged plainly in both the register and a new §9
+marker — no amount of application-layer code can close that specific
+path; only a real password-reset/admin-removal command, built the
+right way, removes the need for that workaround in the first place.
+
+**Logout invalidates the session server-side, not only the cookie**:
+already true and already covered by an existing committed test
+(`test_dashboard_routes.py::test_logout_revokes_the_session_and_
+subsequent_requests_are_401` — replays the exact, now-revoked raw
+token from a FRESH client, confirms 401, and confirms the
+`DashboardSession` row count is 0). Re-confirmed, not re-built.
+
+**A small, pre-existing inconsistency found and fixed along the way**:
+`test_dashboard_repository.py`'s own header comment already claimed
+user/session persistence is "exercised via test_dashboard_routes.py
+and test_dashboard_auth_backend.py instead" — but `test_dashboard_
+auth_backend.py` did not exist until this task created it. The
+comment was aspirational, not accurate, from Step 6.1 onward; it is
+accurate now.
+
+**Verified live, 3 consecutive runs** (new test file `backend/tests/
+test_dashboard_auth_backend.py`, 4 tests, plus the existing logout
+test): all 5 passed identically on each of 3 runs against the real
+test database (no flakes, no ordering dependency).
+
+##### Duplication check
+
+Counter: this task's own code-changing sub-steps are items 3 (CSP test
+rewrite) and 5 (session-invalidation hook + new test file) — 2 total,
+below the n=4 trigger (rule 9). Item 2 (register bookkeeping) and item
+4 (a live library-maintenance check, no code) are documentation-only,
+per rule 9's own "does not count" carve-out. No duplication check run;
+none due.
+
+##### Verified (final, authoritative pass)
+
+- `make lint`: clean.
+- Offline suite + `make test-all` (real test-db/test-qdrant): **1572
+  passed, 0 failed** (1568 + 4 new tests in `test_dashboard_auth_
+  backend.py`).
+- `make hooks`: unchanged marker shape.
+- `make lock-check`: clean (no new dependency added).
+- `make audit`: 0 known vulnerabilities.
+- Image job: fresh `docker build` of `backend/`, `deploy/
+  smoke-image.sh` — all 8 checks PASS (re-run this task, since
+  `backend/` changed).
+- `dashboard/`: lint/test/build/audit all clean (no dashboard source
+  changed except `e2e/csp.spec.ts`, which has no lint/build/audit
+  surface of its own beyond the suite itself).
+- `dashboard/e2e`: **5/5 passing**, including the new exact-tolerance
+  proof test, against a real backend stack (`make up`/`make migrate`,
+  a real seeded owner via piped stdin).
+- OpenAPI additive-only proof: unchanged this task (no endpoint shape
+  touched) — `docs/openapi.json` not regenerated, confirmed no drift.
+- `git status --short`: clean after commit; `.env` confirmed present
+  only as an ignored (`!!`) local file, never staged.
+
+---
+
+#### Steps 6.2 + 6.3 + 6.4 + 6.6 — batched (2026-10-16)
+
+Per §11.2's own batch plan: "6.2 + 6.3 + 6.4 + 6.6 (plumbing, batched) —
+Tenant settings, sources screens, escalation inbox/usage, Phase 6
+acceptance. *Dashboard track ends here.*" 6.5 (Platform admin) excluded
+throughout, by direct instruction — POST-PILOT per Felix's decision G.
+
+##### Step 6.2 — Tenant settings
+
+**Backend** (`app/tenancy/schemas.py`, `app/tenancy/repository.py`,
+`app/dashboard/tenant_routes.py`, `app/dashboard/tenant_schemas.py`,
+new): real Pydantic schemas for every dashboard-writable
+`tenants.config` section — `SupportDetailsUpdate`, `AlertEmailsUpdate`,
+`WidgetLookUpdate` (with `WidgetColors`, CSS color/URL validation
+mirroring the widget's own client-side rules exactly: hex/rgb/hsl
+regex, WHATWG-URL-parsing tab/newline-stripping for the
+`javascript:`-bypass defense, https-only), `RetentionUpdate` (1-90
+days / 1-24 months), `TraceTextUpdate`, `AllowedOriginsUpdate`.
+`TenantScopedRepository.update_config()` merges a patch into
+`tenants.config` (`{**old, **patch}` reassignment, never in-place
+mutation — the column is a plain JSONB, not `MutableDict`, so mutating
+in place would silently fail to persist, the identical staleness-bug
+class this same task also fixed in `update_source()` at 6.3).
+`GET/PATCH /api/v1/dashboard/tenant[/support-details|/alert-emails|
+/widget-look|/retention|/trace-text]`, `GET/POST .../site-keys`,
+`PATCH .../site-keys/{id}/origins` (behind `require_recent_auth()`,
+docs/SPEC.md §12's own "changing site keys or allowed origins" rule),
+`GET .../install-snippet`.
+
+**Contract additions** (Felix pre-authorised, additive-only, proven via
+`scripts/check_openapi_additive.py`): (a) `verified_domains` added to
+`widget_config` (`app/auth/routes.py`'s `_public_widget_config()`,
+filtered to `status == "verified"`); (b) `conversation_id` added to
+`/chat`'s `done` SSE event for a first turn; (c) the verified
+`SessionResponse` ASSUMPTION marker deleted. All three were
+widget-track-found gaps whose fix ownership the dashboard track took at
+the pre-6.2 alignment task — built here as originally scheduled.
+
+**`admin_cli.py`**: `reset-password` (prompts via `getpass`, never a
+CLI argument, never logged), `set-platform-admin`/`unset-platform-admin`
+— all three built ON `UserManager.update()` so the Step 6.1 session-
+invalidation hook applies automatically, closing that hook's own
+residual gap (the real commands finally exist; `seed_cli.py`'s own
+"hand-edit the database" workaround note was removed and replaced with
+a pointer at these commands).
+
+**The real per-tenant support-details fallback template** (Part G, the
+duplication-check/acceptance pass): built LATE in this batch, once the
+6.6 acceptance pass's own clause-by-clause check against docs/SPEC.md
+found it was the one genuinely still-open piece of 6.2's own original
+scope — `_no_answer_fallback_node`/`_dependency_failure_fallback_node`/
+the quota-exhausted `_fallback_node` (`app/agent/graph.py`) were still
+using the Task-3.4.e-era PLATFORM-DEFAULT fixed text, with the real
+`tenants.config` fields sitting unused. Fixed: `render_support_details_
+text()` builds the real template (email/phone/contact-link/hours/
+message interpolated into a real sentence, `None` when no contact
+method is configured — falling back cleanly to the platform-default
+text, since a draft site key can still serve chats before support
+details exist); `app/chat/routes.py` renders it once per turn (it
+already has `tenant.config` open with a real DB session, right next to
+the quota/retention/trace-text checks) and threads it through the
+LangGraph config — the identical config-not-state pattern
+`quota_exhausted_from_config()` already established at Task 4.3 — read
+back by all three fallback nodes via a new `support_text_from_config()`
+accessor, still passing through `_sanitize_answer_text()` unchanged.
+
+**[SECURITY] finding made and fixed in the same pass**: confirmed live
+that `langgraph.checkpoint.base.get_checkpoint_metadata()` copies every
+`configurable` entry whose value is a bare `str`/`int`/`bool`/`float`
+into the checkpoint's own PERSISTED `metadata` column —
+`EXCLUDED_METADATA_KEYS` is a fixed library constant this project
+cannot extend. A bare `support_text` string would have leaked a
+tenant's real email/phone/contact-link into a database column nothing
+else expects to hold tenant contact PII. Fixed by storing it wrapped in
+a single-key dict (`{"text": ...}`), which that function's own
+`isinstance` filter silently skips — proven live against the real
+checkpoint table, not merely reasoned about
+(`test_support_text_is_never_persisted_in_checkpoint_metadata`,
+mirroring `tenant_id`'s own identical Task-3.3.a guard). **A related
+pre-existing gap found, not fixed, flagged in the register**:
+`quota_exhausted` (Task 4.3, a bare `bool`) is NOT similarly wrapped and
+DOES leak into persisted checkpoint metadata today — non-sensitive (a
+boolean flag), left for whoever next touches that field.
+
+**Frontend** (`dashboard/src/screens/SettingsScreen.tsx`,
+`WidgetScreen.tsx`, `OverviewScreen.tsx`, `lib/tenant-api.ts`, new): a
+shared `DataView` component (loading-skeleton/error-no-internals/
+permission-denied/empty/ready, used by every data view this whole batch
+builds) and `useAsyncData` hook. `SettingsScreen`: support details,
+alert/escalation email, retention (with the "shortening deletes older
+chats" explanation before saving), trace-text switch, site keys +
+allowed origins. `WidgetScreen`: widget look (native `<input
+type="color">` paired with a validated hex text input) + the real
+install snippet (tells the tenant to ask their platform admin when
+`PUBLIC_API_BASE_URL` is unset, rather than showing a wrong URL).
+`OverviewScreen`: the real go-live checklist, built once 6.3's own
+source data existed to check against — a new, read-only `GET .../
+tenant/go-live-check` endpoint mirrors docs/SPEC.md's real gate (at
+least one contact method AND one allowed origin) server-side; this
+screen never duplicates that rule client-side. Verified domain / enabled
+source are shown as real, useful signals but correctly do NOT gate
+`ready_for_go_live` — they are not part of the actual server-side gate.
+
+**A real axe-core "color-contrast" finding, fixed without hand-editing
+the generated file**: shadcn's own generated `alert.tsx` destructive
+variant applies a 90%-opacity red to `AlertDescription` (and, via CSS
+`color` inheritance, to a nested Button too) — 4.49:1, below WCAG AA's
+4.5:1. Fixed at the usage site: the Retry button moved into the
+`AlertAction` slot (a sibling, outside the inheritance chain) and
+`!text-destructive` (a Tailwind `!important` override) forces full
+opacity on `AlertDescription` itself.
+
+**Duplication check (n=4, due mid-batch)**: `errorMessageFor()` and the
+save-failure `Alert` markup had reached their third real occurrence
+across the Settings cards — extracted into `lib/error-messages.ts` and
+`components/SaveError.tsx`.
+
+##### Step 6.3 — Sources screens
+
+**Backend** (`app/dashboard/source_routes.py`, `source_schemas.py`,
+new; `app/ingest/repository.py`, `upload_storage.py` extended):
+`GET/POST /api/v1/dashboard/sources`, `PATCH .../sources/{id}` (urls-
+type only), `POST .../sources/{id}/disable|enable|refresh-now`,
+`DELETE .../sources/{id}`, `POST .../sources/database` (unconditional
+400 — Felix decision A, `database`-type creation rejected server-side,
+never offered in the UI), the real streaming upload endpoint
+`POST .../sources/upload`, `GET/POST .../domains`,
+`POST .../domains/{id}/verify`. Source status is LIVE-COMPUTED from the
+most recent `Job` row (`_derive_status()`), not the pre-existing
+`Source.status` column — confirmed by grepping every real writer in
+`app/ingest/`: only `create_source()` ever sets it, always to
+`"active"`, so it was never a live signal to begin with.
+
+**Felix decision B**: `delete_source()` now also cleans up a deleted
+`database`-type source's own `db_connections` credentials, but only
+after confirming no OTHER source still references the same connection
+(the schema does not enforce one connection per source).
+
+**The real upload endpoint, with every named security property**:
+`upload_id` generated/looked up ONLY through the tenant's own already-
+scoped `source.config["uploads"]` list, never client-supplied; size cap
+enforced WHILE STREAMING (`save_streaming()`, bounded 1MiB chunks,
+abort-and-delete-partial-file on breach), not after full buffering;
+reuses the existing content-based type sniffer (`sniff_file_type()` —
+PDF magic bytes, ZIP+docx-marker+zip-bomb-size-check, UTF-8-decodable
+→txt/md, never trusting claimed Content-Type/extension); filename never
+used as a path; on a re-upload matching an existing `original_filename`
+within the same source, the PREVIOUS `upload_id`'s own on-disk bytes
+are deleted before the new entry replaces it — closing the Task-2.7.c
+orphaned-storage marker, and the Task-2.7.c tenant-scoping marker,
+together, as this was always their real intended owner.
+
+**Fixed a real, currently-live content-lifecycle bug found along the
+way**: `update_source()` overwrote `source.config` wholesale with no
+diffing — a tenant removing one URL from a `urls`-type source's list
+had no cleanup path anywhere (the url-list adapter only re-fetches URLs
+IN the config, never discovers "missing" ones the way crawl discovery
+does). Fixed: when `client`/`collection_name` are supplied, it now
+computes `removed = old_urls - new_urls`, finds the matching `Document`
+rows, calls `delete_points_for_document()` per stale doc, then deletes
+the `Document` rows — closing the Task-2.9.g url-list-staleness marker.
+
+**The five ingestion-limit Settings fields → PlanLimits, investigated,
+mostly declined with reasons recorded**: `upload_max_size_bytes` wired
+directly at its own real new consumer (the upload endpoint). The other
+four (`crawl_page_cap`/`db_sync_row_cap`/`refresh_now_daily_allowance`/
+`refresh_interval_min_allowed`) left UNWIRED at their existing call
+sites — a small, mechanical change for three of them, a real shared-
+helper signature change with existing regression coverage for the
+fourth — because no real tenant has `plan_id` set yet in production, so
+the wiring would have zero observable effect today against a real
+signature-change risk in security-adjacent code. Re-owned to whoever
+next revisits this once a real tenant actually has a plan assigned.
+
+**Required adversarial pass, every case a committed regression test**
+(`backend/tests/test_dashboard_source_routes.py`, 30+ tests): oversized
+upload (413, both a small-body-with-wrong-Content-Length case and a
+genuinely large streamed body); zip-bomb `.docx` (422); binary-garbage
+with a spoofed extension/Content-Type (422, confirmed sniffed by real
+content, not trusted labels); path-traversal filenames (proven safe via
+`storage_dir.iterdir()` diffing — the real on-disk filename is never
+attacker-controlled); another tenant's real `source_id`/`upload_id`
+(404, "wrong tenant looks exactly like missing"); concurrent re-uploads
+(`asyncio.gather`, last-write-wins with no corruption — the correct bar
+for this project's own real pilot scale, not full transactional
+locking); `database`-type creation via both the dedicated endpoint and
+the generic create endpoint's own closed Literal type (both rejected);
+CSRF on every new state-changing route (parametrized, valid bodies per
+route so a 422 body-validation failure never masks the real CSRF
+check); widget JWT on every new endpoint (401, structural — these
+routes depend on the dashboard's own cookie-based session, which a
+widget JWT cannot satisfy). Run live 3 times for stability.
+
+**A Qdrant read-path-guard false positive, fixed the least-invasive
+way**: `_document_stats()`'s own SQL `func.count()`/`func.bool_or()`
+tripped `test_qdrant_read_path_guard.py`'s AST-based attribute-name
+scanner (`.count(` matches `AsyncQdrantClient.count()` by bare name).
+Fixed by rewriting the helper to fetch rows and count in Python instead
+— never by widening the guard's own allow-list (CLAUDE.md: "never widen
+a security guard's allow-list for convenience").
+
+**Frontend** (`dashboard/src/screens/SourcesScreen.tsx`,
+`lib/sources-api.ts`, new): the sources table (type, status badges,
+"may need JavaScript"/"exceeds plan" flags, last/next refresh, document
+count), an add-source dialog (URLs/Crawl/Upload tabs — the upload tab's
+"answerable to any visitor" warning checkbox gates the submit button,
+not merely a disabled-by-default state proven only visually), per-
+source disable/enable/refresh-now/delete (delete names exactly what
+will be removed: "N indexed pages... the visitor widget can no longer
+answer from its content"), and domain verification (dns/file/meta
+instructions keyed by the real `verification_token`).
+
+**A real axe-core "button-name" finding, fixed**: the domain-
+verification method `<Select>`'s trigger had no accessible name at all
+(a combobox-role button with no label) — fixed with `aria-label=
+"Verification method"`.
+
+##### Step 6.4 — Escalation inbox and usage
+
+**Backend** (`app/handoff/repository.py`, `app/dashboard/
+escalation_routes.py`, `escalation_schemas.py`, new): a tenant-scoped
+`EscalationRepository` (list/get/count-open/set-status/delete, the same
+dataclass shape as `TenantScopedRepository`). `GET /api/v1/dashboard/
+escalations` (summaries only — no transcript, a lighter payload),
+`GET .../escalations/open-count` (a separate, cheap query for the
+sidebar's own badge, which is mounted regardless of which screen is
+active), `GET .../escalations/{id}` (the full detail INCLUDING the
+transcript), `PATCH .../escalations/{id}/status` (closed `Literal["seen",
+"resolved"]` — "new" is creation-only, never a dashboard write),
+`DELETE .../escalations/{id}`.
+
+**Transcript display, closing the Step-6.4 half of the Task-4.4-era
+marker**: `get_escalation()` applies `markdown_unescape()` (the shared
+Step-4.4 helper, `app/text_escaping.py`) to the WHOLE stored transcript
+snapshot — one pass over the already-joined string, not per-line like
+the email body's own treatment (which iterates live `BaseMessage`
+objects and can tell visitor/assistant lines apart; the dashboard only
+has the already-joined stored string with no reliable per-line role
+boundary left to re-split on). `markdown_unescape()`'s own docstring
+names applying it to a visitor's own raw text as harmless for display
+purposes, which is exactly this case. The HTML-escape half is satisfied
+by construction on the frontend: `InboxScreen.tsx` renders the result
+as a plain React text node (`whitespace-pre-wrap`), never
+`dangerouslySetInnerHTML` — a React/DOM text node can never be
+reinterpreted as markup.
+
+**Usage meter**: `GET /api/v1/dashboard/usage` reads the AUTHORITATIVE
+DB-backed count (`app.plans.usage.monthly_count_from_db()`), never the
+API process's own in-memory counter — the SAME source of truth the
+usage-alert sweep itself reads (`handle_usage_alert_sweep()`), so this
+screen's own numbers can never disagree with an alert email the tenant
+may have already received. Three states (`normal`/`warning`/`exceeded`)
+at the exact same 80%/100% thresholds the sweep emails at.
+
+**Frontend** (`dashboard/src/screens/InboxScreen.tsx`,
+`UsageScreen.tsx`, `lib/escalation-api.ts`, new): the escalation table
+(created/contact/status/actions), a transcript dialog (lazy-loaded on
+open, rendered as the plain text described above), Mark seen/Mark
+resolved/Delete actions (delete names exactly what will be removed: "a
+permanently removes this escalation request and its transcript").
+`DashboardShell` now fetches the real open-escalation count on mount
+and passes a `reload` callback down so marking/deleting an escalation
+refreshes the sidebar badge too. Usage: a quota meter with badge
+variants chosen to avoid this theme's own measured-failing
+`destructive` Badge contrast (found live on the Overview checklist,
+see 6.6 below) — `default`/`secondary`/`outline` instead, all already
+axe-proven elsewhere on this batch.
+
+##### Step 6.6 — Phase 6 acceptance
+
+**docs/SPEC.md §18's own Phase 6 accept line, checked clause by clause
+against real evidence**: *"a new tenant can onboard end to end without
+touching the database."* Per docs/DECISIONS_REGISTER.md's own row ("6.6
+Phase 6 acceptance | Verifies 6.1–6.4"), this verifies Steps 6.1-6.4
+only — 6.5 (Platform admin, the piece that would normally cover tenant/
+site-key creation) is explicitly POST-PILOT. Read literally against
+THAT scope: a tenant's owner can self-serve everything docs/SPEC.md §12
+names (login, support details, widget theme, retention, sources +
+domain verification, escalation inbox, usage) without Felix hand-
+editing JSONB in Postgres directly — the only steps still requiring an
+operator action (creating the tenant row, the owner's User+Membership,
+and the initial site key) go through the real `admin_cli.py` commands
+built at 6.1/6.2, a proper CLI, not "touching the database." **This
+line is satisfied**, under this scope.
+
+**§12's own "Acceptance additions," each with real evidence, not
+overclaimed**:
+- **Screenshots, every screen, light AND dark**: 12 real screenshots
+  (6 screens × 2 themes) captured via a real Playwright script against
+  the real production build under the real backend, saved to the new
+  gitignored `dashboard/screenshots/` folder (never committed, the
+  identical "real output, not a committed fixture" treatment every
+  other per-run artifact in `.gitignore` already gets) — paths listed
+  for Felix in this task's own final report.
+- **A real light/dark theme toggle, built in the same pass this
+  requirement surfaced it was needed for**: the CSS token system
+  already supported both themes (`.dark` class rules, every screen
+  built on tokens only, confirmed by this whole batch's own work) but
+  NOTHING in the app ever applied that class — a real, found-live gap
+  in docs/SPEC.md §12's own "light and dark themes from the first
+  screen" line. Fixed with `src/lib/theme.ts` (`localStorage` +
+  `prefers-color-scheme` fallback, applied synchronously in `main.tsx`
+  before the first render to avoid a flash-of-wrong-theme) and a
+  header toggle button in `DashboardShell` — no new dependency
+  (`next-themes` was tried and reverted earlier in this track for
+  being unpinned).
+- **Keyboard-only pass + automated accessibility check, every screen,
+  committed as a real regression test**: a new `e2e/dashboard-
+  screens.spec.ts` logs in ONCE (not once per screen — a real per-
+  account dashboard login rate limit, docs/SPEC.md §12's own "rate-
+  limited login with temporary lockouts", was tripped live by this
+  task's own earlier repeated manual testing, confirming the limit is
+  real and working) and, for each of the 6 screens: runs a real axe
+  scan (zero serious/critical findings required), and a keyboard-only
+  Tab pass using REAL DOM-NODE IDENTITY comparison (a `JSHandle`
+  before/after each Tab press), not a derived text signature — a text-
+  signature version was tried first and produced a FALSE keyboard-trap
+  finding on the Widget screen (two distinct, unlabelled `<input>`
+  fields share the same empty textContent/no-aria-label, so a text
+  signature can't tell them apart even though focus genuinely moved).
+  A short screen legitimately running out of tab stops before 8
+  presses (focus leaves the page for browser chrome) is treated as
+  normal end-of-page behaviour, not a trap.
+- **Loading/empty/error(no internals)/permission-denied for every data
+  view**: verified directly, not assumed — every one of the 12
+  `DataView` usages across all 6 screens gets loading/error/
+  permission-denied automatically (the shared component's own
+  unconditional branches); `isEmpty`/`empty` is correctly present on
+  every LIST-shaped view (Sources' sources+domains, Settings' site
+  keys, Inbox's escalations) and correctly absent on every single-
+  record view (Overview, Usage, Widget's/Settings' own tenant config),
+  where "empty" has no meaning.
+
+**Duplication check (overdue, caught at this step)**: the counter had
+passed n=4 three times since the last reset (6.2 Part F) without a
+check running — `test_dashboard_escalation_routes.py` had reimplemented
+its own local `_dashboard_http_client()`/`_attach_csrf()`/
+`_create_user()`/`_login()`, a FOURTH occurrence of the exact pattern
+`tests/dashboard_test_helpers.py` was already extracted for at Step 6.3
+(that module's own header comment literally says "every dashboard
+route test file should import from here instead of redefining these").
+Fixed: imports the shared module directly.
+
+**§9 markers and register reconciled**: every Phase-6-owned marker
+found by a dedicated research pass is now RESOLVED in PROJECT_SPEC.md
+§9 with the real file/test naming the fix, or left correctly open with
+its own reason restated (the per-plan ingestion-limit deferral; the
+escalation `reason` field's fixed-string limitation, D-44-reason-
+fixed-string — a genuine, accepted limitation, not this step's job to
+change the schema). `docs/DECISIONS_REGISTER.md`'s own "6.2"/"6.3"/
+"6.4" forward-commitment sections all marked RESOLVED with what was
+actually built.
+
+##### Prior decisions applied (full list, cited again here for the
+permanent record — see this task's own final report for the complete
+version with file/test citations)
+
+Every 6.2/6.3/6.4 forward commitment named in docs/DECISIONS_REGISTER.md
+as of this batch's start, plus Decisions A (database-type source
+rejected server-side) and B (db_connections cleanup on delete) from
+Felix's 2026-10-15 ratified decisions — see the register's own "6.2
+Tenant settings"/"6.3 Sources screens"/"6.4 Escalation inbox and usage"
+sections (now marked RESOLVED) for the complete, dated list.
+
+##### Verified (final, authoritative pass, end of batch)
+
+- `make lint`: clean (ruff, whole `backend/evals/hooks.py`).
+- Full `backend/tests` (both real test services, `TEST_DATABASE_URL` +
+  `TEST_QDRANT_URL`): **1721 passed, 0 failed** (up from 1572 at Step
+  6.1's own close-out).
+- `dashboard/`: `npx tsc --noEmit` clean; `npm run lint` clean (3
+  pre-existing shadcn-boilerplate warnings, unrelated); `npx vitest
+  run` **41 passed** (0 failed); `npm run build` succeeds within
+  budget.
+- `dashboard/e2e` (`npm run test:e2e`, real strict-CSP production
+  build against the real backend): **6/6 passing** (the original 5
+  `csp.spec.ts` tests plus the new `dashboard-screens.spec.ts`
+  per-screen a11y/keyboard/CSP pass), run 3x for stability.
+- `backend/tests/test_dashboard_source_routes.py`'s own adversarial
+  pass: run live 3x.
+- OpenAPI additive-only proof (`scripts/check_openapi_additive.py`):
+  confirmed at every contract-touching sub-step — 9 new paths after
+  6.2 Part B, 9 more after 6.3 Part B, 5 more after 6.4 Part A, 1 more
+  after 6.2 Part F (go-live-check) — 0 changed/removed paths at any
+  point; unchanged (0 diff) after the 6.2 Part G support-details fix
+  (internal graph wiring only, no endpoint shape touched).
+- Live end-to-end smoke test, the real HTTP API, not a unit test:
+  seeded a real tenant's own quota to exhausted (1/1 via a real `Plan`
+  row + `UsageEvent`, forcing a container restart so the API's own
+  in-memory counter reloaded from the DB), sent a real chat message
+  through the real session+chat flow, and confirmed the fallback
+  reply embedded the tenant's own real configured support email —
+  proving the `tenants.config` → `render_support_details_text()` →
+  `chat/routes.py` → LangGraph config → fallback node chain end to
+  end, not just at the unit level.
+- Rebase: `.env.example`/`backend/tests/test_env_example.py` conflicts
+  with the ops track's own Step 7.3 prep work resolved by keeping BOTH
+  sides' lines (every variable given its own comment line, confirmed
+  via `test_every_variable_line_has_a_comment_line_directly_above_it`);
+  full suite re-run clean after the rebase.
+- `git status --short`: clean after each commit; no `.env` ever
+  staged.
+- A real Docker Desktop engine outage occurred mid-batch (confirmed
+  live via `ps aux` — the build/test processes were genuinely stalled,
+  not merely slow, their own CPU time frozen across multiple checks);
+  recovered by killing the one confirmed-dead process and restarting
+  the disposable test containers fresh, per explicit instruction —
+  nothing destructive touched without that instruction.
+
+**Phase 6 is Done.** All six §4 rows (6.1–6.6) updated accordingly.
+
+
 ## 6. Project constraints
 
 - Out of scope for v1 (deferred): logged-in visitors, live human handoff, approved live database queries, tenant-supplied tool servers, actions with human approval, JavaScript-rendered crawling, a request challenge (e.g. Turnstile), the reranker (unless evals justify it), spreadsheet uploads, payment processing, multiple languages, custom widget CSS, 2FA/Google sign-in, stream resume (SPEC §19).
@@ -6510,8 +7602,9 @@ A second batched prompt (2026-10-15) ran Part A (refined stop condition (d) so a
 A third batched prompt (2026-10-15) ran Part A (Felix's §11.3 kickoff decisions ratified into the decision log, plus the parallel-track protocol written into §11.5; the real OpenAPI contract lock, `docs/openapi.json` + `tests/test_openapi_contract.py`) and **Part B (plumbing) — Step 4.5 (Phoenix tracing) — Done**: the full `app/telemetry/service.py` build (tagging/redaction processors, per-tenant text retention switch-off, the manual retriever span, FastAPI/LangChain instrumentation with the per-chunk-span fix), the `phoenix` Docker Compose service (loopback-only, no Caddy route), and a real project-wide test-infrastructure bug (`fresh_import()` in `tests/conftest.py`) found and fixed while verifying it — see the Step 4.5 decision-log entry, §5, for the full build, the three named [SECURITY] requirements and their live verification, and the bug's own root-cause narrative.
 This same third batched prompt's own Part C ran Step 4.6 (Phase 4 acceptance) — docs/SPEC.md §18's own Phase 4 accept line checked clause by clause against real evidence; 7 Step-4.1-owned §9 markers and one Step-4.4-owned marker found already resolved by real code but never marked, reconciled in place; the Phase 4 closure written in the same shape as Phases 1–3 — see the Step 4.6 decision-log entry and the Phase 4 closure, §5. **Phase 4 is Done.**
 Phase 5 (Widget) — per docs/SPEC.md §18's own step list (5.1 Loader and shadow DOM shell; 5.2 Chat UI core [SECURITY]; 5.3 Conversations UI; 5.4 Escalation panel and fallback UI; 5.5 Theming, accessibility and CSP; 5.6 Phase 5 acceptance) — ran on its own git worktree (`track/widget`) per the parallel-track protocol (§11.5) and is now **Done** (closed out 2026-10-15): all six steps built, verified, and folded into this file (§4 above; the Phase 5 closure, §5) with `docs/progress/widget.md` kept as archived per-step detail. The track's own `git log --oneline origin/main..HEAD` was confirmed empty at close-out — every widget-track commit is on `main`.
-Next: Phase 6 (Dashboard) is running in parallel on its own worktree (`track/dashboard`), per the same §11.5 protocol; that track owns its own close-out and its own fold-in of `docs/progress/dashboard.md` into this file, not reported here. One widget-owned forward commitment is now pending on Phase 6's own Step 6.2 landing: consuming `verified_domains` and the first-turn `conversation_id` once the dashboard track adds them additively (see docs/DECISIONS_REGISTER.md and §9 below) — owner: whichever session picks that up after 6.2 lands.
-Do not modify (completed tasks): 1.1.a, 1.1.b, 1.1.c, 1.1.d, 1.1.e, 1.1.f, 1.1.g, 1.1.h, 1.1.i, 1.1.j, 1.1.k, 1.1.l, 1.1.m, 1.1.n, 1.1.o.a, 1.1.o.b, 1.1.o.c, 1.1.o.d, 1.1.o.e, 1.1.o.f, 1.1.o.g, 1.1.o.h, 1.1b, 1.1c, 1.2.a, 1.2.b, 1.2.c, 1.2.d, 1.2.e, 1.2.f, 1.3.a1, 1.3.a2, 1.3.b, 1.3.c, 1.3.d, 1.3.e, 1.3.f, 1.4.a, 1.4.b, 1.4.c, 1.4.d, 1.4.e, 1.4.f, 1.4.g, 1.4.h, 1.4.i, 1.4.j, 1.4.k, 1.4.l, 1.5.a, 1.5.b, 1.5.c, 1.5.d, 1.5.e, 1.5.f, 1.6.a, 1.6.b, 1.6.c, 1.6.d, 1.6.e, 2.1.a, 2.1.b, 2.1.c, 2.1.d, 2.1.e, 2.1.f, 2.1.g, 2.1.h, 2.2.a, 2.2.b, 2.2.c, 2.2.d, 2.2.e, 2.2.f, 2.2.g, 2.2.h, 2.2.i, 2.3.a, 2.3.b, 2.3.c, 2.3.d, 2.3.e, 2.4.a, 2.4.b, 2.4.c, 2.4.d, 2.4.e, 2.4.f, 2.4.g, 2.5.a, 2.5.b, 2.5.c, 2.5.d, 2.5.e, 2.5.f, 2.6.a, 2.6.b, 2.6.c, 2.6.d, 2.6.e, 2.6.f, 2.7.a, 2.7.b, 2.7.c, 2.7.d, 2.7.e, 2.7.f, 2.8.a, 2.8.b, 2.8.c, 2.8.d, 2.8.e, 2.8.f, 2.9.a, 2.9.b, 2.9.c, 2.9.d, 2.9.e, 2.9.f, 2.9.g, 2.10.a, 2.10.b, 2.10.c, 3.1.a, 3.1.b, 3.1.c, 3.1.d, 3.1.e, 3.1.f, 3.2.a, 3.2.b, 3.2.c, 3.2.d, 3.3.a, 3.3.b, 3.3.c, 3.3.d, 3.4.a, 3.4.b, 3.4.c, 3.4.d, 3.4.e, 3.4.f, 3.4.g, 3.5.a, 3.5.b, 3.5.c, 3.5.d, 3.5.e, 3.7.a, 3.7.b, 3.7.c, 3.7.d, 3.7.e, 3.7.f, 3.7.g, 3.7.h, 3.7.i, 3.8, 4.1, 4.2, 4.3, 4.4, 5.1, 5.2, 5.3, 5.4, 5.5, 5.6.
+Phase 6 (Dashboard) — per docs/SPEC.md §18's own step list (6.1 Dashboard authentication [SECURITY]; 6.2 Tenant settings; 6.3 Sources screens; 6.4 Escalation inbox and usage; 6.5 Platform admin, explicitly POST-PILOT by Felix's own decision G; 6.6 Phase 6 acceptance) — ran on its own git worktree (`track/dashboard`) per the parallel-track protocol (§11.5) and is now **Done** (closed out 2026-10-16, 6.5 excluded): six of six PILOT-MUST steps built, verified, and folded into this file (§4 above; the Phase 6 closure, §5) with `docs/progress/dashboard.md` kept as archived per-step detail. The one widget-owned forward commitment pending on Step 6.2 (consuming `verified_domains` and the first-turn `conversation_id` once added additively) is now unblocked — both fields exist on the real contract as of 6.2 Part B; owner: whichever session next touches the widget's own renderer/conversation-list code.
+Next: Phase 7 (Hardening and go-live) — per docs/SPEC.md §18/§11.1-§11.2: 7.1 Load tests (now also the per-message token cap and max-agent-steps limit, Felix decision C), 7.2 Full security and injection run [SECURITY] (now also image secret scanning, decision E), 7.3 Backups/restore drill/monitoring (ops-track prep already landed — Caddy, docker-compose.prod.yml, backup/monitoring scripts, RUNBOOK.md — final verification on the real server still owed), 7.4 Go-live checklist and spec reconciliation (now also the placeholder-secret-rejection gate, decision D), 7.5 Pilot onboarding (new step, decision F — the pilot tenant's own real golden set, re-checking model choice/gate threshold/retrieval_k/reranker-off against real content). Both tracks (widget, dashboard) are now closed and merged — Phase 7 depends on BOTH per §11.2's own note and runs sequentially, not on a parallel worktree.
+Do not modify (completed tasks): 1.1.a, 1.1.b, 1.1.c, 1.1.d, 1.1.e, 1.1.f, 1.1.g, 1.1.h, 1.1.i, 1.1.j, 1.1.k, 1.1.l, 1.1.m, 1.1.n, 1.1.o.a, 1.1.o.b, 1.1.o.c, 1.1.o.d, 1.1.o.e, 1.1.o.f, 1.1.o.g, 1.1.o.h, 1.1b, 1.1c, 1.2.a, 1.2.b, 1.2.c, 1.2.d, 1.2.e, 1.2.f, 1.3.a1, 1.3.a2, 1.3.b, 1.3.c, 1.3.d, 1.3.e, 1.3.f, 1.4.a, 1.4.b, 1.4.c, 1.4.d, 1.4.e, 1.4.f, 1.4.g, 1.4.h, 1.4.i, 1.4.j, 1.4.k, 1.4.l, 1.5.a, 1.5.b, 1.5.c, 1.5.d, 1.5.e, 1.5.f, 1.6.a, 1.6.b, 1.6.c, 1.6.d, 1.6.e, 2.1.a, 2.1.b, 2.1.c, 2.1.d, 2.1.e, 2.1.f, 2.1.g, 2.1.h, 2.2.a, 2.2.b, 2.2.c, 2.2.d, 2.2.e, 2.2.f, 2.2.g, 2.2.h, 2.2.i, 2.3.a, 2.3.b, 2.3.c, 2.3.d, 2.3.e, 2.4.a, 2.4.b, 2.4.c, 2.4.d, 2.4.e, 2.4.f, 2.4.g, 2.5.a, 2.5.b, 2.5.c, 2.5.d, 2.5.e, 2.5.f, 2.6.a, 2.6.b, 2.6.c, 2.6.d, 2.6.e, 2.6.f, 2.7.a, 2.7.b, 2.7.c, 2.7.d, 2.7.e, 2.7.f, 2.8.a, 2.8.b, 2.8.c, 2.8.d, 2.8.e, 2.8.f, 2.9.a, 2.9.b, 2.9.c, 2.9.d, 2.9.e, 2.9.f, 2.9.g, 2.10.a, 2.10.b, 2.10.c, 3.1.a, 3.1.b, 3.1.c, 3.1.d, 3.1.e, 3.1.f, 3.2.a, 3.2.b, 3.2.c, 3.2.d, 3.3.a, 3.3.b, 3.3.c, 3.3.d, 3.4.a, 3.4.b, 3.4.c, 3.4.d, 3.4.e, 3.4.f, 3.4.g, 3.5.a, 3.5.b, 3.5.c, 3.5.d, 3.5.e, 3.7.a, 3.7.b, 3.7.c, 3.7.d, 3.7.e, 3.7.f, 3.7.g, 3.7.h, 3.7.i, 3.8, 4.1, 4.2, 4.3, 4.4, 5.1, 5.2, 5.3, 5.4, 5.5, 5.6, 6.1, 6.2, 6.3, 6.4, 6.6.
 
 ### Step 1.1 task list (approved)
 
@@ -7032,9 +8125,7 @@ Prior reset to **n = 0** at the duplication check covering the 3 tasks against t
 - Owner: whoever first has reason to doubt it, or Phase 7's own full security pass (recorded at Task 2.7.b, 2026-10-07): `sniff_file_type()`'s own zip-bomb defense (`app/ingest/upload_sniff.py`) checks `zipfile.ZipInfo.file_size`, a DECLARED metadata field, which a sufficiently adversarial ZIP could in principle make inconsistent with its real compressed stream (lying about the size while keeping a self-consistent CRC for a larger real payload) — investigated live (hand-tampering a real ZIP's own size field), confirmed stdlib `zipfile` still catches many such inconsistencies via its own CRC-32 check during `read()`, but only AFTER decompressing, which would not prevent the resource cost. A deliberate v1 scope limit (rule 11 — the standard, well-known mitigation for the actual classic-zip-bomb risk being defended against, not the more exotic metadata-lying variant; no evidence yet that a real upload needs the latter closed), not a silent gap. Closing it fully would need a bounded, incremental decompressing read ignoring declared metadata entirely, mirroring pypdf's own `max_length=`-bounded approach.
 - Owner: whoever first observes a real upload job hang near the 30-minute boundary, or Phase 7 (recorded at Task 2.7.b, 2026-10-07): no per-extraction-call wall-clock timeout was built around `extract_pdf()`/`extract_docx()`/`extract_text()`/`extract_markdown()`, despite the task explicitly raising the question. Reasoned through, not overlooked: the two real pathology categories found (PDF's circular-page-tree/decompression-bomb risks; DOCX's zip-bomb risk) are now closed by mechanisms that prevent the dangerous operation from STARTING at all, which a timeout cannot improve on; a Python synchronous-code timeout cannot actually GUARANTEE termination of a blocking C-level call or a live thread, so it would not genuinely bound memory (the real risk) even if built; and `reap_stuck_jobs()` (2.6.f, `job_stuck_after_seconds`, default 1800s) already provides a real, job-type-agnostic backstop against any job hanging abnormally long, for any reason. Revisit if a real upload job is ever observed to approach that 30-minute window in practice, which would be real evidence a per-extraction bound is worth the engineering cost a correct one (process-level, not signal/thread-based) would actually require.
 - Owner: whoever next touches `app/ingest/extract_docx.py` (recorded at Task 2.7.c, 2026-10-08): that file's own header comment (2.4.e) claims `docx.opc.exceptions.PackageNotFoundError` covers "certain other package-level failures" beyond `zipfile.BadZipFile` — confirmed INCOMPLETE by building two real, reachable counter-examples live: a docx-shaped ZIP missing required OPC parts (`[Content_Types].xml`/`_rels/.rels`) raises a bare `KeyError`, not `PackageNotFoundError`; a complete, otherwise-valid `.docx` with its own `word/document.xml` content replaced by invalid XML raises `lxml.etree.XMLSyntaxError`, a third, undocumented type. Not fixed in `extract_docx.py` itself at 2.7.c (that task's own file list only pre-approved its header comment's mechanical "Step 2.6"→"Step 2.7" correction, per rule 2) — `app/ingest/upload_adapter.py`'s own dispatch table was widened to catch both anyway, narrowly scoped to that one call site, so no real-world behavior is currently broken by this stale comment; only the comment's own claim needs correcting, whenever this file is next touched for any reason.
-- Owner: whoever next builds the real upload-receiving/re-upload endpoint (Phase 6, likely 6.3 Sources screens) — re-owned at Task 2.9.g's own close-out (2026-10-24) from "Owner Step 2.9," since Step 2.9 is closing in this same task with this marker still unresolved; recorded at Task 2.7.c, 2026-10-08, mirroring the already-acknowledged "stale Qdrant points on content shrink" marker (2.5.d) for the identical reason: a tenant re-uploading changed content under the same `source_id`/filename gets a NEW `upload_id` (a new on-disk file, per `upload_storage.save()`'s own design, 2.7.a) — the PREVIOUS `upload_id`'s own on-disk bytes are never deleted anywhere, becoming permanently orphaned storage. `ingest_upload()` itself has no way to know a previous `upload_id` existed (that mapping is expected to live in `sources.config`, read only by 2.7.d's own job handler, not this per-call primitive) — fixing this needs whoever manages a source's own config transition to know there WAS a previous value and delete it, not a per-call ingestion primitive. **Re-confirmed STILL OPEN at Task 2.9.e's own review (2026-10-23), not silently also fixed there**: this is a DIFFERENT trigger from source deletion (a re-upload REPLACING an upload_id under the same source/filename, not a source being deleted) — explicitly out of scope for that task, per its own direct instruction. **Re-confirmed STILL OPEN at Task 2.9.g's own close-out review (2026-10-24)**: nothing built in 2.9.g touches `upload_storage.py` or any source's own config-transition handling.
 - RESOLVED at Task 2.9.e (2026-10-23, recorded at Task 2.7.c, 2026-10-08): the EXISTING source-deletion/disable mechanism (`revoke_domain()` and friends, 2.2.g) only ever touched `verified_domains` rows and Qdrant points (`source_id`-scoped deletion/hiding, docs/SPEC.md §5.3) — nothing anywhere deleted an upload source's own on-disk stored bytes (`upload_storage.py`) when its source was disabled or deleted. `IngestRepository.delete_source()` (new, Task 2.9.e) now deletes every referenced upload's own on-disk file for an upload-type source, proven live against a real file on disk (`test_delete_source_removes_the_on_disk_file_for_an_upload_type_source`, `test_ingest_repository.py`) — see that task's own decision-log entry for the full reasoning, including the explicit confirmation that the marker directly above (upload_id-replacement orphans) is NOT resolved by this and stays open.
-- Owner: whoever builds the real upload-receiving endpoint (Phase 6, likely 6.3 Sources screens; recorded at the duplication check after 2.7.a/b/c, 2026-10-08, confirmed live, not assumed): `upload_storage.py`'s own `read()`/`delete()` take a bare `storage_id: uuid.UUID` with no tenant-scoping parameter at all — investigated whether this is a real gap or correctly deferred one layer up, concluded the latter: it matches this project's own already-established trust model exactly (`ingest_url()`/`embed_and_upsert()` also take `tenant_id`/`source_id` as plain parameters with no internal cross-entity ownership check), and `upload_id` is never tenant-suppliable directly today — by design, it is resolved server-side from an already tenant-scoped `sources.config` value (see `upload_adapter.py`'s own header comment), never from end-user input. Not a defect in `upload_storage.py` today, and no code change made. What IS genuinely different from a Postgres row: the on-disk path has ZERO tenant dimension of its own (no `tenant_id` column equivalent, unlike a `Document`/`Source` row, which a tenant-scoped repository could enforce even against a caller's mistake) — so there is no defense-in-depth at the storage layer if some future caller ever gets this wrong. The real, not-yet-built upload-receiving endpoint MUST correctly scope `upload_id` generation/lookup to the authenticated tenant's own source when it is built — nothing downstream would catch a mistake there the way a Postgres row's own `tenant_id` column would.
 - Owner: whoever first hits a real tenant site large enough to need it (no task scheduled yet, recorded at Task 2.6.e, 2026-10-07): `app/ingest/crawl.py`'s `discover_sitemap_urls()`/`parse_sitemap_xml()` only handle a flat `<urlset>` of `<url><loc>` entries — a `<sitemapindex>` of nested sitemap files (a real-world pattern large sites use to split one sitemap across many files) is NOT recursed into; such a site's own index file would currently be parsed for `<loc>` entries that point at OTHER sitemap files, not real content pages, and those would be treated as if they were ordinary page URLs. A deliberate v1 scope limit (rule 11 — no evidence yet that a real tenant site needs this), not a silent gap.
 - Owner: whoever builds a second `database`-sync engine (no task scheduled yet, recorded at Task 2.8.a, 2026-10-09): `db_connections` has no `engine` column and no `CheckConstraint` naming any engine at all today — confirmed live by reading `app/ingest/models.py` and grepping `alembic/versions/`, not assumed. Step 2.8 is Postgres-only by direct user decision; MySQL/MariaDB is deferred, not merely unbuilt. Whoever adds a second engine must decide how it is distinguished (most likely a NEW top-level column, mirroring `host`'s own precedent of staying outside the opaque encrypted-credentials blob, rather than a value inside it) — not decided speculatively here.
 - Owner: whoever first wires TLS functionally for the database connector (no task scheduled yet, recorded at Task 2.8.a, 2026-10-09, confirmed live by reading the installed `asyncpg==0.32.0`'s own `connect_utils.py`): `connect_safely()`'s own pinning (connecting via the SSRF-guard-validated IP literal, never the original hostname) has no `safe_fetch.py`-style SNI-hostname-override mechanism available to it — `asyncpg`'s `_create_ssl_connection()` always passes `server_hostname=host` using the SAME value given to `connect()`'s own `host=` parameter, with no separate parameter to preserve the tenant's real configured hostname for certificate verification. The SSRF guard itself is fully unaffected (the connection can never reach an unvalidated destination); the narrower, distinct consequence is that `sslmode="verify-full"` would verify the server certificate against the pinned IP rather than the real hostname, once a later task actually exercises TLS for a real tenant connection. Revisit when that happens — closing it properly would need either a custom `ssl.SSLContext` with its own `server_hostname` override at the transport level (unconfirmed whether `asyncpg` exposes a hook for this) or accepting the narrower guarantee, not decided speculatively now. **Re-confirmed STILL OPEN at Task 2.8.f's own close-out review (2026-10-16), not accidentally closed by 2.8.e's own end-to-end wiring**: every one of 2.8.e's real connections used `sslmode="disable"` (test-db runs plain TCP) — TLS is still never functionally exercised anywhere in this codebase, so this marker's own precondition has still not been reached.
@@ -7047,7 +8138,6 @@ Prior reset to **n = 0** at the duplication check covering the 3 tasks against t
 - Owner: whoever next revisits per-plan ingestion limits (no task scheduled yet), re-scoped at Task 4.3's own close-out from "Owner Task 4.3" (originally recorded at Task 2.9.b, 2026-10-20, extending `crawl_page_cap`'s/`upload_max_size_bytes`'s/`db_sync_row_cap`'s own identical, already-tracked markers to this fourth setting — not a new root cause): `create_source()`'s/`update_source()`'s own refresh-interval-vs-plan floor (`Settings.refresh_interval_min_allowed`, default `"daily"`) is NOT sourced from `plans.limits`, for the identical, already-confirmed reason as the other three — `plans.limits` is still an unstructured JSONB stub, `get_plan_limits()` is still an explicit `NotImplementedError` stub. Revisit this sourcing, AND wire `flag_source_if_exceeds_plan()` (`app/ingest/repository.py`, the downgrade-flagging primitive built but deliberately left unwired at Task 2.9.b, since no plan-change hook exists anywhere in this codebase yet — confirmed live by grep, not assumed) into whatever future mechanism first reacts to `tenants.plan_id` changing, once whoever next revisits this family wires it to read from the now-real `PlanLimits` type (`app/plans/schemas.py`, Task 4.3) instead of the global Settings default -- the TYPE exists now, but Task 4.3 deliberately did not rewire this call site (a wide, unrelated-to-usage/quotas ingestion-code change, out of scope for that task -- see PROJECT_SPEC.md's own Step 4.3 decision-log entry).
 - Owner: whoever next revisits per-plan ingestion limits (no task scheduled yet), re-scoped at Task 4.3's own close-out from "Owner Task 4.3" (originally recorded at Task 2.9.c, 2026-10-21, extending `crawl_page_cap`'s/`upload_max_size_bytes`'s/`db_sync_row_cap`'s/`refresh_interval_min_allowed`'s own identical, already-tracked markers to this fifth setting — not a new root cause; no aggregate marker exists yet consolidating the family, checked directly before adding a fifth individual one rather than one unilaterally): `request_refresh_now()`'s own daily-allowance ceiling (`Settings.refresh_now_daily_allowance`, default 5, `app/ingest/repository.py`) is NOT sourced from `plans.limits`, for the identical, already-confirmed reason as the other four — `plans.limits` is still an unstructured JSONB stub, `get_plan_limits()` is still an explicit `NotImplementedError` stub. (`Settings.refresh_now_cooldown_seconds`, the OTHER new Settings field this same task added, is deliberately NOT part of this family — docs/SPEC.md's own `plans.limits` enumeration, §5.4, names "refresh-now allowance" but never a cooldown duration, so the cooldown is a pure internal safety/UX mechanism, same treatment as `docx_max_part_size_bytes`, with no marker of its own.) Revisit this sourcing once whoever next revisits this family wires it to read from the now-real `PlanLimits` type (`app/plans/schemas.py`, Task 4.3) instead of the global Settings default -- the TYPE exists now, but Task 4.3 deliberately did not rewire this call site (a wide, unrelated-to-usage/quotas ingestion-code change, out of scope for that task -- see PROJECT_SPEC.md's own Step 4.3 decision-log entry).
 - RESOLVED at Task 2.9.g's own follow-up (2026-10-25, recorded at that same task's Part 2 close-out review, 2026-10-24): `request_refresh_now()` (`app/ingest/repository.py`) never checked `is_tenant_active()` — the identical shape as this same task's own D.1 fix, for a different gate. The scheduled path (`scheduler_tick`) is protected by three independent layers (the seeding query, the handler's own up-front check, `get_due_sources()` itself, all resolved at Task 2.9.a) — `request_refresh_now()` bypassed all three, since it enqueues the adapter job directly rather than going through any of them. Fixed at both layers, mirroring D.1 exactly: **primary** — new `TenantSuspendedError`, raised by `request_refresh_now()` the instant `is_tenant_active()` reports the tenant inactive, checked FIRST, before even `source.enabled`; **secondary, handler-level backstop** — `_skip_if_source_disabled()` widened in place to `_skip_if_source_disabled_or_tenant_inactive(session, source)` (not a second, separate function: investigated first, confirmed the original did not already generalize to this case, since it took no session/tenant lookup at all), called from all four adapter handlers. Live-proven: `test_request_refresh_now_rejects_a_suspended_tenants_source_and_enqueues_nothing` (`tests/test_ingest_repository.py`). Was not yet exploitable in production even before this fix (no real caller of `request_refresh_now()` exists anywhere in `app/` yet), but a confirmed latent defect, now closed.
-- Owner: whoever next builds real tenant-facing source-editing (Phase 6, likely 6.3 Sources screens), or whoever first hits this for real — recorded at Task 2.9.g's own Part 2 close-out review (2026-10-24), reworded at that same task's follow-up (2026-10-25) to name the parallel explicitly, by direct instruction — **the url-adapter's own missing sibling to 2.9.d's crawl-specific staleness mechanism**: 2.9.d built "a page missing from two consecutive full crawls is deleted" for the CRAWL adapter only, by deliberate scope (2.9.d's own reasoning: a url-list source's explicit, tenant-supplied list disappearing is already unambiguous, with nothing to debounce — correctly ruling out needing a DEBOUNCE mechanism for url-list). What 2.9.d's own scoping did NOT address, and nothing else in this codebase does either: `update_source()` (`app/ingest/repository.py`) overwrites `source.config` wholesale with no diffing of any kind (confirmed by reading it directly). For a `urls`-type source, a tenant removing one URL from their own list has no cleanup path anywhere in this codebase: the url-list adapter only ever re-fetches URLs currently IN the config (it never discovers "missing" URLs the way crawl discovery does), so the removed URL's own `Document` row and Qdrant points are never revisited, never flagged stale via `last_seen_at` (2.9.d's own mechanism is crawl-only, by deliberate design — confirmed accurate, not itself the gap this marker describes), and never caught by `reconcile_tenant()` either (the orphaned document's own `content_hash` still matches its row — nothing about ITS content changed, only the tenant's config). The content stays indexed and answerable indefinitely after a tenant believes they removed it from their source. Distinct from both already-tracked upload-orphan markers (2.7.c's two): those are triggered by a NEW `upload_id` replacing an old one; this is triggered by an entry simply disappearing from a `urls`-type config with nothing replacing it. A currently-live gap, not latent behind an unbuilt caller — `update_source()` already exists and is callable today. Recorded only, by direct instruction: no fix designed or built here.
 - Owner [SECURITY]: a new task, tentatively "2.11" if built before Phase 3 proceeds further, or deferred — this scheduling call is explicit and open, not assumed, per direct instruction (recorded at the Phase 2 close-out duplication check, 2026-10-27; research done, build deliberately NOT started — see the matching decision-log entry for the full context). **The `database` adapter has no staleness/missing-row cleanup mechanism analogous to crawl's `_cleanup_stale_crawl_documents()` (2.9.d)**: a row deleted from, or pushed past `db_sync_row_cap`'s limit on, the tenant's own source table leaves its `Document`/Qdrant content indexed and answerable indefinitely. `reconcile_tenant()` does not catch it either — its own justification check is document-existence-plus-`content_hash`-match, unrelated to whether the SOURCE row still exists in the tenant's own external database. [SECURITY]-relevant: the compliance implication of a deleted source-of-truth row staying indexed and answerable indefinitely, not merely a data-freshness nicety. **RE-SCOPED by Felix's decision (2026-10-15, decision A, see this file's own "Felix's decisions, ratified (2026-10-15)" entry, §5): the cleanup mechanism itself is NOT built for the pilot. Instead, the `database` source type is disabled for the pilot outright — creation rejected server-side, not offered in the dashboard (owner Step 6.3), which closes this exposure structurally rather than by building the cleanup. The cleanup mechanism remains POST-PILOT, owner: whoever re-enables the `database` source type after pilot** — the three research findings above stand as the starting analysis for that future build, not to be re-derived.
 
   Three research findings, captured verbatim so a future build does not have to re-derive this analysis:
@@ -7088,8 +8178,14 @@ Prior reset to **n = 0** at the duplication check covering the 3 tasks against t
 - **Owner: whoever onboards the first real pilot tenant** (recorded at Task 3.7.a, 2026-10-13): the golden set's own two corpora (an expanded synthetic set; Felix's own company website, crawled once as a frozen snapshot) are a stand-in for docs/SPEC.md §13's own literal "a golden set per pilot tenant" wording, not a substitute for it -- neither corpus is a real pilot tenant's own content. Whoever onboards the first real pilot tenant must add that tenant's own real golden set at that point, and re-validate whatever thresholds/tunings were set against the stand-in corpora before trusting them on real tenant traffic -- never assumed to transfer silently. **Extended at Task 3.7.f (2026-10-14), same marker, not a new one:** this now explicitly covers that task's own ratified numbers too -- gate threshold (0.20), `retrieval_k` (8), reranker (off) -- each one's own decision-log entry already names this exact re-validation obligation; restated here only so this marker's own "whatever thresholds/tunings" wording is not read as having gone stale. **CONSOLIDATED by Felix's decision (2026-10-15, decision F, see "Felix's decisions, ratified (2026-10-15)", §5): "whoever onboards the first real pilot tenant" is now a real, numbered step — Step 7.5, Pilot onboarding, added after Step 7.4 (see the new §11.1 row and §11.2 prompt 9). This marker, the Task 3.7.a marker on model choice (immediately above), and the Task 3.7.g-era one on `gpt-4o`/the model choice (further above, in this same list) are its scope, consolidated, not re-derived.**
 - **RESOLVED at Step 4.6 Phase 4 acceptance (2026-10-15)** (originally: Owner Step 4.1 (the real `/chat` endpoint) (recorded at Task 3.4.b, 2026-11-10): a mid-stream chat-model failure (`AnswerStreamFailedMidStreamError`, `app/agent/graph.py`) is confirmed, by design, to leave no completed `AIMessage` in the checkpoint and to propagate as a distinctly-named exception out of `run_turn()` -- but what the VISITOR actually sees when this happens (a generic error? a specific "something went wrong, try again" message? does the widget offer a retry reusing the same `client_message_id`, matching docs/SPEC.md §10's own dropped-connection UX?) is not decided here. This node's own job is detecting and naming the failure correctly, not rendering it -- Step 4.1 owns the real visitor-facing behavior.) — confirmed resolved by reading `app/chat/routes.py` directly: `AnswerStreamFailedMidStreamError` is caught and converted into a real `model_error` SSE event (`_ERROR_MODEL`); the SAME `client_message_id` idempotency check (`_check_idempotency()`) lets a retry with that identical id be safely replayed without a second model call, matching §10's own dropped-connection UX. Both proven live (`test_mid_stream_model_failure_emits_a_model_error_event`, the `client_message_id` replay test).
 - **RESOLVED at Step 5.2, confirmed again at Step 5.6 Phase 5 acceptance (2026-10-15)** (originally: **Owner Step 5.2 (Chat UI core [SECURITY], docs/SPEC.md §18 Phase 5)** (recorded at the 3.4.c sanitiser redesign, 2026-11-12): server-side answer-text escaping (`_sanitize_answer_text()`, `app/agent/graph.py`) must NOT be the only layer -- the widget's own message renderer (§11: "the widget strips images and allows links only to cited pages and the tenant's verified domains") needs its own INDEPENDENT enforcement: images disabled outright, raw HTML disabled outright, GFM bare-URL auto-linking ("linkify") disabled outright, and any link rendering that IS allowed restricted to the turn's own citation URLs plus the tenant's verified domains -- checked client-side regardless of what the server already escaped. **Concretely motivated by this redesign's own adversarial pass, not a generic caution**: a fullwidth Unicode look-alike construct (`！［...］（url）`) passes through the server-side escape untouched (it contains none of the six escaped ASCII characters) -- if the widget's own renderer ever applies Unicode (NFKC) normalisation BEFORE or instead of markdown parsing, the fullwidth characters fold to live ASCII `!`/`[`/`]` AFTER the server has already run, reconstructing a real construct. **Step 5.2 must therefore also confirm its own renderer does not Unicode-normalise text before markdown-parsing it** (or if it does, that normalisation happens BEFORE any trust boundary, never after) -- this is the concrete reason two independent layers matter here, not merely defense-in-depth as a general principle.) — confirmed resolved by reading `widget/chat/src/markdown.js`/`render.js`/`url-safety.js` directly: no `.normalize()` call exists anywhere in the widget's own source tree (grepped, not assumed); images/raw HTML/linkify are all structurally impossible (the renderer never calls `dangerouslySetInnerHTML`, and linkify/autolink syntax is simply not implemented); links are gated to the turn's own citation URLs. The fullwidth-look-alike case this marker names explicitly is a committed regression test (`markdown-render-adversarial.test.mjs::"the fullwidth look-alike construct never becomes an image/link..."`), proven live, not merely argued. The verified-domains half of the original "cited pages and the tenant's verified domains" wording is the one piece NOT yet built (the contract doesn't carry that list yet) — tracked separately, correctly, as its own additive §9 marker above (owner the dashboard track), not conflated with this marker's own resolution.
-- **Owner Step 4.4 (Escalation [SECURITY]) for the email body, and Step 6.4 (Escalation inbox and usage) for the dashboard screen** (recorded at the 3.4.c sanitiser redesign, 2026-11-12): docs/SPEC.md §7 -- `escalations.transcript snapshot` is delivered both as "an email with the transcript" (Step 4.4) and "it also appears in the dashboard inbox" (Step 6.4), **neither of which is a markdown renderer**. The persisted `AIMessage`/answer text these transcripts embed is now backslash-escaped by `_sanitize_answer_text()` (e.g. a cited URL reads as literal `\[text\](url)`, not prose) -- whoever builds these two surfaces must apply the EXACT INVERSE of this module's own escape table before display, so a transcript reads as natural prose, not literally backslash-laden text. This is a SEPARATE, additional operation from §7's own existing "Transcripts are stored as text and always escaped on output" requirement (that line is HTML-escaping, an XSS defense for inserting arbitrary visitor/model text into an email or dashboard view) -- both operations are needed together: markdown-UNescape first (to recover readable prose), then HTML-escape (to stay safe to render), never the reverse order and never only one of the two. **Extended (2026-11-13) to a third, non-display surface, then RE-SCOPED (2026-10-13, found and fixed at the Task 3.5.e duplication check -- the extension below had gone stale and no longer matched the real code, a real decision-log/marker mismatch, not merely a documentation nicety)**: originally read "Step 3.5 (follow-up rewrite) feeds prior conversation history back into a model prompt... the rewrite model reads backslash-laden prose." **This is no longer true of Step 3.5 itself**: `prepare` was built as JOINING, not a model rewrite (Step 3.5's own decision log, 2026-10-13) -- `_prepare_node` (`app/agent/graph.py`) uses ONLY the previous visitor's own `HumanMessage` text, which was never escaped in the first place, so no unescape step exists there and none is needed. The underlying concern this extension named -- a FUTURE step that feeds prior ASSISTANT text into a model prompt must unescape it first -- still applies, just not to Step 3.5 anymore: it now applies to the deferred model rewrite (owner Step 3.7, see that marker above) if it is ever built for real, since a rewrite prompt grounded in conversation history WOULD need the assistant's own prior turns, unlike a plain join. **The Step 4.4 half (email body) RESOLVED at Step 4.4's own close-out, confirmed at Step 4.6 Phase 4 acceptance (2026-10-15)**: `app/handoff/routes.py`'s `_plain_transcript()` applies `markdown_unescape()` then `html.escape()`, in that exact order, to every assistant transcript line before it reaches the escalation email body — confirmed live (`test_assistant_transcript_lines_are_markdown_unescaped_then_html_escaped`). **The Step 6.4 half (dashboard inbox screen) remains genuinely open** — Step 6.4 has not been built yet; whoever builds it must apply the identical unescape-then-escape order to the same stored `transcript` snapshot before rendering it there.
-- **Owner Step 6.2 (Tenant settings, docs/SPEC.md §18 Phase 6)** (recorded at Task 3.4.e, 2026-11-14): no real per-tenant support details (email, phone, contact link, hours, optional message) exist anywhere in this codebase today -- confirmed by reading `app/tenancy/models.py` (`tenants.config` is a raw, untyped JSONB column), `app/auth/routes.py` (`_PUBLIC_WIDGET_CONFIG_FIELDS`'s own comment: "no prior task defines tenants.config's actual key names"), and `app/tenancy/repository.py`'s own `create_site_key()` ("a site key moves from draft to live only through a server-side check, done elsewhere -- not this method's job") directly, not assumed. `_no_answer_fallback_node`/`_dependency_failure_fallback_node` (`app/agent/graph.py`) use a PLATFORM-DEFAULT fixed text as a stand-in. Step 6.2 must: add real, named support-details fields to `tenants.config`; build the real per-tenant template (interpolating email/phone/contact link/hours/optional message into the fixed text's own placeholders); and route that interpolated, tenant-supplied text through `_sanitize_answer_text()`'s own existing call site (already wired for exactly this, Task 3.4.e) -- never bypass it, since support details are tenant-controlled content shown to visitors, the identical trust boundary the model's own answer text already has. **Extended at Task 4.3's own close-out (2026-10-14), the identical gap, a different consumer:** the usage-alert sweep (`handle_usage_alert_sweep()`, `app/ingest/job_handlers.py`) reads `tenants.config.get("alert_email")` for the "dashboard contact" docs/SPEC.md §9 names -- also absent for every tenant today, for the same reason. When absent, the sweep records `email_log.status = "skipped_not_configured"` rather than guessing a recipient; Step 6.2 must add this key (or fold it into whatever real support-details shape it builds) alongside the fields already named above.
+- **Owner Step 4.4 (Escalation [SECURITY]) for the email body, and Step 6.4 (Escalation inbox and usage) for the dashboard screen** (recorded at the 3.4.c sanitiser redesign, 2026-11-12): docs/SPEC.md §7 -- `escalations.transcript snapshot` is delivered both as "an email with the transcript" (Step 4.4) and "it also appears in the dashboard inbox" (Step 6.4), **neither of which is a markdown renderer**. The persisted `AIMessage`/answer text these transcripts embed is now backslash-escaped by `_sanitize_answer_text()` (e.g. a cited URL reads as literal `\[text\](url)`, not prose) -- whoever builds these two surfaces must apply the EXACT INVERSE of this module's own escape table before display, so a transcript reads as natural prose, not literally backslash-laden text. This is a SEPARATE, additional operation from §7's own existing "Transcripts are stored as text and always escaped on output" requirement (that line is HTML-escaping, an XSS defense for inserting arbitrary visitor/model text into an email or dashboard view) -- both operations are needed together: markdown-UNescape first (to recover readable prose), then HTML-escape (to stay safe to render), never the reverse order and never only one of the two. **Extended (2026-11-13) to a third, non-display surface, then RE-SCOPED (2026-10-13, found and fixed at the Task 3.5.e duplication check -- the extension below had gone stale and no longer matched the real code, a real decision-log/marker mismatch, not merely a documentation nicety)**: originally read "Step 3.5 (follow-up rewrite) feeds prior conversation history back into a model prompt... the rewrite model reads backslash-laden prose." **This is no longer true of Step 3.5 itself**: `prepare` was built as JOINING, not a model rewrite (Step 3.5's own decision log, 2026-10-13) -- `_prepare_node` (`app/agent/graph.py`) uses ONLY the previous visitor's own `HumanMessage` text, which was never escaped in the first place, so no unescape step exists there and none is needed. The underlying concern this extension named -- a FUTURE step that feeds prior ASSISTANT text into a model prompt must unescape it first -- still applies, just not to Step 3.5 anymore: it now applies to the deferred model rewrite (owner Step 3.7, see that marker above) if it is ever built for real, since a rewrite prompt grounded in conversation history WOULD need the assistant's own prior turns, unlike a plain join. **The Step 4.4 half (email body) RESOLVED at Step 4.4's own close-out, confirmed at Step 4.6 Phase 4 acceptance (2026-10-15)**: `app/handoff/routes.py`'s `_plain_transcript()` applies `markdown_unescape()` then `html.escape()`, in that exact order, to every assistant transcript line before it reaches the escalation email body — confirmed live (`test_assistant_transcript_lines_are_markdown_unescaped_then_html_escaped`). **The Step 6.4 half (dashboard inbox screen) RESOLVED at Step 6.4 (2026-10-16)**: `app/dashboard/escalation_routes.py`'s `get_escalation()` applies `markdown_unescape()` (`app/text_escaping.py`, the same shared helper the email body uses) to the whole stored `transcript` snapshot before returning it; the HTML-escape half is satisfied by construction, not a second manual pass — `InboxScreen.tsx`'s `TranscriptDialog` renders the result as a plain React text node (`whitespace-pre-wrap`, never `dangerouslySetInnerHTML`), which can never be reinterpreted as markup. One difference from the email body's own per-line treatment, deliberate and recorded, not an oversight: the email body applies `markdown_unescape()` only to assistant lines (iterating the live `BaseMessage` list); the dashboard only has the already-joined stored `transcript` string with no reliable per-line role boundary to re-split on, so one pass over the whole snapshot is used instead — `markdown_unescape()`'s own docstring explicitly names this exact case (applying it to a visitor's own raw text) as harmless for display purposes. Tests: `test_transcript_is_markdown_unescaped` (`backend/tests/test_dashboard_escalation_routes.py`).
+- **RESOLVED at Step 6.2/6.6 (2026-10-16)** (originally: Owner Step 6.2 (Tenant settings, docs/SPEC.md §18 Phase 6) (recorded at Task 3.4.e, 2026-11-14): no real per-tenant support details (email, phone, contact link, hours, optional message) exist anywhere in this codebase today -- confirmed by reading `app/tenancy/models.py` (`tenants.config` is a raw, untyped JSONB column), `app/auth/routes.py` (`_PUBLIC_WIDGET_CONFIG_FIELDS`'s own comment: "no prior task defines tenants.config's actual key names"), and `app/tenancy/repository.py`'s own `create_site_key()` ("a site key moves from draft to live only through a server-side check, done elsewhere -- not this method's job") directly, not assumed. `_no_answer_fallback_node`/`_dependency_failure_fallback_node` (`app/agent/graph.py`) use a PLATFORM-DEFAULT fixed text as a stand-in. Step 6.2 must: add real, named support-details fields to `tenants.config`; build the real per-tenant template (interpolating email/phone/contact link/hours/optional message into the fixed text's own placeholders); and route that interpolated, tenant-supplied text through `_sanitize_answer_text()`'s own existing call site (already wired for exactly this, Task 3.4.e) -- never bypass it, since support details are tenant-controlled content shown to visitors, the identical trust boundary the model's own answer text already has.) — confirmed resolved by reading the real code directly: real support-details fields exist on `tenants.config` (`app/tenancy/schemas.py`'s `SupportDetailsUpdate`, written via `app/dashboard/tenant_routes.py`'s dashboard UI). The template itself (`render_support_details_text()`, `app/agent/graph.py`) is rendered once per turn by `app/chat/routes.py` (which already has `tenant.config` open with a real DB session) and threaded through the LangGraph config — never recomputed inside the graph — read back by the three fallback nodes via `app.agent.context.support_text_from_config()`, and still passes through `_sanitize_answer_text()` unchanged. A tenant with no contact method configured correctly falls back to the fixed platform-default text (`render_support_details_text()` returns `None`), since a draft site key can still serve chats before support details exist. **[SECURITY] finding made and fixed in the same pass**: a bare `str` value in LangGraph's `configurable` dict IS copied into the checkpoint's own persisted `metadata` column by `get_checkpoint_metadata()` (confirmed live) — `support_text` is therefore stored wrapped in a single-key dict (`{"text": ...}`), which that function's own `isinstance` filter silently skips, keeping a tenant's real email/phone/contact-link out of a database column nothing else expects to hold tenant contact PII. Proven live against the real checkpoint table, not merely reasoned about (`test_support_text_is_never_persisted_in_checkpoint_metadata`, `backend/tests/test_agent_entrypoint.py`). **A related pre-existing gap found, not fixed (out of this task's scope, flagged here instead)**: `quota_exhausted` (a bare `bool`, Task 4.3) is NOT similarly wrapped and DOES leak into persisted checkpoint metadata today — non-sensitive (a boolean flag), but the identical mechanism; whoever next touches that field should apply the same wrapping. Tests: `backend/tests/test_agent_graph.py` (the render function's own template/no-contact-method cases; all three fallback nodes reading real support_text from config), `backend/tests/test_agent_context.py` (`support_text_from_config()`'s own unwrap/absent/no-contact-method cases).
+
+- **RESOLVED at Step 6.3 (2026-10-16)** (originally: Owner: whoever next builds the real upload-receiving/re-upload endpoint (Phase 6, likely 6.3 Sources screens) — re-owned at Task 2.9.g's own close-out (2026-10-24) from "Owner Step 2.9": a tenant re-uploading changed content under the same `source_id`/filename gets a NEW `upload_id`, and the PREVIOUS `upload_id`'s own on-disk bytes are never deleted anywhere, becoming permanently orphaned storage.) — confirmed resolved by reading `app/dashboard/source_routes.py`'s real upload endpoint directly: on a re-upload matching an existing `original_filename` within the same upload-type source, the previous entry's `upload_id` bytes are deleted (`upload_storage.delete()`) before the new entry replaces it in `source.config["uploads"]`. Proven live, including a concurrent-re-upload race test (`asyncio.gather` of two simultaneous re-uploads) confirming last-write-wins with no corruption — the correct bar for this project's own real pilot scale, not full transactional locking. Tests: `backend/tests/test_dashboard_source_routes.py`.
+
+- **RESOLVED at Step 6.3 (2026-10-16)** (originally: Owner: whoever builds the real upload-receiving endpoint (Phase 6, likely 6.3 Sources screens; recorded at the duplication check after 2.7.a/b/c, 2026-10-08): `upload_storage.py`'s own `read()`/`delete()` take a bare `storage_id: uuid.UUID` with no tenant-scoping parameter at all — the real, not-yet-built upload-receiving endpoint MUST correctly scope `upload_id` generation/lookup to the authenticated tenant's own source when it is built.) — confirmed resolved by reading `app/dashboard/source_routes.py`'s real upload endpoint directly: `upload_id` is generated server-side (`save_streaming()`) and looked up ONLY through the tenant's own already-tenant-scoped `source.config["uploads"]` list — never accepted as a client-supplied value anywhere in the request. Proven live by a committed adversarial test using another tenant's real `source_id`/`upload_id`, confirmed 404. Tests: `backend/tests/test_dashboard_source_routes.py`.
+
+- **RESOLVED at Step 6.3 (2026-10-16)** (originally: Owner: whoever next builds real tenant-facing source-editing (Phase 6, likely 6.3 Sources screens) — recorded at Task 2.9.g's own Part 2 close-out review (2026-10-24): `update_source()` overwrites `source.config` wholesale with no diffing of any kind; for a `urls`-type source, a tenant removing one URL from their own list has no cleanup path anywhere in this codebase — the removed URL's own `Document` row and Qdrant points are never revisited.) — confirmed resolved by reading `app/ingest/repository.py`'s `update_source()` directly: for a `urls`-type source with both `client`/`collection_name` supplied, it now computes `removed = old_urls - new_urls`, finds the matching `Document` rows, calls `delete_points_for_document()` per stale doc, then deletes the `Document` rows themselves. Proven live, not merely argued: `test_update_source_removing_a_url_deletes_its_document_and_qdrant_points` (`backend/tests/test_ingest_repository.py`), plus a companion test confirming no cleanup is attempted when the optional `client`/`collection_name` are omitted (every pre-Step-6.3 caller unaffected).
 - **Owner: whoever next revisits email retry timing (no task scheduled yet)** (recorded at Task 4.3's own close-out, 2026-10-14): docs/SPEC.md §14's own full retry schedule ("5 attempts with exponential backoff: about 1 minute, 5 minutes, 30 minutes, 2 hours, 12 hours, then marked failed") is NOT implemented for the usage-alert sweep's own emails. What actually shipped: `email_log`'s own `status="failed"` row is simply retried on the sweep's next hourly tick (`Settings.usage_alert_sweep_interval_seconds`) until it succeeds, with no attempt cap and no backoff growth -- a deliberate v1 simplification (see `app/plans/models.py`'s `EmailLog` class and `app/notifications/service.py`'s own header comment for the reasoning), not an oversight: building the full 5-step state machine against an SMTP server this project has no real credentials for yet (confirmed: no `smtp_*` value exists in any `.env`) would be speculative precision with no way to verify it live. Whoever next wires a real SMTP server should revisit whether the simpler hourly-retry-until-success behavior is good enough in practice, or whether the exact named schedule is worth building then.
 - **RESOLVED at Step 4.6 Phase 4 acceptance (2026-10-15)** (originally: **Owner Step 4.1 (the real `/chat` endpoint)** (recorded at Task 3.4.e, 2026-11-14): `offer_escalation` (docs/SPEC.md §6.1: the fallback "offers the escalation button when a person may be needed") is NOT a state field -- considered and declined (see Task 3.4.e's own decision log for the full reasoning): the underlying fact is already fully recoverable from existing state (`can_answer`, `dependency_failed`, which node produced the final message) without one. Whoever builds Step 4.1's real response assembly must apply docs/SPEC.md §6.1's own rule itself at that point (which fallback TYPES warrant an escalation offer) rather than expect a field that does not exist.) — confirmed resolved by reading `app/chat/routes.py` directly: `offer_escalation` is computed at response-assembly time from `last_node in _ESCALATION_OFFERED_NODES`, exactly the "derive it from existing state, no new field" design this marker specified, not a guessed shortcut.
 - **Owner Step 6.4 (Escalation inbox and usage, docs/SPEC.md §18 Phase 6)** (recorded at Task 3.4.g, 2026-10-13, REPLACES the prior "3.4.f's own follow-up" marker): Felix decided, directly, to DEFER unsafe/abusive detection for the pilot entirely — this is an explicit, DATED DEVIATION from docs/SPEC.md §6.2 rule 2, which currently reads "Greeting, thanks or unsafe/abusive input → Guardrail reply" but today only the greeting/thanks half is built (`is_greeting_or_thanks()`, Task 3.4.f); `_is_unsafe_or_abusive()` (`app/agent/graph.py`) is a permanent stub returning `False`, by decision, not by omission. Reasoning: Task 3.4.f's own real, measured moderation-endpoint latency (**443-1295ms / 823-1382ms across two independent runs, mean roughly 0.9-1.1s**) is a BLOCKING call on the critical routing path that does not fit §6.2's own "rules, no LLM hop" design intent and risks §17's own p50/p95 budget on every single turn, not just abusive ones; the answer path's own existing structural constraints (one forced `Answer` tool, grounded only in retrieved tenant DATA blocks, `can_answer`/escaped output) already mean unsafe/abusive input mostly just ends in the ordinary no-relevant-answer fallback even when not specifically classified, so the downside of not classifying it is small. **Rejected alternative, considered and declined, not merely unmentioned**: parallel moderation started at turn start (concurrently with retrieve/gate/answer, not blocking them), failing OPEN on timeout/error — this would avoid the latency cost on the critical path, but Felix chose not to build it for the pilot either; it is named below as the documented option if real-time blocking is later required, not decided against permanently. **Replacement marker** (mirrors docs/SPEC.md §6.2's own existing injection-logging precedent — "Injection-looking input is logged and flagged for review but still goes through the normal path and its safeguards" — extended to unsafe/abusive input the same way): whoever builds Step 6.4's dashboard Inbox screen (the one real review surface named anywhere in docs/SPEC.md, §11's "Tenant sidebar: ... Inbox") should ALSO add an ASYNC flag-for-review path for unsafe/abusive input — never gating or delaying the real-time turn, written alongside whatever mechanism actually classifies it (the moderation endpoint, evaluated and NOT adopted synchronously above, remains the one real candidate; it would run after the turn completes, not before, if ever built). If real-time blocking is later required instead, the documented option is the rejected parallel-fail-open design above, not a redesign from scratch. UNCERTAIN, carried forward unchanged from the prior marker: paid-tier moderation rate limits were not independently confirmed (only free-tier: 250 RPM/5,000 RPD/10,000 TPM) -- whoever builds this for real must re-confirm the real limits at whatever tier this project's own OpenAI account uses. **RE-OWNED by Felix's decision (2026-10-15, decision G, see "Felix's decisions, ratified (2026-10-15)", §5): off Step 6.4's Inbox screen and onto POST-PILOT, bundled with 6.5 Platform admin — same owner as the two admin-override markers above. Step 6.4's own §11.1 row no longer includes this review.**
@@ -7105,7 +8201,7 @@ Prior reset to **n = 0** at the duplication check covering the 3 tasks against t
 - **New marker, owner POST-PILOT / whoever onboards the second tenant or needs a non-tenant-owning admin (recorded at this alignment task, 2026-10-15, docs/DECISIONS_REGISTER.md's D-postpilot-admin-no-tenant-shape)**: a real finding from Step 6.1's own adversarial testing — `POST /api/v1/dashboard/auth/login` (`app/dashboard/routes.py`) unconditionally requires a real `Membership` row to succeed; there is no "platform-admin-only, no tenant at all" account shape today. Correct and intentional for the pilot (every real admin account `seed_cli.py --platform-admin` creates also gets a membership, so the one hand-picked pilot admin can always log in) — not a gap this pilot needs closed, but a real limit on the account shape, named here rather than discovered again later.
 - **New marker, owner 7.4 (recorded at this alignment task, 2026-10-15, docs/DECISIONS_REGISTER.md's D-6.1-exact-csp-tolerance)**: `dashboard/e2e/csp.spec.ts`'s one known, tolerated strict-CSP violation (react-remove-scroll-bar's own inline `<style>` insertion for the Dialog's scrollbar-gap CSS) should be removed outright before pilot go-live, not carried indefinitely — either a Caddy-issued per-response CSP nonce (needs dynamic HTML templating not yet built; Phase 7/Caddy is the natural point), or a scroll-lock approach that injects no `<style>` element at all, if one is found that still preserves the Dialog's real functional scroll-lock and focus-trap. The tolerance's own matching is already exact (structural fields on the real `securitypolicyviolation` DOM event, not a free-text phrase, proven live against a deliberately injected second violation) — this marker is about removing the underlying violation, not about tightening how it's detected.
 - **New marker, owner Phase 7 (recorded at this alignment task, 2026-10-15, docs/DECISIONS_REGISTER.md's D-6.1-fastapi-users-maintenance-mode)**: fastapi-users (the dashboard's own auth library, Step 6.1) is confirmed, live, in maintenance mode as of 2026-10-15 (its own GitHub README: "we'll continue to provide security updates and dependency maintenance... no new features will be added... we're currently working on a new Python authentication toolkit that will ultimately supersede FastAPI Users") — checked against PyPI (latest v15.0.5, 2026-03-27, classifier `Development Status :: 5 - Production/Stable`) and the GitHub API (repo not archived, last pushed 2026-08-17). Not swapped in Step 6.1 (direct instruction: "don't swap libraries in this task") and not a reason to swap it now — this project's security floor does not depend on new library features. Re-check before pilot go-live: whether an unpatched CVE has landed, whether the named successor toolkit has shipped with a realistic migration path, and whether this project's own Python/FastAPI/SQLAlchemy versions have drifted past what a maintenance-mode library still supports.
-- **New marker, owner: whoever next builds a real password-reset or platform_admin-removal path (recorded at this alignment task, 2026-10-15, docs/DECISIONS_REGISTER.md's D-6.1-session-invalidation-hook)**: `UserManager.on_after_update()` (`app/dashboard/auth_backend.py`) invalidates every one of a user's existing sessions the moment a `password` or `is_superuser` change goes through `BaseUserManager.update()` — the one real path any future password-reset or platform_admin-removal CLI command would be built on. A named, deliberate residual gap, not silently solved: `app/dashboard/seed_cli.py`'s own documented workaround for an already-existing email ("this command does not reset an existing password or promote an existing account — use a direct database update for that") never calls `update()` at all, so a hand-edited database row bypasses this hook entirely. Whoever builds a real password-reset/admin-removal command should build it on `UserManager.update()` specifically (not a raw `UPDATE` statement) to inherit this invalidation for free.
+- **RESOLVED at Step 6.2 (2026-10-15)**: real `reset-password`/`set-platform-admin`/`unset-platform-admin` CLI commands now exist (`app/dashboard/admin_cli.py`), each built on `UserManager.update()` specifically (not a raw `UPDATE` statement), so `on_after_update()`'s own session-invalidation hook fires automatically on every one of them. `seed_cli.py`'s own "use a direct database update for that" message is rewritten to name these real commands instead. (Originally: **New marker, owner: whoever next builds a real password-reset or platform_admin-removal path (recorded at this alignment task, 2026-10-15, docs/DECISIONS_REGISTER.md's D-6.1-session-invalidation-hook)**: `UserManager.on_after_update()` (`app/dashboard/auth_backend.py`) invalidates every one of a user's existing sessions the moment a `password` or `is_superuser` change goes through `BaseUserManager.update()` — the one real path any future password-reset or platform_admin-removal CLI command would be built on. A named, deliberate residual gap, not silently solved: `app/dashboard/seed_cli.py`'s own documented workaround for an already-existing email ("this command does not reset an existing password or promote an existing account — use a direct database update for that") never calls `update()` at all, so a hand-edited database row bypasses this hook entirely. Whoever builds a real password-reset/admin-removal command should build it on `UserManager.update()` specifically (not a raw `UPDATE` statement) to inherit this invalidation for free.)
 
 ## 10. Phase 4 kickoff decisions (recorded 2026-10-14, Step 3.8 close-out)
 

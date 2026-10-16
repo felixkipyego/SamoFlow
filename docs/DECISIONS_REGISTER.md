@@ -176,7 +176,7 @@ APPROVED, CANDIDATE, or SUPERSEDED-by-`<id>`.
 | D-6.1-test-layout-placeholders | 2026-10-15 | `test_layout_placeholders.py` | Narrowed a second time (after the widget track's own two narrowings for `widget/loader`/`widget/chat`) to empty `_STILL_PLACEHOLDER_READMES`/`_PLACEHOLDER_ROOTS` — `dashboard/` now has real Vite+React+shadcn tooling too, so no folder this file tracks is still a placeholder | APPROVED, RESOLVES the Step 5.1/owner-6.1 §9 marker (PROJECT_SPEC.md:6897) for real | 6.1 | commits `a98cd09`, `195de3a`; rebase conflict resolved in `2295fa9` |
 | D-6.1-recent-auth-scope | 2026-10-15 | Auth feature scope | D-113-dashboard-auth-pilot's own named security floor (argon2id; rate-limited lockouts, both per-IP and per-account; `__Host-`-prefixed Secure+HttpOnly+SameSite=Strict cookies; double-submit CSRF on every state-changing route; a CLI-seeded owner account with no shipped default password, never logged) confirmed built exactly as specified, with a full adversarial pass (credential stuffing/lockout bypass, session fixation, CSRF, cookie scope/tossing, cross-tenant access, logout/revocation, argon2 parameter downgrade, seed-CLI password leakage) converted to committed regression tests | APPROVED, CONFIRMS D-113-dashboard-auth-pilot was built, not merely planned | 6.1 | commit `7519325`; docs/progress/dashboard.md |
 | D-6.1-exact-csp-tolerance | 2026-10-15 | CSP test tolerance (this alignment task) | The login/Dialog strict-CSP Playwright test's prior tolerance (a free-text regex, `/Applying inline style violates/i`) replaced with an exact structural match on the real `securitypolicyviolation` DOM event (`effectiveDirective === "style-src-elem"`, `blockedURI === "inline"`, `disposition === "enforce"`, `sourceFile` under the page's own `/assets/*.js`) — proven live with a deliberately injected, differently-shaped second violation (an external `<script src>`) that the new tolerance does NOT swallow | APPROVED | 6.1 (alignment) | commit (this task); `dashboard/e2e/csp.spec.ts` |
-| D-6.1-session-invalidation-hook | 2026-10-15 | Session invalidation on credential/role change (this alignment task) | `UserManager.on_after_update()` (`app/dashboard/auth_backend.py`) invalidates every one of a user's existing `DashboardSession` rows whenever an update changes `password` or `is_superuser` — hooked at `BaseUserManager.update()`, the one real path any future password-reset or platform_admin-removal CLI command would be built on, rather than three separate call sites in three commands that do not exist yet (building those three now would itself be new feature work, which this follow-up explicitly excludes) | APPROVED, with a named residual gap (see §9 marker below): a hand-edited database row (seed_cli.py's own documented workaround for an existing email) never calls `update()`, so this hook cannot close that specific path | 6.1 (alignment) | commit (this task); `app/dashboard/auth_backend.py`, `app/dashboard/repository.py`, `backend/tests/test_dashboard_auth_backend.py` |
+| D-6.1-session-invalidation-hook | 2026-10-15 | Session invalidation on credential/role change (this alignment task) | `UserManager.on_after_update()` (`app/dashboard/auth_backend.py`) invalidates every one of a user's existing `DashboardSession` rows whenever an update changes `password` or `is_superuser` — hooked at `BaseUserManager.update()`, the one real path any future password-reset or platform_admin-removal CLI command would be built on, rather than three separate call sites in three commands that do not exist yet (building those three now would itself be new feature work, which this follow-up explicitly excludes) | APPROVED. **Residual gap RESOLVED at Step 6.2**: real `reset-password`/`set-platform-admin`/`unset-platform-admin` commands now exist (`app/dashboard/admin_cli.py`), each built on `UserManager.update()`, so the hook covers every real mutation path; `seed_cli.py`'s own message now points at them | 6.1 (alignment) → 6.2 | commit (this task); `app/dashboard/auth_backend.py`, `app/dashboard/repository.py`, `backend/tests/test_dashboard_auth_backend.py`; closed by `app/dashboard/admin_cli.py` (Step 6.2) |
 | D-6.1-fastapi-users-maintenance-mode | 2026-10-15 | Auth library maintenance status (this alignment task) | Checked live (PyPI + GitHub README + GitHub API, all dated 2026-10-15): fastapi-users is explicitly in **maintenance mode** per its own README — "we'll continue to provide security updates and dependency maintenance, no new features will be added"; a successor toolkit is in development with no name or date yet. Latest release v15.0.5 (2026-03-27, matches what this project pins); repo not archived, last pushed 2026-08-17; PyPI classifier `Development Status :: 5 - Production/Stable`. Not swapped in this task, per direct instruction | APPROVED (informational), re-check owner Phase 7 (§9 marker below) | 6.1 (alignment) | https://pypi.org/project/fastapi-users/ ; https://github.com/fastapi-users/fastapi-users (README) ; https://api.github.com/repos/fastapi-users/fastapi-users ; checked 2026-10-15 |
 
 ### Pilot-scope decisions (2026-10-15, this task)
@@ -404,46 +404,88 @@ forward commitments are not re-listed; they map to D-shadcn, D-6.1-admin,
 D-6.1-site-key-generator, D-6.1-origin-domain-normalise, D-6.1-session-field-na,
 D-6.1-test-layout-placeholders and D-6.1-cors-same-origin respectively.
 
-### 6.2 Tenant settings
-- **Three backend contract gaps, ownership taken by the dashboard track and Felix's additive
-  authorisation recorded at this alignment task (2026-10-15)** — full detail in the "Backend
-  contract gaps found by the widget track" section above, not duplicated here: (a) add
-  `verified_domains` to `widget_config` as a new optional field; (b) return `conversation_id`
-  on `POST /api/v1/chat`'s `done` event for a first turn, as a new optional field; (c) delete
-  the verified `SessionResponse` ASSUMPTION marker (`app/auth/schemas.py`). Not built in this
-  alignment task (no 6.2 work) — scheduled for Step 6.2's own build.
-- Add real, named support-details fields to `tenants.config` (email, phone, contact link,
-  hours, optional message); build the real per-tenant fallback template; route the
-  interpolated text through `_sanitize_answer_text()`'s existing call site. Also add
-  `tenants.config["alert_email"]` (or fold it into the same shape) for the usage-alert
-  sweep's "dashboard contact." (PROJECT_SPEC.md:6961)
-- Build the real `Plan`-row creation mechanism (or a one-off ops seed script) — `plans` has
-  no creation mechanism anywhere in this codebase yet; enter the real quota numbers
-  (10,000 / 25,000 messages/month) when it's built. (PROJECT_SPEC.md:6825)
-- Document the four optional rate-limit Settings fields in `.env.example`, or do it here if
-  no earlier task has. (PROJECT_SPEC.md:6889)
+### 6.2 Tenant settings — RESOLVED (2026-10-16)
+- **Three backend contract gaps**: **RESOLVED.** (a) `verified_domains` added to
+  `widget_config`; (b) `conversation_id` returned on `POST /api/v1/chat`'s `done` event for a
+  first turn; (c) the verified `SessionResponse` ASSUMPTION marker deleted. All additive-only,
+  proven via `scripts/check_openapi_additive.py`.
+- **Real support-details fields + per-tenant fallback template**: **RESOLVED.** Real fields
+  on `tenants.config` (`app/tenancy/schemas.py`'s `SupportDetailsUpdate`); the real template
+  (`render_support_details_text()`, `app/agent/graph.py`) rendered per-turn by
+  `app/chat/routes.py` and threaded through the LangGraph config (never recomputed inside the
+  graph), read back by all three fallback nodes, still passing through
+  `_sanitize_answer_text()`. `tenants.config["alert_email"]` also added (already wired at
+  Task 4.3's own usage-alert sweep). **A real [SECURITY] finding made and fixed in the same
+  pass**: `support_text` is stored wrapped in `{"text": ...}`, never a bare `str` — a bare str
+  would have been silently copied into the checkpoint's own persisted `metadata` column by
+  `langgraph.checkpoint.base.get_checkpoint_metadata()` (confirmed live), leaking a tenant's
+  real email/phone/contact-link. Proven live against the real checkpoint table
+  (`test_support_text_is_never_persisted_in_checkpoint_metadata`). **Related pre-existing gap
+  found, not fixed (flagged for whoever next touches it)**: `quota_exhausted` (Task 4.3, a
+  bare `bool`) is NOT similarly wrapped and DOES leak into persisted checkpoint metadata
+  today — non-sensitive, but the identical mechanism.
+- **Real `Plan`-row creation mechanism**: **RESOLVED early, at Step 6.1** (`cmd_seed_plans`,
+  `app/dashboard/admin_cli.py`) — not deferred to 6.2 after all (D-6.1-pilot-plans above).
+- **Document the four optional rate-limit Settings fields in `.env.example`**: **RESOLVED.**
 
-### 6.3 Sources screens
+### 6.3 Sources screens — RESOLVED (2026-10-16)
 - **Disable `database`-type source creation server-side and omit it from the dashboard UI**
-  (Felix decision A, D-pilot-dbsync-disable). (this task)
+  (Felix decision A, D-pilot-dbsync-disable). **RESOLVED.**
 - **Clean up a deleted database source's `db_connections` credentials in the delete flow**
-  (Felix decision B, D-pilot-dbconn-cleanup). (this task)
+  (Felix decision B, D-pilot-dbconn-cleanup). **RESOLVED.**
 - The url-list adapter's own missing sibling to crawl's staleness cleanup: `update_source()`
   overwrites `source.config` wholesale with no diffing, so a tenant removing one URL from
   their own list has no cleanup path — the removed URL's `Document` row and Qdrant points are
-  never revisited. (PROJECT_SPEC.md:6919)
-- Four `crawl_page_cap`/`upload_max_size_bytes`/`db_sync_row_cap`/`refresh_interval_min_allowed`/
-  `refresh_now_daily_allowance` Settings fields are still not sourced from `plans.limits` —
-  whoever next revisits per-plan ingestion limits (likely 6.3, since it's the first real
-  per-tenant limits UI) should wire them to the real `PlanLimits` type. (PROJECT_SPEC.md:6899, 6900, 6916, 6917)
+  never revisited. **RESOLVED** — `update_source()` now diffs and cleans up dropped URLs'
+  documents/Qdrant points when `client`/`collection_name` are supplied.
+  (PROJECT_SPEC.md:6919)
+- **The two upload-orphan markers (2.7.c)** — a re-upload's previous `upload_id` bytes never
+  deleted; `upload_id` generation/lookup needing tenant-scoping. **Both RESOLVED**: the real
+  upload endpoint (`app/dashboard/source_routes.py`) deletes the previous entry's bytes on a
+  filename-matching re-upload, and resolves `upload_id` only through the tenant's own already-
+  scoped `source.config["uploads"]`, proven live against a cross-tenant adversarial test.
+- **Investigated at Step 6.3 (2026-10-16), declined as not contained, per this task's own
+  "wire it IF it's contained; otherwise leave the register entry with its reason" instruction.**
+  Three of the five (`crawl_page_cap`/`db_sync_row_cap`/`refresh_now_daily_allowance`) are a
+  genuinely small, mechanical change at their one real call site each (fetch the `Tenant` row,
+  call the already-existing `get_plan_limits()`, fall back to the Settings default on `None` —
+  exactly `app/chat/routes.py`'s own existing quota-check pattern). The fourth,
+  `refresh_interval_min_allowed`, is NOT contained to the same degree: it is read inside a
+  bare module-level helper (`_validate_refresh_interval()`, `app/ingest/repository.py`) with no
+  `tenant`/`session` parameter at all, shared by `create_source()`/`update_source()` — making
+  it per-plan means changing that helper's own signature and both call sites, in a function
+  with real existing regression coverage for the exact behavior being touched
+  (`test_update_source_enforces_the_same_refresh_interval_rules_on_change`). The fifth,
+  `upload_max_size_bytes`, has a real NEW consumer in this same task (the real upload endpoint,
+  `app/dashboard/source_routes.py`) — wired there directly against `PlanLimits` with a Settings
+  fallback from day one (no legacy behavior to risk). **Declined to touch the other four
+  existing call sites in this task**: in production today, no real tenant has `plan_id` set yet
+  (no admin screen, and the pilot tenant's own plan assignment is a manual CLI step Felix has
+  not yet run) — `get_plan_limits()` returns `None` for every real tenant right now, meaning
+  the wiring would have ZERO observable effect until a plan is actually assigned, for a real
+  signature-change risk today, in a business-logic/security-adjacent file. Re-owned, with this
+  task's own investigation as the new reason: whoever next revisits per-plan ingestion limits
+  (the first time a real tenant actually has a `plan_id` assigned) should wire `crawl_page_cap`/
+  `db_sync_row_cap`/`refresh_now_daily_allowance` using the pattern named above, and decide
+  then whether `refresh_interval_min_allowed`'s own larger shared-helper change is worth it at
+  that point. (PROJECT_SPEC.md:6899, 6900, 6916, 6917)
 
-### 6.4 Escalation inbox and usage
+### 6.4 Escalation inbox and usage — RESOLVED (2026-10-16)
 - Apply the exact inverse of `_sanitize_answer_text()`'s escape table (markdown-unescape,
   then HTML-escape, in that order) before displaying a stored transcript in the dashboard
-  inbox screen — the email-body half is already resolved; this half remains genuinely open. (PROJECT_SPEC.md:6960)
+  inbox screen — the email-body half is already resolved. **RESOLVED**:
+  `app/dashboard/escalation_routes.py`'s `get_escalation()` applies `markdown_unescape()` to
+  the whole stored snapshot (one pass, not per-line like the email body — no reliable
+  per-line role boundary survives in the already-joined stored string; that module's own
+  docstring names this exact case as harmless); the HTML-escape half is satisfied by
+  construction (`InboxScreen.tsx` renders it as a plain React text node, never
+  `dangerouslySetInnerHTML`). (PROJECT_SPEC.md:6960)
 - The `reason` field on an escalation is a single fixed `"visitor_requested"` string — the
   inbox cannot distinguish trigger categories (asks-for-a-person / complaint / negative
-  wording / two-fallbacks) without a future schema change. (PROJECT_SPEC.md:6253)
+  wording / two-fallbacks) without a future schema change. **Still accurate, not fixed —
+  a genuine, accepted limitation named in docs/DECISIONS_REGISTER.md's own D-44-reason-
+  fixed-string entry, not this step's job to change the escalation schema.**
+  (PROJECT_SPEC.md:6253)
 - ~~The async unsafe/abusive-input review~~ — **re-owned to POST-PILOT/6.5** (Felix decision
   G, D-postpilot-admin-overrides); no longer this step's job.
 
@@ -649,11 +691,9 @@ Every marker whose owner is "no task scheduled," "to be scheduled," or "whoever 
   state field) — no task owner. (PROJECT_SPEC.md:6932)
 - Quota numbers (10,000 / 25,000) must be re-derived from real per-tenant traffic composition
   once it exists — the golden-set category mix is only a stated approximation. (PROJECT_SPEC.md:5912, 6031, 6825)
-- Whoever next builds a real password-reset or platform_admin-removal path must build it on
-  `UserManager.update()` (not a raw `UPDATE` statement) to inherit the session-invalidation
-  hook `on_after_update()` already provides (D-6.1-session-invalidation-hook) — a hand-edited
-  database row (seed_cli.py's own documented workaround today) bypasses it entirely.
-  (this alignment task, 2026-10-15; PROJECT_SPEC.md §9, end of section)
+- ~~Whoever next builds a real password-reset or platform_admin-removal path...~~ —
+  **RESOLVED at Step 6.2**: `app/dashboard/admin_cli.py`'s `reset-password`/
+  `set-platform-admin`/`unset-platform-admin` commands, built on `UserManager.update()`.
 
 ---
 

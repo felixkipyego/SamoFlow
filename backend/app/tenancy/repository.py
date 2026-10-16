@@ -219,6 +219,51 @@ class TenantScopedRepository:
         await self.session.flush()
         return site_key
 
+    async def update_config(self, patch: dict) -> Tenant:
+        """Step 6.2: merges `patch` into `tenants.config` -- NEVER a
+        wholesale overwrite (the same staleness class of bug this task
+        also fixes in `update_source()`, app/ingest/repository.py): a
+        caller saving the widget-look card must not erase the
+        retention card's own keys just because this tenant's `config`
+        is one shared JSONB column. Reassigns the whole dict (`{**old,
+        **patch}`), rather than mutating `self.config` in place, so
+        SQLAlchemy's own change-tracking sees a new object and flags
+        the column dirty regardless of whether this column is wrapped
+        in `MutableDict` (it is not, confirmed by reading
+        app/tenancy/models.py directly) -- mutating a plain dict column
+        in place would silently fail to persist.
+        """
+        tenant = await self.get_tenant()
+        tenant.config = {**tenant.config, **patch}
+        await self.session.flush()
+        return tenant
+
+    async def set_site_key_allowed_origins(
+        self, site_key_id: uuid.UUID, allowed_origins: list[str]
+    ) -> SiteKey | None:
+        """Step 6.2: the dashboard's own "allowed origins" settings
+        card. Returns None for a site_key_id that does not exist or
+        belongs to another tenant, matching `set_site_key_status()`'s
+        own established "wrong tenant looks exactly like missing"
+        philosophy. Normalisation (rejecting a malformed origin) is the
+        CALLER's job (app/dashboard/tenant_routes.py), using the exact
+        same `normalize_origin()` the platform-admin CLI uses
+        (app/auth/origin.py) -- this method only ever receives already-
+        normalized values, matching `create_site_key()`'s own identical
+        division of labor.
+        """
+        result = await self.session.execute(
+            select(SiteKey).where(
+                SiteKey.id == site_key_id, SiteKey.tenant_id == self.tenant_id
+            )
+        )
+        site_key = result.scalar_one_or_none()
+        if site_key is None:
+            return None
+        site_key.allowed_origins = allowed_origins
+        await self.session.flush()
+        return site_key
+
     async def get_visitor_by_id(self, vid: uuid.UUID) -> Visitor | None:
         # Same automatic-filter pattern as get_conversation_by_id below.
         result = await self.session.execute(

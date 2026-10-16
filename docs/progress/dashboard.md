@@ -1,5 +1,7 @@
 # dashboard track — progress and decision log
 
+**Folded into PROJECT_SPEC.md §4/§5/§7/§9 on 2026-10-16 at the dashboard track's own close-out.** This file is now archived detail only — kept, not removed, per §11.5 point 3's own instruction. PROJECT_SPEC.md §5 (the Phase 6 closure) is the current record; nothing below should be edited further.
+
 Per PROJECT_SPEC.md §11.5 (parallel-track protocol). Folded into
 PROJECT_SPEC.md's own §4/§5/§7/§9 at merge time; this file is a staging
 area, not a permanent home for this history.
@@ -681,3 +683,414 @@ none due.
   touched) — `docs/openapi.json` not regenerated, confirmed no drift.
 - `git status --short`: clean after commit; `.env` confirmed present
   only as an ignored (`!!`) local file, never staged.
+
+---
+
+## Steps 6.2 + 6.3 + 6.4 + 6.6 — batched (2026-10-16)
+
+Per §11.2's own batch plan: "6.2 + 6.3 + 6.4 + 6.6 (plumbing, batched) —
+Tenant settings, sources screens, escalation inbox/usage, Phase 6
+acceptance. *Dashboard track ends here.*" 6.5 (Platform admin) excluded
+throughout, by direct instruction — POST-PILOT per Felix's decision G.
+
+### Step 6.2 — Tenant settings
+
+**Backend** (`app/tenancy/schemas.py`, `app/tenancy/repository.py`,
+`app/dashboard/tenant_routes.py`, `app/dashboard/tenant_schemas.py`,
+new): real Pydantic schemas for every dashboard-writable
+`tenants.config` section — `SupportDetailsUpdate`, `AlertEmailsUpdate`,
+`WidgetLookUpdate` (with `WidgetColors`, CSS color/URL validation
+mirroring the widget's own client-side rules exactly: hex/rgb/hsl
+regex, WHATWG-URL-parsing tab/newline-stripping for the
+`javascript:`-bypass defense, https-only), `RetentionUpdate` (1-90
+days / 1-24 months), `TraceTextUpdate`, `AllowedOriginsUpdate`.
+`TenantScopedRepository.update_config()` merges a patch into
+`tenants.config` (`{**old, **patch}` reassignment, never in-place
+mutation — the column is a plain JSONB, not `MutableDict`, so mutating
+in place would silently fail to persist, the identical staleness-bug
+class this same task also fixed in `update_source()` at 6.3).
+`GET/PATCH /api/v1/dashboard/tenant[/support-details|/alert-emails|
+/widget-look|/retention|/trace-text]`, `GET/POST .../site-keys`,
+`PATCH .../site-keys/{id}/origins` (behind `require_recent_auth()`,
+docs/SPEC.md §12's own "changing site keys or allowed origins" rule),
+`GET .../install-snippet`.
+
+**Contract additions** (Felix pre-authorised, additive-only, proven via
+`scripts/check_openapi_additive.py`): (a) `verified_domains` added to
+`widget_config` (`app/auth/routes.py`'s `_public_widget_config()`,
+filtered to `status == "verified"`); (b) `conversation_id` added to
+`/chat`'s `done` SSE event for a first turn; (c) the verified
+`SessionResponse` ASSUMPTION marker deleted. All three were
+widget-track-found gaps whose fix ownership the dashboard track took at
+the pre-6.2 alignment task — built here as originally scheduled.
+
+**`admin_cli.py`**: `reset-password` (prompts via `getpass`, never a
+CLI argument, never logged), `set-platform-admin`/`unset-platform-admin`
+— all three built ON `UserManager.update()` so the Step 6.1 session-
+invalidation hook applies automatically, closing that hook's own
+residual gap (the real commands finally exist; `seed_cli.py`'s own
+"hand-edit the database" workaround note was removed and replaced with
+a pointer at these commands).
+
+**The real per-tenant support-details fallback template** (Part G, the
+duplication-check/acceptance pass): built LATE in this batch, once the
+6.6 acceptance pass's own clause-by-clause check against docs/SPEC.md
+found it was the one genuinely still-open piece of 6.2's own original
+scope — `_no_answer_fallback_node`/`_dependency_failure_fallback_node`/
+the quota-exhausted `_fallback_node` (`app/agent/graph.py`) were still
+using the Task-3.4.e-era PLATFORM-DEFAULT fixed text, with the real
+`tenants.config` fields sitting unused. Fixed: `render_support_details_
+text()` builds the real template (email/phone/contact-link/hours/
+message interpolated into a real sentence, `None` when no contact
+method is configured — falling back cleanly to the platform-default
+text, since a draft site key can still serve chats before support
+details exist); `app/chat/routes.py` renders it once per turn (it
+already has `tenant.config` open with a real DB session, right next to
+the quota/retention/trace-text checks) and threads it through the
+LangGraph config — the identical config-not-state pattern
+`quota_exhausted_from_config()` already established at Task 4.3 — read
+back by all three fallback nodes via a new `support_text_from_config()`
+accessor, still passing through `_sanitize_answer_text()` unchanged.
+
+**[SECURITY] finding made and fixed in the same pass**: confirmed live
+that `langgraph.checkpoint.base.get_checkpoint_metadata()` copies every
+`configurable` entry whose value is a bare `str`/`int`/`bool`/`float`
+into the checkpoint's own PERSISTED `metadata` column —
+`EXCLUDED_METADATA_KEYS` is a fixed library constant this project
+cannot extend. A bare `support_text` string would have leaked a
+tenant's real email/phone/contact-link into a database column nothing
+else expects to hold tenant contact PII. Fixed by storing it wrapped in
+a single-key dict (`{"text": ...}`), which that function's own
+`isinstance` filter silently skips — proven live against the real
+checkpoint table, not merely reasoned about
+(`test_support_text_is_never_persisted_in_checkpoint_metadata`,
+mirroring `tenant_id`'s own identical Task-3.3.a guard). **A related
+pre-existing gap found, not fixed, flagged in the register**:
+`quota_exhausted` (Task 4.3, a bare `bool`) is NOT similarly wrapped and
+DOES leak into persisted checkpoint metadata today — non-sensitive (a
+boolean flag), left for whoever next touches that field.
+
+**Frontend** (`dashboard/src/screens/SettingsScreen.tsx`,
+`WidgetScreen.tsx`, `OverviewScreen.tsx`, `lib/tenant-api.ts`, new): a
+shared `DataView` component (loading-skeleton/error-no-internals/
+permission-denied/empty/ready, used by every data view this whole batch
+builds) and `useAsyncData` hook. `SettingsScreen`: support details,
+alert/escalation email, retention (with the "shortening deletes older
+chats" explanation before saving), trace-text switch, site keys +
+allowed origins. `WidgetScreen`: widget look (native `<input
+type="color">` paired with a validated hex text input) + the real
+install snippet (tells the tenant to ask their platform admin when
+`PUBLIC_API_BASE_URL` is unset, rather than showing a wrong URL).
+`OverviewScreen`: the real go-live checklist, built once 6.3's own
+source data existed to check against — a new, read-only `GET .../
+tenant/go-live-check` endpoint mirrors docs/SPEC.md's real gate (at
+least one contact method AND one allowed origin) server-side; this
+screen never duplicates that rule client-side. Verified domain / enabled
+source are shown as real, useful signals but correctly do NOT gate
+`ready_for_go_live` — they are not part of the actual server-side gate.
+
+**A real axe-core "color-contrast" finding, fixed without hand-editing
+the generated file**: shadcn's own generated `alert.tsx` destructive
+variant applies a 90%-opacity red to `AlertDescription` (and, via CSS
+`color` inheritance, to a nested Button too) — 4.49:1, below WCAG AA's
+4.5:1. Fixed at the usage site: the Retry button moved into the
+`AlertAction` slot (a sibling, outside the inheritance chain) and
+`!text-destructive` (a Tailwind `!important` override) forces full
+opacity on `AlertDescription` itself.
+
+**Duplication check (n=4, due mid-batch)**: `errorMessageFor()` and the
+save-failure `Alert` markup had reached their third real occurrence
+across the Settings cards — extracted into `lib/error-messages.ts` and
+`components/SaveError.tsx`.
+
+### Step 6.3 — Sources screens
+
+**Backend** (`app/dashboard/source_routes.py`, `source_schemas.py`,
+new; `app/ingest/repository.py`, `upload_storage.py` extended):
+`GET/POST /api/v1/dashboard/sources`, `PATCH .../sources/{id}` (urls-
+type only), `POST .../sources/{id}/disable|enable|refresh-now`,
+`DELETE .../sources/{id}`, `POST .../sources/database` (unconditional
+400 — Felix decision A, `database`-type creation rejected server-side,
+never offered in the UI), the real streaming upload endpoint
+`POST .../sources/upload`, `GET/POST .../domains`,
+`POST .../domains/{id}/verify`. Source status is LIVE-COMPUTED from the
+most recent `Job` row (`_derive_status()`), not the pre-existing
+`Source.status` column — confirmed by grepping every real writer in
+`app/ingest/`: only `create_source()` ever sets it, always to
+`"active"`, so it was never a live signal to begin with.
+
+**Felix decision B**: `delete_source()` now also cleans up a deleted
+`database`-type source's own `db_connections` credentials, but only
+after confirming no OTHER source still references the same connection
+(the schema does not enforce one connection per source).
+
+**The real upload endpoint, with every named security property**:
+`upload_id` generated/looked up ONLY through the tenant's own already-
+scoped `source.config["uploads"]` list, never client-supplied; size cap
+enforced WHILE STREAMING (`save_streaming()`, bounded 1MiB chunks,
+abort-and-delete-partial-file on breach), not after full buffering;
+reuses the existing content-based type sniffer (`sniff_file_type()` —
+PDF magic bytes, ZIP+docx-marker+zip-bomb-size-check, UTF-8-decodable
+→txt/md, never trusting claimed Content-Type/extension); filename never
+used as a path; on a re-upload matching an existing `original_filename`
+within the same source, the PREVIOUS `upload_id`'s own on-disk bytes
+are deleted before the new entry replaces it — closing the Task-2.7.c
+orphaned-storage marker, and the Task-2.7.c tenant-scoping marker,
+together, as this was always their real intended owner.
+
+**Fixed a real, currently-live content-lifecycle bug found along the
+way**: `update_source()` overwrote `source.config` wholesale with no
+diffing — a tenant removing one URL from a `urls`-type source's list
+had no cleanup path anywhere (the url-list adapter only re-fetches URLs
+IN the config, never discovers "missing" ones the way crawl discovery
+does). Fixed: when `client`/`collection_name` are supplied, it now
+computes `removed = old_urls - new_urls`, finds the matching `Document`
+rows, calls `delete_points_for_document()` per stale doc, then deletes
+the `Document` rows — closing the Task-2.9.g url-list-staleness marker.
+
+**The five ingestion-limit Settings fields → PlanLimits, investigated,
+mostly declined with reasons recorded**: `upload_max_size_bytes` wired
+directly at its own real new consumer (the upload endpoint). The other
+four (`crawl_page_cap`/`db_sync_row_cap`/`refresh_now_daily_allowance`/
+`refresh_interval_min_allowed`) left UNWIRED at their existing call
+sites — a small, mechanical change for three of them, a real shared-
+helper signature change with existing regression coverage for the
+fourth — because no real tenant has `plan_id` set yet in production, so
+the wiring would have zero observable effect today against a real
+signature-change risk in security-adjacent code. Re-owned to whoever
+next revisits this once a real tenant actually has a plan assigned.
+
+**Required adversarial pass, every case a committed regression test**
+(`backend/tests/test_dashboard_source_routes.py`, 30+ tests): oversized
+upload (413, both a small-body-with-wrong-Content-Length case and a
+genuinely large streamed body); zip-bomb `.docx` (422); binary-garbage
+with a spoofed extension/Content-Type (422, confirmed sniffed by real
+content, not trusted labels); path-traversal filenames (proven safe via
+`storage_dir.iterdir()` diffing — the real on-disk filename is never
+attacker-controlled); another tenant's real `source_id`/`upload_id`
+(404, "wrong tenant looks exactly like missing"); concurrent re-uploads
+(`asyncio.gather`, last-write-wins with no corruption — the correct bar
+for this project's own real pilot scale, not full transactional
+locking); `database`-type creation via both the dedicated endpoint and
+the generic create endpoint's own closed Literal type (both rejected);
+CSRF on every new state-changing route (parametrized, valid bodies per
+route so a 422 body-validation failure never masks the real CSRF
+check); widget JWT on every new endpoint (401, structural — these
+routes depend on the dashboard's own cookie-based session, which a
+widget JWT cannot satisfy). Run live 3 times for stability.
+
+**A Qdrant read-path-guard false positive, fixed the least-invasive
+way**: `_document_stats()`'s own SQL `func.count()`/`func.bool_or()`
+tripped `test_qdrant_read_path_guard.py`'s AST-based attribute-name
+scanner (`.count(` matches `AsyncQdrantClient.count()` by bare name).
+Fixed by rewriting the helper to fetch rows and count in Python instead
+— never by widening the guard's own allow-list (CLAUDE.md: "never widen
+a security guard's allow-list for convenience").
+
+**Frontend** (`dashboard/src/screens/SourcesScreen.tsx`,
+`lib/sources-api.ts`, new): the sources table (type, status badges,
+"may need JavaScript"/"exceeds plan" flags, last/next refresh, document
+count), an add-source dialog (URLs/Crawl/Upload tabs — the upload tab's
+"answerable to any visitor" warning checkbox gates the submit button,
+not merely a disabled-by-default state proven only visually), per-
+source disable/enable/refresh-now/delete (delete names exactly what
+will be removed: "N indexed pages... the visitor widget can no longer
+answer from its content"), and domain verification (dns/file/meta
+instructions keyed by the real `verification_token`).
+
+**A real axe-core "button-name" finding, fixed**: the domain-
+verification method `<Select>`'s trigger had no accessible name at all
+(a combobox-role button with no label) — fixed with `aria-label=
+"Verification method"`.
+
+### Step 6.4 — Escalation inbox and usage
+
+**Backend** (`app/handoff/repository.py`, `app/dashboard/
+escalation_routes.py`, `escalation_schemas.py`, new): a tenant-scoped
+`EscalationRepository` (list/get/count-open/set-status/delete, the same
+dataclass shape as `TenantScopedRepository`). `GET /api/v1/dashboard/
+escalations` (summaries only — no transcript, a lighter payload),
+`GET .../escalations/open-count` (a separate, cheap query for the
+sidebar's own badge, which is mounted regardless of which screen is
+active), `GET .../escalations/{id}` (the full detail INCLUDING the
+transcript), `PATCH .../escalations/{id}/status` (closed `Literal["seen",
+"resolved"]` — "new" is creation-only, never a dashboard write),
+`DELETE .../escalations/{id}`.
+
+**Transcript display, closing the Step-6.4 half of the Task-4.4-era
+marker**: `get_escalation()` applies `markdown_unescape()` (the shared
+Step-4.4 helper, `app/text_escaping.py`) to the WHOLE stored transcript
+snapshot — one pass over the already-joined string, not per-line like
+the email body's own treatment (which iterates live `BaseMessage`
+objects and can tell visitor/assistant lines apart; the dashboard only
+has the already-joined stored string with no reliable per-line role
+boundary left to re-split on). `markdown_unescape()`'s own docstring
+names applying it to a visitor's own raw text as harmless for display
+purposes, which is exactly this case. The HTML-escape half is satisfied
+by construction on the frontend: `InboxScreen.tsx` renders the result
+as a plain React text node (`whitespace-pre-wrap`), never
+`dangerouslySetInnerHTML` — a React/DOM text node can never be
+reinterpreted as markup.
+
+**Usage meter**: `GET /api/v1/dashboard/usage` reads the AUTHORITATIVE
+DB-backed count (`app.plans.usage.monthly_count_from_db()`), never the
+API process's own in-memory counter — the SAME source of truth the
+usage-alert sweep itself reads (`handle_usage_alert_sweep()`), so this
+screen's own numbers can never disagree with an alert email the tenant
+may have already received. Three states (`normal`/`warning`/`exceeded`)
+at the exact same 80%/100% thresholds the sweep emails at.
+
+**Frontend** (`dashboard/src/screens/InboxScreen.tsx`,
+`UsageScreen.tsx`, `lib/escalation-api.ts`, new): the escalation table
+(created/contact/status/actions), a transcript dialog (lazy-loaded on
+open, rendered as the plain text described above), Mark seen/Mark
+resolved/Delete actions (delete names exactly what will be removed: "a
+permanently removes this escalation request and its transcript").
+`DashboardShell` now fetches the real open-escalation count on mount
+and passes a `reload` callback down so marking/deleting an escalation
+refreshes the sidebar badge too. Usage: a quota meter with badge
+variants chosen to avoid this theme's own measured-failing
+`destructive` Badge contrast (found live on the Overview checklist,
+see 6.6 below) — `default`/`secondary`/`outline` instead, all already
+axe-proven elsewhere on this batch.
+
+### Step 6.6 — Phase 6 acceptance
+
+**docs/SPEC.md §18's own Phase 6 accept line, checked clause by clause
+against real evidence**: *"a new tenant can onboard end to end without
+touching the database."* Per docs/DECISIONS_REGISTER.md's own row ("6.6
+Phase 6 acceptance | Verifies 6.1–6.4"), this verifies Steps 6.1-6.4
+only — 6.5 (Platform admin, the piece that would normally cover tenant/
+site-key creation) is explicitly POST-PILOT. Read literally against
+THAT scope: a tenant's owner can self-serve everything docs/SPEC.md §12
+names (login, support details, widget theme, retention, sources +
+domain verification, escalation inbox, usage) without Felix hand-
+editing JSONB in Postgres directly — the only steps still requiring an
+operator action (creating the tenant row, the owner's User+Membership,
+and the initial site key) go through the real `admin_cli.py` commands
+built at 6.1/6.2, a proper CLI, not "touching the database." **This
+line is satisfied**, under this scope.
+
+**§12's own "Acceptance additions," each with real evidence, not
+overclaimed**:
+- **Screenshots, every screen, light AND dark**: 12 real screenshots
+  (6 screens × 2 themes) captured via a real Playwright script against
+  the real production build under the real backend, saved to the new
+  gitignored `dashboard/screenshots/` folder (never committed, the
+  identical "real output, not a committed fixture" treatment every
+  other per-run artifact in `.gitignore` already gets) — paths listed
+  for Felix in this task's own final report.
+- **A real light/dark theme toggle, built in the same pass this
+  requirement surfaced it was needed for**: the CSS token system
+  already supported both themes (`.dark` class rules, every screen
+  built on tokens only, confirmed by this whole batch's own work) but
+  NOTHING in the app ever applied that class — a real, found-live gap
+  in docs/SPEC.md §12's own "light and dark themes from the first
+  screen" line. Fixed with `src/lib/theme.ts` (`localStorage` +
+  `prefers-color-scheme` fallback, applied synchronously in `main.tsx`
+  before the first render to avoid a flash-of-wrong-theme) and a
+  header toggle button in `DashboardShell` — no new dependency
+  (`next-themes` was tried and reverted earlier in this track for
+  being unpinned).
+- **Keyboard-only pass + automated accessibility check, every screen,
+  committed as a real regression test**: a new `e2e/dashboard-
+  screens.spec.ts` logs in ONCE (not once per screen — a real per-
+  account dashboard login rate limit, docs/SPEC.md §12's own "rate-
+  limited login with temporary lockouts", was tripped live by this
+  task's own earlier repeated manual testing, confirming the limit is
+  real and working) and, for each of the 6 screens: runs a real axe
+  scan (zero serious/critical findings required), and a keyboard-only
+  Tab pass using REAL DOM-NODE IDENTITY comparison (a `JSHandle`
+  before/after each Tab press), not a derived text signature — a text-
+  signature version was tried first and produced a FALSE keyboard-trap
+  finding on the Widget screen (two distinct, unlabelled `<input>`
+  fields share the same empty textContent/no-aria-label, so a text
+  signature can't tell them apart even though focus genuinely moved).
+  A short screen legitimately running out of tab stops before 8
+  presses (focus leaves the page for browser chrome) is treated as
+  normal end-of-page behaviour, not a trap.
+- **Loading/empty/error(no internals)/permission-denied for every data
+  view**: verified directly, not assumed — every one of the 12
+  `DataView` usages across all 6 screens gets loading/error/
+  permission-denied automatically (the shared component's own
+  unconditional branches); `isEmpty`/`empty` is correctly present on
+  every LIST-shaped view (Sources' sources+domains, Settings' site
+  keys, Inbox's escalations) and correctly absent on every single-
+  record view (Overview, Usage, Widget's/Settings' own tenant config),
+  where "empty" has no meaning.
+
+**Duplication check (overdue, caught at this step)**: the counter had
+passed n=4 three times since the last reset (6.2 Part F) without a
+check running — `test_dashboard_escalation_routes.py` had reimplemented
+its own local `_dashboard_http_client()`/`_attach_csrf()`/
+`_create_user()`/`_login()`, a FOURTH occurrence of the exact pattern
+`tests/dashboard_test_helpers.py` was already extracted for at Step 6.3
+(that module's own header comment literally says "every dashboard
+route test file should import from here instead of redefining these").
+Fixed: imports the shared module directly.
+
+**§9 markers and register reconciled**: every Phase-6-owned marker
+found by a dedicated research pass is now RESOLVED in PROJECT_SPEC.md
+§9 with the real file/test naming the fix, or left correctly open with
+its own reason restated (the per-plan ingestion-limit deferral; the
+escalation `reason` field's fixed-string limitation, D-44-reason-
+fixed-string — a genuine, accepted limitation, not this step's job to
+change the schema). `docs/DECISIONS_REGISTER.md`'s own "6.2"/"6.3"/
+"6.4" forward-commitment sections all marked RESOLVED with what was
+actually built.
+
+### Prior decisions applied (full list, cited again here for the
+permanent record — see this task's own final report for the complete
+version with file/test citations)
+
+Every 6.2/6.3/6.4 forward commitment named in docs/DECISIONS_REGISTER.md
+as of this batch's start, plus Decisions A (database-type source
+rejected server-side) and B (db_connections cleanup on delete) from
+Felix's 2026-10-15 ratified decisions — see the register's own "6.2
+Tenant settings"/"6.3 Sources screens"/"6.4 Escalation inbox and usage"
+sections (now marked RESOLVED) for the complete, dated list.
+
+### Verified (final, authoritative pass, end of batch)
+
+- `make lint`: clean (ruff, whole `backend/evals/hooks.py`).
+- Full `backend/tests` (both real test services, `TEST_DATABASE_URL` +
+  `TEST_QDRANT_URL`): **1721 passed, 0 failed** (up from 1572 at Step
+  6.1's own close-out).
+- `dashboard/`: `npx tsc --noEmit` clean; `npm run lint` clean (3
+  pre-existing shadcn-boilerplate warnings, unrelated); `npx vitest
+  run` **41 passed** (0 failed); `npm run build` succeeds within
+  budget.
+- `dashboard/e2e` (`npm run test:e2e`, real strict-CSP production
+  build against the real backend): **6/6 passing** (the original 5
+  `csp.spec.ts` tests plus the new `dashboard-screens.spec.ts`
+  per-screen a11y/keyboard/CSP pass), run 3x for stability.
+- `backend/tests/test_dashboard_source_routes.py`'s own adversarial
+  pass: run live 3x.
+- OpenAPI additive-only proof (`scripts/check_openapi_additive.py`):
+  confirmed at every contract-touching sub-step — 9 new paths after
+  6.2 Part B, 9 more after 6.3 Part B, 5 more after 6.4 Part A, 1 more
+  after 6.2 Part F (go-live-check) — 0 changed/removed paths at any
+  point; unchanged (0 diff) after the 6.2 Part G support-details fix
+  (internal graph wiring only, no endpoint shape touched).
+- Live end-to-end smoke test, the real HTTP API, not a unit test:
+  seeded a real tenant's own quota to exhausted (1/1 via a real `Plan`
+  row + `UsageEvent`, forcing a container restart so the API's own
+  in-memory counter reloaded from the DB), sent a real chat message
+  through the real session+chat flow, and confirmed the fallback
+  reply embedded the tenant's own real configured support email —
+  proving the `tenants.config` → `render_support_details_text()` →
+  `chat/routes.py` → LangGraph config → fallback node chain end to
+  end, not just at the unit level.
+- Rebase: `.env.example`/`backend/tests/test_env_example.py` conflicts
+  with the ops track's own Step 7.3 prep work resolved by keeping BOTH
+  sides' lines (every variable given its own comment line, confirmed
+  via `test_every_variable_line_has_a_comment_line_directly_above_it`);
+  full suite re-run clean after the rebase.
+- `git status --short`: clean after each commit; no `.env` ever
+  staged.
+- A real Docker Desktop engine outage occurred mid-batch (confirmed
+  live via `ps aux` — the build/test processes were genuinely stalled,
+  not merely slow, their own CPU time frozen across multiple checks);
+  recovered by killing the one confirmed-dead process and restarting
+  the disposable test containers fresh, per explicit instruction —
+  nothing destructive touched without that instruction.
