@@ -12,6 +12,7 @@ import {
 import { Sidebar } from "@/components/Sidebar";
 import { logout, type DashboardSessionResponse } from "@/lib/api";
 import { getOpenEscalationCount } from "@/lib/escalation-api";
+import { getInitialTheme, setTheme, type Theme } from "@/lib/theme";
 import { useAsyncData } from "@/lib/use-async-data";
 import { InboxScreen } from "@/screens/InboxScreen";
 import { OverviewScreen } from "@/screens/OverviewScreen";
@@ -52,6 +53,13 @@ function ActiveScreen({
 export function DashboardShell({ session, onLoggedOut }: DashboardShellProps) {
   const [loggingOut, setLoggingOut] = useState(false);
   const [screen, setScreen] = useState<ScreenKey>("overview");
+  const [theme, setThemeState] = useState<Theme>(getInitialTheme);
+
+  function handleToggleTheme() {
+    const next = theme === "dark" ? "light" : "dark";
+    setTheme(next);
+    setThemeState(next);
+  }
   const openCountFetcher = useCallback(() => getOpenEscalationCount(), []);
   const { state: openCountState, reload: reloadOpenCount } = useAsyncData(openCountFetcher);
   const openEscalationCount = openCountState.status === "ready" ? openCountState.data.count : null;
@@ -78,33 +86,38 @@ export function DashboardShell({ session, onLoggedOut }: DashboardShellProps) {
           <p className="text-sm font-medium text-foreground">{session.tenant.name}</p>
           <p className="text-sm text-muted-foreground">{session.user.email}</p>
         </div>
-        <Dialog>
-          <DialogTrigger asChild>
-            <Button variant="outline">Log out</Button>
-          </DialogTrigger>
-          <DialogContent>
-            <DialogHeader>
-              <DialogTitle>Log out of SamoFlow?</DialogTitle>
-              <DialogDescription>
-                You will need to sign in again to access this dashboard.
-              </DialogDescription>
-            </DialogHeader>
-            <DialogFooter>
-              {/* `variant="destructive"` was tried here first and
-               * dropped for two reasons, found live: logging out
-               * deletes nothing (docs/SPEC.md §12's own "destructive
-               * actions... say exactly what will be removed" doesn't
-               * really describe this action), and the Nova preset's
-               * own destructive color pairing measured at 3.82:1
-               * contrast here (a real axe-core finding, below WCAG
-               * AA's 4.5:1) -- the default variant's solid colors both
-               * fit the action better and pass contrast. */}
-              <Button onClick={handleConfirmLogout} disabled={loggingOut}>
-                {loggingOut ? "Logging out…" : "Log out"}
-              </Button>
-            </DialogFooter>
-          </DialogContent>
-        </Dialog>
+        <div className="flex items-center gap-2">
+          <Button variant="outline" onClick={handleToggleTheme}>
+            {theme === "dark" ? "Light mode" : "Dark mode"}
+          </Button>
+          <Dialog>
+            <DialogTrigger asChild>
+              <Button variant="outline">Log out</Button>
+            </DialogTrigger>
+            <DialogContent>
+              <DialogHeader>
+                <DialogTitle>Log out of SamoFlow?</DialogTitle>
+                <DialogDescription>
+                  You will need to sign in again to access this dashboard.
+                </DialogDescription>
+              </DialogHeader>
+              <DialogFooter>
+                {/* `variant="destructive"` was tried here first and
+                 * dropped for two reasons, found live: logging out
+                 * deletes nothing (docs/SPEC.md §12's own "destructive
+                 * actions... say exactly what will be removed" doesn't
+                 * really describe this action), and the Nova preset's
+                 * own destructive color pairing measured at 3.82:1
+                 * contrast here (a real axe-core finding, below WCAG
+                 * AA's 4.5:1) -- the default variant's solid colors both
+                 * fit the action better and pass contrast. */}
+                <Button onClick={handleConfirmLogout} disabled={loggingOut}>
+                  {loggingOut ? "Logging out…" : "Log out"}
+                </Button>
+              </DialogFooter>
+            </DialogContent>
+          </Dialog>
+        </div>
       </header>
       <div className="flex flex-1">
         <Sidebar

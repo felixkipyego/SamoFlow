@@ -31,6 +31,13 @@ dashboard/test-results/
 dashboard/playwright-report/
 dashboard/blob-report/
 
+# Step 6.6: Phase 6 acceptance screenshots (docs/SPEC.md §12's own
+# "every screen reviewed from screenshots in light and dark themes") --
+# real, timestamped evidence for Felix's own review, the identical
+# "never committed, real output" treatment every other per-run artifact
+# in this file already gets.
+dashboard/screenshots/
+
 # Task 3.7.d: per-run answer-eval output (manual_run_answer_eval.py) --
 # real LLM output, timestamped, non-reproducible (a different run can
 # legitimately produce different real answers/judge verdicts), and

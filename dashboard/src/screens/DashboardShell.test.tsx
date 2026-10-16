@@ -31,6 +31,8 @@ describe("DashboardShell", () => {
     // active -- mocked for the identical reason as getGoLiveCheck
     // above.
     vi.spyOn(escalationApi, "getOpenEscalationCount").mockResolvedValue({ count: 0 });
+    localStorage.clear();
+    document.documentElement.classList.remove("dark");
   });
 
   it("shows the tenant name and the signed-in user's email", async () => {
@@ -66,6 +68,17 @@ describe("DashboardShell", () => {
 
     await waitFor(() => expect(logoutSpy).toHaveBeenCalled());
     await waitFor(() => expect(onLoggedOut).toHaveBeenCalled());
+  });
+
+  it("toggles the dark theme and persists the choice", async () => {
+    render(<DashboardShell session={session} onLoggedOut={vi.fn()} />);
+
+    const toggle = screen.getByRole("button", { name: "Dark mode" });
+    await userEvent.click(toggle);
+
+    expect(document.documentElement.classList.contains("dark")).toBe(true);
+    expect(localStorage.getItem("samoflow-dashboard-theme")).toBe("dark");
+    expect(screen.getByRole("button", { name: "Light mode" })).toBeInTheDocument();
   });
 
   it("still calls onLoggedOut even if the logout request fails", async () => {
