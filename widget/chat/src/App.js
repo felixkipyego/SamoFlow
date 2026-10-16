@@ -49,15 +49,27 @@ function Citations({ items }) {
 // branch in the renderer itself; the empty set alone is what does it.
 const NO_CITATIONS_ALLOWED = new Set();
 
-function Message({ message, onRetry }) {
+function Message({ message, onRetry, verifiedDomains }) {
   if (message.role === "visitor") {
+    // PART A: the visitor's OWN typed text never gets a live link
+    // either way, same reasoning NO_CITATIONS_ALLOWED already has --
+    // this is the visitor's own unvetted input, not tenant-controlled
+    // content, so it is never compared against verified_domains at
+    // all (a bare 2-arg call; render.js's own default parameter value
+    // for verifiedDomains is an empty set).
     return h("div", { className: "sf-message sf-message-visitor" }, renderMarkdown(parseMarkdown(message.text), NO_CITATIONS_ALLOWED));
   }
   const allowedUrls = new Set((message.citations || []).map((c) => c.url));
   return h(
     "div",
     { className: `sf-message sf-message-assistant${message.status === "error" ? " sf-message-error" : ""}` },
-    renderMarkdown(parseMarkdown(message.text), allowedUrls),
+    // PART A: verifiedDomains is a TENANT-wide, session-long property
+    // (unlike citations, which are genuinely per-turn and cannot be
+    // reconstructed for history, docs/DECISIONS_REGISTER.md's own
+    // "Unscheduled" entry) -- so it applies identically to a LIVE
+    // answer and a past, re-opened conversation's own stored text, no
+    // separate "history mode" needed here either.
+    renderMarkdown(parseMarkdown(message.text), allowedUrls, verifiedDomains),
     // Part D (docs/SPEC.md §9's "Stop mid-stream"): a visible, plain-text
     // marker on a turn the visitor stopped early -- never styled to look
     // like part of the model's own answer text (a separate element, not
@@ -72,6 +84,13 @@ function Message({ message, onRetry }) {
 }
 
 export function App({ controller, config, launcherEl }) {
+  // PART A: computed once per render, not memoized -- `config.
+  // verifiedDomains` is a short, already-validated (config-
+  // validation.js) array that never changes within one mounted
+  // session, so the cost of rebuilding this Set on every render is
+  // negligible; memoizing it would be complexity this component does
+  // not need (rule 11).
+  const verifiedDomains = new Set(config.verifiedDomains || []);
   const [open, setOpen] = useState(true);
   const [view, setView] = useState("chat"); // "chat" | "conversations" | "escalation"
   const [messages, setMessages] = useState([]);
@@ -358,7 +377,14 @@ export function App({ controller, config, launcherEl }) {
       "div",
       { className: "sf-message-list", role: "log", "aria-live": "off", ref: listRef },
       messages.length === 0 ? h("div", { className: "sf-message sf-message-assistant" }, config.greeting) : null,
-      messages.map((message, index) => h(Message, { key: index, message, onRetry: index === messages.length - 1 ? handleRetry : null })),
+      messages.map((message, index) =>
+        h(Message, {
+          key: index,
+          message,
+          onRetry: index === messages.length - 1 ? handleRetry : null,
+          verifiedDomains,
+        }),
+      ),
     ),
     // Task 5.5: the real announcer -- visually hidden, aria-live, text
     // set exactly once per completed turn (see runTurn's own onDone

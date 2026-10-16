@@ -147,3 +147,137 @@ test("empty input and whitespace-only input render without throwing (bad input: 
   assert.doesNotThrow(() => renderText(""));
   assert.doesNotThrow(() => renderText("   \n\n   "));
 });
+
+// --- PART A [SECURITY]: verified_domains link allowlist (2026-10-16/17) ----
+//
+// docs/DECISIONS_REGISTER.md's "Widget track close-out" forward
+// commitment: a link is allowed if it is https AND (its EXACT URL is in
+// this turn's own citation set OR its HOST exactly matches one of the
+// tenant's own verified_domains). The two rules are additive, proven
+// separately below, then together. No citation URLs anywhere in this
+// section (`new Set()`) so every passing case here is proven via the
+// verified-domains path alone, never accidentally via the citation one.
+const VERIFIED = new Set(["verified.example"]);
+const NO_CITATIONS = new Set();
+
+test("a verified-domain link with no citation at all still renders as a real, safe anchor", () => {
+  const tree = renderText("See [our site](https://verified.example/pricing) for more.", NO_CITATIONS, VERIFIED);
+  const anchors = collectAnchors(tree);
+  assert.equal(anchors.length, 1);
+  assert.equal(anchors[0].href, "https://verified.example/pricing");
+  assert.equal(anchors[0].text, "our site");
+});
+
+test("a verified-domain link still carries rel=noopener noreferrer and target=_blank", () => {
+  const tree = renderText("[click](https://verified.example/x)", NO_CITATIONS, VERIFIED);
+  const anchor = collectAnchors(tree)[0];
+  assert.equal(anchor !== undefined, true);
+  assert.equal(anchor.target, "_blank");
+  assert.ok(anchor.rel.includes("noopener"));
+  assert.ok(anchor.rel.includes("noreferrer"));
+});
+
+test("the two allowlists are additive: a citation URL on an UNVERIFIED host still renders, and a verified-domain URL with no citation still renders", () => {
+  const cited = new Set(["https://cited-but-unverified.example/page"]);
+  const tree = renderText(
+    "[cited](https://cited-but-unverified.example/page) and [verified](https://verified.example/x)",
+    cited,
+    VERIFIED,
+  );
+  assert.equal(collectAnchors(tree).length, 2);
+});
+
+test("path trick: evil.com/verified.example is NOT the verified host, never linked", () => {
+  const tree = renderText("[click](https://evil.com/verified.example)", NO_CITATIONS, VERIFIED);
+  assert.deepEqual(collectAnchors(tree), []);
+  assert.ok(flattenText(tree).includes("click"));
+});
+
+test("subdomain trick: verified.example.evil.com is a DIFFERENT host, never linked", () => {
+  const tree = renderText("[click](https://verified.example.evil.com/x)", NO_CITATIONS, VERIFIED);
+  assert.deepEqual(collectAnchors(tree), []);
+});
+
+test("subdomain of the verified domain itself is NOT implicitly covered (exact match only, matching docs/SPEC.md's own ingestion rule: 'subdomains count only if the tenant verifies them')", () => {
+  const tree = renderText("[click](https://evil.verified.example/x)", NO_CITATIONS, VERIFIED);
+  assert.deepEqual(collectAnchors(tree), []);
+});
+
+test("userinfo trick: https://verified.example@evil.com resolves to evil.com, never linked", () => {
+  const tree = renderText("[click](https://verified.example@evil.com/x)", NO_CITATIONS, VERIFIED);
+  assert.deepEqual(collectAnchors(tree), []);
+});
+
+test("punycode/IDN look-alike: a visually-similar homograph never matches the real verified domain (compared in punycode/ASCII form)", () => {
+  // A Cyrillic "е" (U+0435) substituted for the Latin "e" in "verified" --
+  // looks identical in most UIs, encodes to a totally different
+  // punycode string, so it can never collide with the real ASCII host.
+  const lookalike = "verifiеd.example";
+  const tree = renderText(`[click](https://${lookalike}/x)`, NO_CITATIONS, VERIFIED);
+  assert.deepEqual(collectAnchors(tree), []);
+});
+
+test("a GENUINE IDN verified domain still matches once canonicalized to punycode on both sides", () => {
+  const idnVerified = new Set(["xn--caf-dma.example"]); // café.example
+  const tree = renderText("[click](https://café.example/x)", NO_CITATIONS, idnVerified);
+  assert.equal(collectAnchors(tree).length, 1);
+});
+
+test("mixed case: VERIFIED.EXAMPLE still matches the lowercase stored domain", () => {
+  const tree = renderText("[click](https://VERIFIED.EXAMPLE/x)", NO_CITATIONS, VERIFIED);
+  assert.equal(collectAnchors(tree).length, 1);
+});
+
+test("trailing dot: verified.example. still matches", () => {
+  const tree = renderText("[click](https://verified.example./x)", NO_CITATIONS, VERIFIED);
+  assert.equal(collectAnchors(tree).length, 1);
+});
+
+test("an explicit port does not change the host match (verification is host-only, port-agnostic)", () => {
+  const tree = renderText("[click](https://verified.example:8443/x)", NO_CITATIONS, VERIFIED);
+  assert.equal(collectAnchors(tree).length, 1);
+});
+
+test("http (downgrade from https) on the verified domain is never linked", () => {
+  const tree = renderText("[click](http://verified.example/x)", NO_CITATIONS, VERIFIED);
+  assert.deepEqual(collectAnchors(tree), []);
+});
+
+test("a protocol-relative //verified.example link is never linked (no scheme at all)", () => {
+  const tree = renderText("[click](//verified.example/x)", NO_CITATIONS, VERIFIED);
+  assert.deepEqual(collectAnchors(tree), []);
+});
+
+test("javascript:/data: with a verified-looking path component never becomes a clickable anchor", () => {
+  for (const url of [
+    "javascript:alert(1)//verified.example",
+    "data:text/html,verified.example",
+  ]) {
+    const tree = renderText(`[click](${url})`, NO_CITATIONS, VERIFIED);
+    assert.deepEqual(collectAnchors(tree), [], `scheme should be rejected: ${url}`);
+  }
+});
+
+test("backslash authority trick still resolves honestly and is judged on the REAL host it names", () => {
+  // WHATWG treats \\ like / for http(s) -- this one genuinely resolves
+  // to verified.example, so it SHOULD match (the parser is not being
+  // fooled into naming the wrong host; it is reading the same host a
+  // real browser's own navigation would).
+  const tree = renderText("[click](https:\\\\verified.example\\x)", NO_CITATIONS, VERIFIED);
+  assert.equal(collectAnchors(tree).length, 1);
+});
+
+test("encoded-slash userinfo trick still resolves to the real host, never verified.example", () => {
+  const tree = renderText("[click](https://verified.example%2f@evil.com/x)", NO_CITATIONS, VERIFIED);
+  assert.deepEqual(collectAnchors(tree), []);
+});
+
+test("an empty verified-domains set never matches anything, including a plausible exact host", () => {
+  const tree = renderText("[click](https://verified.example/x)", NO_CITATIONS, new Set());
+  assert.deepEqual(collectAnchors(tree), []);
+});
+
+test("a missing verified-domains argument (default) behaves identically to an empty set", () => {
+  const tree = renderText("[click](https://verified.example/x)", NO_CITATIONS);
+  assert.deepEqual(collectAnchors(tree), []);
+});

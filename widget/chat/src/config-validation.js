@@ -12,7 +12,7 @@
 // throws, never half-applies one tenant-supplied value while silently
 // trusting an adjacent unvalidated one.
 import { isValidCssColor } from "./color.js";
-import { isHttpsUrl } from "./url-safety.js";
+import { canonicalizeVerifiedDomain, isHttpsUrl } from "./url-safety.js";
 
 const DEFAULT_PRIMARY_COLOR = "#4f46e5";
 
@@ -58,6 +58,31 @@ function _validatedPosition(value) {
   return VALID_POSITIONS.has(value) ? value : "right";
 }
 
+// PART A [SECURITY] (verified_domains link allowlist, 2026-10-16/17):
+// `verified_domains` is a tenant-controlled list of bare hostnames
+// (`backend/app/ingest/domain_verification.py`'s own `normalize_
+// domain()` already normalizes it server-side) -- validated again
+// here regardless, the same "never trust the network blindly" rule
+// every other field on this page already follows. A defensive cap on
+// array length, matching this file's own established discipline for
+// any network-delivered list/string (never unbounded memory from a
+// malicious or malfunctioning response).
+const MAX_VERIFIED_DOMAINS = 50;
+
+function _validatedVerifiedDomains(rawDomains) {
+  if (!Array.isArray(rawDomains)) {
+    return [];
+  }
+  const result = [];
+  for (const entry of rawDomains.slice(0, MAX_VERIFIED_DOMAINS)) {
+    const canonical = canonicalizeVerifiedDomain(entry);
+    if (canonical !== null) {
+      result.push(canonical);
+    }
+  }
+  return result;
+}
+
 export function validateWidgetConfig(rawConfig) {
   const raw = typeof rawConfig === "object" && rawConfig !== null ? rawConfig : {};
   return {
@@ -67,5 +92,6 @@ export function validateWidgetConfig(rawConfig) {
     logoUrl: _validatedHttpsUrl(raw.logo_url),
     privacyNoticeUrl: _validatedHttpsUrl(raw.privacy_notice_url),
     position: _validatedPosition(raw.position),
+    verifiedDomains: _validatedVerifiedDomains(raw.verified_domains),
   };
 }
