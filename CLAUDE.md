@@ -17,6 +17,11 @@ Applies to every task.
 - Rebase again immediately before pushing.
 - If a rebase conflicts in PROJECT_SPEC.md or DECISIONS_REGISTER.md, keep both sides' content — never drop the other side's lines.
 
+## Commit hygiene
+Applies to every task that produces more than one commit.
+- Every commit must pass the tests on its own: `git checkout <commit>` followed by the relevant test run must never fail for a reason that commit's own diff introduced.
+- If a batch's parts are too interleaved to split this way without an unsafe, error-prone hunk-level split, put the interleaved files in ONE commit and say so explicitly in that commit's own message — never leave an intermediate commit red for the sake of finer-grained attribution.
+
 ## Senior engineer judgment
 Applies to every task, whether or not the prompt mentions it. Extends PROJECT_SPEC.md rule 11 (over-engineering/security) and rule 6 (the end-of-task report) — read those first; this does not repeat them.
 - State the simplest correct design before building, and justify every piece of complexity beyond it.
@@ -36,5 +41,5 @@ Applies to every task.
 - Exception: if genuinely blocked mid-task (cannot continue safely or correctly without input), stop there and report the blocker in the same report format — never ask permission for things the prompt already authorised.
 
 ## Keeping the files in sync
-- Do not copy rules or decisions into this file, with one exception: "Sync before work", "Senior engineer judgment" and "Ending a task" above are standing, project-independent rules, not SamoFlow spec decisions, so they live here directly rather than in PROJECT_SPEC.md. Everything else still only points to the two files above, so nothing can drift.
+- Do not copy rules or decisions into this file, with one exception: "Sync before work", "Commit hygiene", "Senior engineer judgment" and "Ending a task" above are standing, project-independent rules, not SamoFlow spec decisions, so they live here directly rather than in PROJECT_SPEC.md. Everything else still only points to the two files above, so nothing can drift.
 - After every task, update PROJECT_SPEC.md as its rules describe.

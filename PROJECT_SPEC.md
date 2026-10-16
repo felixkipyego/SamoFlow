@@ -28,6 +28,7 @@ A production-ready, multi-tenant, embeddable AI widget platform: one website is 
 20. **Citing supersession** (recorded 2026-10-15, same root cause as rule 19): a recommendation that contradicts a docs/DECISIONS_REGISTER.md entry must cite that entry's id and say "supersedes `<id>`" explicitly. Silent divergence from a recorded decision is a defect, not a judgment call, even if the new recommendation is itself correct.
 21. **Register stays current** (recorded 2026-10-15): every new decision, every CANDIDATE decision, and every forward commitment (an instruction addressed to a future step or phase) updates docs/DECISIONS_REGISTER.md in the same commit that records it — never left for a later promotion pass.
 22. **CANDIDATE/forward-commitment markers are also §9 markers** (recorded 2026-10-15): every CANDIDATE decision and every forward commitment in docs/DECISIONS_REGISTER.md is ALSO recorded as a §9 Open marker with a named owner step, so `make hooks`-style sweeps and rule 19's own kickoff sweep both surface it from either direction. A register row with no matching §9 marker, or a §9 marker with no matching register row, is itself a defect to fix on sight.
+23. **Every commit passes the tests on its own** (recorded 2026-10-16, after the prior widget public-API batch's own commits used a "shared file lands in the LAST part's commit" rule that left some intermediate commits unable to pass their own new tests if checked out alone): `git checkout <commit>` followed by the relevant test run must never fail for a reason that commit's own diff introduced. If a batch's parts are too interleaved to split this way without an unsafe, error-prone hunk-level split, put the interleaved files in ONE commit and say so explicitly in that commit's own message — never leave an intermediate commit red for the sake of finer-grained attribution.
 
 ## 3. Engineering rules and commands
 
@@ -8111,6 +8112,18 @@ Prior reset to **n = 0** at the duplication check covering the 3 tasks against t
 
 ## 9. Open markers
 
+- **Owner: whoever next revisits `/session`'s own no-oracle design, no
+  task scheduled yet (found, not fixed, at the PART 0 audit,
+  2026-10-16)**: `GET /widget-appearance`'s three failure reasons
+  (unknown/suspended site key, inactive tenant) are byte-identical in
+  body and status, but not in query count — the inactive-tenant branch
+  costs one more DB round trip (`get_tenant()`) than the other two,
+  the SAME pre-existing shape `/session`'s own `create_session()`
+  already has for its own four-reasons-one-response design. Not fixed:
+  equalizing query count for both endpoints together is its own
+  fragile piece of work, and a single extra LOCAL Postgres round trip
+  is a weak signal against real network jitter for a remote attacker.
+  See docs/DECISIONS_REGISTER.md's `D-part0-appearance-timing-class`.
 - **Owner Step 7.2 (recorded 2026-10-16, at the config-path production
   bug fix — see §5's own decision-log entry for the full build):** the
   golden-set evals (`make eval`, `make eval-answers`) run entirely
