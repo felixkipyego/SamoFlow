@@ -228,10 +228,74 @@ def test_fallback_node_returns_the_real_fixed_sanitized_reply():
     # _NO_ANSWER_FALLBACK_TEXT (see _QUOTA_EXHAUSTED_TEXT's own header
     # comment for why), confirmed here, not just asserted in prose: the
     # two are different strings.
-    result = graph_module._fallback_node({})
+    result = graph_module._fallback_node({}, {})
     expected_text = graph_module._sanitize_answer_text(graph_module._QUOTA_EXHAUSTED_TEXT)
     assert result == {"messages": [AIMessage(content=expected_text)]}
     assert graph_module._QUOTA_EXHAUSTED_TEXT != graph_module._NO_ANSWER_FALLBACK_TEXT
+
+
+# --- Step 6.2: render_support_details_text() + the three fallback
+# nodes reading it back from config -------------------------------
+
+
+def test_render_support_details_text_returns_none_with_no_contact_method():
+    # A tenant with zero contact methods configured must fall back to
+    # the fixed platform-default text, never an empty "Contact us: ."
+    # sentence (a draft site key can still serve chats before support
+    # details exist).
+    assert graph_module.render_support_details_text({}) is None
+    assert (
+        graph_module.render_support_details_text({"support_hours": "Mon-Fri 9-5"}) is None
+    )
+
+
+def test_render_support_details_text_builds_the_real_template():
+    text = graph_module.render_support_details_text(
+        {
+            "support_email": "help@acme.example",
+            "support_phone": "+1 555 0100",
+            "support_contact_link": "https://acme.example/contact",
+            "support_hours": "Mon-Fri 9-5",
+            "support_message": "We're here to help.",
+        }
+    )
+    assert text == (
+        "We're here to help. Contact us: email help@acme.example, "
+        "call +1 555 0100, https://acme.example/contact. Hours: Mon-Fri 9-5."
+    )
+
+
+def test_render_support_details_text_uses_the_default_sentence_with_no_message():
+    text = graph_module.render_support_details_text({"support_email": "help@acme.example"})
+    assert text == (
+        "Please reach out to our support team for further help. "
+        "Contact us: email help@acme.example."
+    )
+
+
+def test_fallback_node_uses_the_tenants_own_support_text_when_present():
+    config = {"configurable": {"support_text": {"text": "Call us at +1 555 0100."}}}
+    result = graph_module._fallback_node({}, config)
+    expected_text = graph_module._sanitize_answer_text("Call us at +1 555 0100.")
+    assert result == {"messages": [AIMessage(content=expected_text)]}
+
+
+def test_no_answer_fallback_node_uses_the_tenants_own_support_text_when_present():
+    config = {"configurable": {"support_text": {"text": "Email help@acme.example."}}}
+    result = graph_module._no_answer_fallback_node({}, config)
+    expected_text = graph_module._sanitize_answer_text("Email help@acme.example.")
+    assert result == {
+        "messages": [AIMessage(content=expected_text, name="no_answer_fallback")]
+    }
+
+
+def test_dependency_failure_fallback_node_uses_the_tenants_own_support_text_when_present():
+    config = {"configurable": {"support_text": {"text": "Email help@acme.example."}}}
+    result = graph_module._dependency_failure_fallback_node({}, config)
+    expected_text = graph_module._sanitize_answer_text("Email help@acme.example.")
+    assert result == {
+        "messages": [AIMessage(content=expected_text, name="dependency_failure")]
+    }
 
 
 def test_guardrail_node_returns_the_real_fixed_sanitized_reply():
@@ -265,7 +329,7 @@ def test_no_answer_fallback_node_returns_the_real_fixed_sanitized_reply():
     # fallbacks in a row" escalation trigger reads this, never the
     # visible text -- see _last_two_ai_turns_were_fallbacks()'s own
     # comment in app/agent/graph.py).
-    result = graph_module._no_answer_fallback_node({})
+    result = graph_module._no_answer_fallback_node({}, {})
     expected_text = graph_module._sanitize_answer_text(graph_module._NO_ANSWER_FALLBACK_TEXT)
     assert result == {
         "messages": [AIMessage(content=expected_text, name="no_answer_fallback")]
@@ -275,7 +339,7 @@ def test_no_answer_fallback_node_returns_the_real_fixed_sanitized_reply():
 def test_dependency_failure_fallback_node_returns_the_real_fixed_sanitized_reply():
     # Step 4.4: now also tagged name="dependency_failure" -- see the
     # test directly above for the full reasoning.
-    result = graph_module._dependency_failure_fallback_node({})
+    result = graph_module._dependency_failure_fallback_node({}, {})
     expected_text = graph_module._sanitize_answer_text(graph_module._DEPENDENCY_FAILURE_TEXT)
     assert result == {
         "messages": [AIMessage(content=expected_text, name="dependency_failure")]

@@ -68,6 +68,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sse_starlette.sse import EventSourceResponse
 
 from app.agent.entrypoint import read_state, run_turn
+from app.agent.graph import render_support_details_text
 from app.auth.dependencies import VerifiedIdentity, get_current_visitor
 from app.chat.schemas import (
     ChatRequest,
@@ -432,6 +433,7 @@ async def _stream_turn(
     chat_request_timeout_seconds: float,
     quota_exhausted: bool,
     trace_text_enabled: bool,
+    support_text: str | None,
 ) -> AsyncIterator[dict]:
     """The real SSE body. Holds NO database connection of its own for the
     main loop's own duration -- the lease and the idempotency check were
@@ -518,6 +520,7 @@ async def _stream_turn(
                     conversation_id,
                     graph_input,
                     quota_exhausted=quota_exhausted,
+                    support_text=support_text,
                 ):
                     if mode == "custom":
                         event_id += 1
@@ -709,6 +712,13 @@ async def create_chat_turn(payload: ChatRequest, request: Request) -> Response:
                 tenant.id, plan_limits
             )
 
+            # Step 6.2: the SAME already-fetched `tenant.config` the
+            # retention/trace-text checks right below also read --
+            # rendered here, with the real DB session open, never
+            # inside the graph itself (app.agent.context.support_text_
+            # from_config()'s own docstring has the full reasoning).
+            support_text = render_support_details_text(tenant.config)
+
             # Step 4.5: docs/SPEC.md §13's own per-tenant trace-text
             # switch -- resolved HERE, with the already-open session and
             # the already-fetched `tenant` row, the IDENTICAL "resolve
@@ -773,6 +783,7 @@ async def create_chat_turn(payload: ChatRequest, request: Request) -> Response:
             settings.chat_request_timeout_seconds,
             quota_exhausted,
             trace_text_enabled,
+            support_text,
         ),
         ping=15,
         headers={

@@ -43,7 +43,11 @@ from langgraph.graph.state import CompiledStateGraph
 from pydantic import BaseModel, Field
 
 from app.agent.chat_model import get_chat_model
-from app.agent.context import quota_exhausted_from_config, tenant_id_from_config
+from app.agent.context import (
+    quota_exhausted_from_config,
+    support_text_from_config,
+    tenant_id_from_config,
+)
 from app.agent.escalation_phrases import escalation_phrase_category
 from app.agent.greeting_phrases import is_greeting_or_thanks
 from app.agent.rewrite_trigger import needs_join
@@ -348,7 +352,7 @@ _ROUTE_PATH_MAP = {
 }
 
 
-def _fallback_node(state: AgentState) -> dict:
+def _fallback_node(state: AgentState, config: RunnableConfig) -> dict:
     """Task 4.3: docs/SPEC.md §6.2 rule 1 -- quota exhausted routes here
     DIRECTLY from `route()`, before `prepare`/`retrieve`/`gate`/`answer`
     ever run (confirmed by `_ROUTE_PATH_MAP`'s own wiring: `"fallback"`
@@ -363,8 +367,15 @@ def _fallback_node(state: AgentState) -> dict:
     `None`), exactly the "free turn, no real model call" state app/
     chat/routes.py's own `counted_toward_quota = last_node == "answer"`
     check depends on.
+
+    Step 6.2: docs/SPEC.md §9's own "the visitor sees the same fixed
+    fallback message with the tenant's support details, with no mention
+    of quota or plans" -- `_fallback_text()` below supplies exactly
+    that (`config`, not `state`, matching `_quota_exhausted()`'s own
+    identical reasoning for reading pre-computed, per-turn values).
     """
-    return {"messages": [AIMessage(content=_sanitize_answer_text(_QUOTA_EXHAUSTED_TEXT))]}
+    text = _fallback_text(config, _QUOTA_EXHAUSTED_TEXT)
+    return {"messages": [AIMessage(content=_sanitize_answer_text(text))]}
 
 
 # One neutral reply for BOTH greeting and thanks -- docs/SPEC.md §6.1
@@ -1232,25 +1243,23 @@ async def _answer_node(state: AgentState) -> dict:
     }
 
 
-# Task 3.4.e: docs/SPEC.md §6.3's own "Fallback text: a template filled
-# from the dashboard's support details (email, phone, contact link,
-# hours, optional message). Never written by the model." NO per-tenant
-# support details exist anywhere in this codebase today -- confirmed by
-# reading directly, not assumed: `tenants.config` is a raw, untyped JSONB
-# column (`app/tenancy/models.py`); the closest existing reference
-# (`app/auth/routes.py`'s own `_PUBLIC_WIDGET_CONFIG_FIELDS` comment)
-# explicitly states these are described-by-docs-only field NAMES, "no
-# prior task defines tenants.config's actual key names (the dashboard,
-# which will actually write them, is a later phase)"; and `tenancy/
-# repository.py`'s own `create_site_key()` confirms the draft-to-live
-# support-details requirement check itself is "done elsewhere -- not
-# this method's job", i.e. not built anywhere yet either. A PLATFORM-
-# DEFAULT fixed text stands in for the real per-tenant template until
-# then -- see the new §9 marker (PROJECT_SPEC.md, owner Step 6.2,
-# "Tenant settings", docs/SPEC.md §18 Phase 6 -- the step that actually
-# adds real, named support-details fields to `tenants.config` and a
-# dashboard UI to edit them) for the real templating mechanism this will
-# need once that data exists.
+# Task 3.4.e, RESOLVED at Step 6.2: docs/SPEC.md §6.3's own "Fallback
+# text: a template filled from the dashboard's support details (email,
+# phone, contact link, hours, optional message). Never written by the
+# model." Real, named support-details fields now exist on
+# `tenants.config` (app/tenancy/schemas.py's `SupportDetailsUpdate`,
+# written via app/dashboard/tenant_routes.py) -- `render_support_
+# details_text()` below builds the real per-tenant template from them;
+# `app/chat/routes.py` renders it once per turn (it already has
+# `tenant.config` open for the quota/retention/trace-text checks) and
+# threads it through the LangGraph config, read back here via `app.
+# agent.context.support_text_from_config()` -- the identical
+# config-not-state pattern `quota_exhausted_from_config()` already
+# established. These three fixed texts below remain the PLATFORM-
+# DEFAULT fallback for a tenant with no contact method configured yet
+# (`render_support_details_text()` returns `None` in that case) -- never
+# removed, since a draft site key can still serve chats before a tenant
+# has filled in any support details at all.
 #
 # All three fixed texts below are DIFFERENT visitor-facing messages for
 # DIFFERENT reasons (docs/SPEC.md §6.1's own enumerated fixed-reply
@@ -1259,14 +1268,11 @@ async def _answer_node(state: AgentState) -> dict:
 # either way, and all three pass through `_sanitize_answer_text()`
 # (Task 3.4.c) before ever being wrapped in an `AIMessage`, the SAME
 # single choke point every other piece of visitor-facing text in this
-# graph already goes through. None of the three strings contains any of
-# that function's own six escaped characters today, so this is
-# currently a no-op in practice -- written this way so that whenever
-# Step 6.2's REAL per-tenant template interpolates tenant-supplied text
-# (support details ARE tenant-controlled content shown to visitors, the
-# identical trust boundary the model's own answer text already has)
-# into any of the three, that interpolated content is automatically
-# covered, with no separate decision required at that point.
+# graph already goes through -- now a REAL concern, not a no-op: a
+# tenant's own `support_message`/contact fields are tenant-controlled
+# content shown to visitors, the identical trust boundary the model's
+# own answer text already has, and could contain any of that function's
+# own six escaped characters.
 _NO_ANSWER_FALLBACK_TEXT = (
     "I'm sorry, I don't have the information to answer that question. "
     "Please reach out to our support team for further help."
@@ -1290,28 +1296,89 @@ _QUOTA_EXHAUSTED_TEXT = (
 )
 
 
-def _no_answer_fallback_node(state: AgentState) -> dict:
+def render_support_details_text(config: dict) -> str | None:
+    """Step 6.2: docs/SPEC.md §6.1's own "a template filled from the
+    dashboard's support details (email, phone, contact link, hours,
+    optional message)". Takes `tenants.config` directly (the same dict
+    `app/dashboard/tenant_routes.py` reads/writes) -- a pure function,
+    no DB access of its own, called by `app/chat/routes.py` BEFORE the
+    graph runs (it already has `tenant.config` open for the quota/
+    retention/trace-text checks right next to this one) and threaded
+    through via `app.agent.context.support_text_from_config()`.
+
+    Returns `None` -- not an empty-contact-method template -- when the
+    tenant has configured NO contact method at all (no email, phone, or
+    contact link): the go-live gate (Step 6.2's own go-live-check
+    endpoint) already treats "at least one contact method" as required
+    before a site key can go live, but a DRAFT site key can still serve
+    chats (docs/SPEC.md's own "draft keys work from allowed origins"),
+    so this path must degrade gracefully to the fixed platform-default
+    text rather than ever show an empty "contact us: ." sentence.
+    """
+    email = config.get("support_email")
+    phone = config.get("support_phone")
+    contact_link = config.get("support_contact_link")
+    hours = config.get("support_hours")
+    message = config.get("support_message")
+
+    contact_methods = [m for m in (email, phone, contact_link) if m]
+    if not contact_methods:
+        return None
+
+    sentences = [message] if message else ["Please reach out to our support team for further help."]
+    contact_bits = []
+    if email:
+        contact_bits.append(f"email {email}")
+    if phone:
+        contact_bits.append(f"call {phone}")
+    if contact_link:
+        contact_bits.append(contact_link)
+    sentences.append("Contact us: " + ", ".join(contact_bits) + ".")
+    if hours:
+        sentences.append(f"Hours: {hours}.")
+    return " ".join(sentences)
+
+
+def _fallback_text(config: RunnableConfig, platform_default: str) -> str:
+    """Shared by `_fallback_node()`/`_no_answer_fallback_node()`/`_
+    dependency_failure_fallback_node()` below -- the tenant's own
+    rendered support-details text if one was computed for this turn,
+    the fixed platform-default text otherwise. `support_text_from_
+    config()` itself already returns `None` for "no config computed for
+    this turn" (every pre-Step-6.2 test/caller) and "tenant has no
+    contact method configured" alike -- both correctly fall back here.
+    """
+    return support_text_from_config(config) or platform_default
+
+
+def _no_answer_fallback_node(state: AgentState, config: RunnableConfig) -> dict:
     """docs/SPEC.md §6.3: reached when the gate finds nothing relevant
     retrieved, OR the model itself returns `can_answer=false` despite
     real retrieved content -- the SAME fixed reply either way (§6.3's own
     wording treats both as "the fallback", singular, not two different
     texts for two different triggers).
+
+    Step 6.2: docs/SPEC.md §6.1's own "Unanswerable questions... show
+    the tenant's support details from the dashboard" -- `_fallback_
+    text()` below supplies the tenant's own rendered template when one
+    was computed for this turn, the fixed platform-default otherwise.
     """
     # `name="no_answer_fallback"`: Step 4.4's own "two fallbacks in a
     # row" escalation trigger (`_last_two_ai_turns_were_fallbacks()`
     # above) reads this tag, never this message's own visible TEXT
     # (see that function's own comment for why).
+    text = _fallback_text(config, _NO_ANSWER_FALLBACK_TEXT)
     return {
         "messages": [
             AIMessage(
-                content=_sanitize_answer_text(_NO_ANSWER_FALLBACK_TEXT),
+                content=_sanitize_answer_text(text),
                 name="no_answer_fallback",
             )
         ]
     }
 
 
-def _dependency_failure_fallback_node(state: AgentState) -> dict:
+def _dependency_failure_fallback_node(state: AgentState, config: RunnableConfig) -> dict:
     """Task 3.4.e: reached when `_retrieve_node`'s own call to
     `retrieve()`, or `_answer_node`'s own chat-model call (its FULL
     `.with_fallbacks()` chain exhausted, before any answer text ever
@@ -1323,10 +1390,11 @@ def _dependency_failure_fallback_node(state: AgentState) -> dict:
     """
     # name="dependency_failure": see _no_answer_fallback_node's own
     # comment directly above -- the identical Step 4.4 tagging reason.
+    text = _fallback_text(config, _DEPENDENCY_FAILURE_TEXT)
     return {
         "messages": [
             AIMessage(
-                content=_sanitize_answer_text(_DEPENDENCY_FAILURE_TEXT),
+                content=_sanitize_answer_text(text),
                 name="dependency_failure",
             )
         ]
