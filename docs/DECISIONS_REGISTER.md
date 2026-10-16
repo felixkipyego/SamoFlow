@@ -404,34 +404,46 @@ forward commitments are not re-listed; they map to D-shadcn, D-6.1-admin,
 D-6.1-site-key-generator, D-6.1-origin-domain-normalise, D-6.1-session-field-na,
 D-6.1-test-layout-placeholders and D-6.1-cors-same-origin respectively.
 
-### 6.2 Tenant settings
-- **Three backend contract gaps, ownership taken by the dashboard track and Felix's additive
-  authorisation recorded at this alignment task (2026-10-15)** — full detail in the "Backend
-  contract gaps found by the widget track" section above, not duplicated here: (a) add
-  `verified_domains` to `widget_config` as a new optional field; (b) return `conversation_id`
-  on `POST /api/v1/chat`'s `done` event for a first turn, as a new optional field; (c) delete
-  the verified `SessionResponse` ASSUMPTION marker (`app/auth/schemas.py`). Not built in this
-  alignment task (no 6.2 work) — scheduled for Step 6.2's own build.
-- Add real, named support-details fields to `tenants.config` (email, phone, contact link,
-  hours, optional message); build the real per-tenant fallback template; route the
-  interpolated text through `_sanitize_answer_text()`'s existing call site. Also add
-  `tenants.config["alert_email"]` (or fold it into the same shape) for the usage-alert
-  sweep's "dashboard contact." (PROJECT_SPEC.md:6961)
-- Build the real `Plan`-row creation mechanism (or a one-off ops seed script) — `plans` has
-  no creation mechanism anywhere in this codebase yet; enter the real quota numbers
-  (10,000 / 25,000 messages/month) when it's built. (PROJECT_SPEC.md:6825)
-- Document the four optional rate-limit Settings fields in `.env.example`, or do it here if
-  no earlier task has. (PROJECT_SPEC.md:6889)
+### 6.2 Tenant settings — RESOLVED (2026-10-16)
+- **Three backend contract gaps**: **RESOLVED.** (a) `verified_domains` added to
+  `widget_config`; (b) `conversation_id` returned on `POST /api/v1/chat`'s `done` event for a
+  first turn; (c) the verified `SessionResponse` ASSUMPTION marker deleted. All additive-only,
+  proven via `scripts/check_openapi_additive.py`.
+- **Real support-details fields + per-tenant fallback template**: **RESOLVED.** Real fields
+  on `tenants.config` (`app/tenancy/schemas.py`'s `SupportDetailsUpdate`); the real template
+  (`render_support_details_text()`, `app/agent/graph.py`) rendered per-turn by
+  `app/chat/routes.py` and threaded through the LangGraph config (never recomputed inside the
+  graph), read back by all three fallback nodes, still passing through
+  `_sanitize_answer_text()`. `tenants.config["alert_email"]` also added (already wired at
+  Task 4.3's own usage-alert sweep). **A real [SECURITY] finding made and fixed in the same
+  pass**: `support_text` is stored wrapped in `{"text": ...}`, never a bare `str` — a bare str
+  would have been silently copied into the checkpoint's own persisted `metadata` column by
+  `langgraph.checkpoint.base.get_checkpoint_metadata()` (confirmed live), leaking a tenant's
+  real email/phone/contact-link. Proven live against the real checkpoint table
+  (`test_support_text_is_never_persisted_in_checkpoint_metadata`). **Related pre-existing gap
+  found, not fixed (flagged for whoever next touches it)**: `quota_exhausted` (Task 4.3, a
+  bare `bool`) is NOT similarly wrapped and DOES leak into persisted checkpoint metadata
+  today — non-sensitive, but the identical mechanism.
+- **Real `Plan`-row creation mechanism**: **RESOLVED early, at Step 6.1** (`cmd_seed_plans`,
+  `app/dashboard/admin_cli.py`) — not deferred to 6.2 after all (D-6.1-pilot-plans above).
+- **Document the four optional rate-limit Settings fields in `.env.example`**: **RESOLVED.**
 
-### 6.3 Sources screens
+### 6.3 Sources screens — RESOLVED (2026-10-16)
 - **Disable `database`-type source creation server-side and omit it from the dashboard UI**
-  (Felix decision A, D-pilot-dbsync-disable). (this task)
+  (Felix decision A, D-pilot-dbsync-disable). **RESOLVED.**
 - **Clean up a deleted database source's `db_connections` credentials in the delete flow**
-  (Felix decision B, D-pilot-dbconn-cleanup). (this task)
+  (Felix decision B, D-pilot-dbconn-cleanup). **RESOLVED.**
 - The url-list adapter's own missing sibling to crawl's staleness cleanup: `update_source()`
   overwrites `source.config` wholesale with no diffing, so a tenant removing one URL from
   their own list has no cleanup path — the removed URL's `Document` row and Qdrant points are
-  never revisited. (PROJECT_SPEC.md:6919)
+  never revisited. **RESOLVED** — `update_source()` now diffs and cleans up dropped URLs'
+  documents/Qdrant points when `client`/`collection_name` are supplied.
+  (PROJECT_SPEC.md:6919)
+- **The two upload-orphan markers (2.7.c)** — a re-upload's previous `upload_id` bytes never
+  deleted; `upload_id` generation/lookup needing tenant-scoping. **Both RESOLVED**: the real
+  upload endpoint (`app/dashboard/source_routes.py`) deletes the previous entry's bytes on a
+  filename-matching re-upload, and resolves `upload_id` only through the tenant's own already-
+  scoped `source.config["uploads"]`, proven live against a cross-tenant adversarial test.
 - **Investigated at Step 6.3 (2026-10-16), declined as not contained, per this task's own
   "wire it IF it's contained; otherwise leave the register entry with its reason" instruction.**
   Three of the five (`crawl_page_cap`/`db_sync_row_cap`/`refresh_now_daily_allowance`) are a
@@ -458,13 +470,22 @@ D-6.1-test-layout-placeholders and D-6.1-cors-same-origin respectively.
   then whether `refresh_interval_min_allowed`'s own larger shared-helper change is worth it at
   that point. (PROJECT_SPEC.md:6899, 6900, 6916, 6917)
 
-### 6.4 Escalation inbox and usage
+### 6.4 Escalation inbox and usage — RESOLVED (2026-10-16)
 - Apply the exact inverse of `_sanitize_answer_text()`'s escape table (markdown-unescape,
   then HTML-escape, in that order) before displaying a stored transcript in the dashboard
-  inbox screen — the email-body half is already resolved; this half remains genuinely open. (PROJECT_SPEC.md:6960)
+  inbox screen — the email-body half is already resolved. **RESOLVED**:
+  `app/dashboard/escalation_routes.py`'s `get_escalation()` applies `markdown_unescape()` to
+  the whole stored snapshot (one pass, not per-line like the email body — no reliable
+  per-line role boundary survives in the already-joined stored string; that module's own
+  docstring names this exact case as harmless); the HTML-escape half is satisfied by
+  construction (`InboxScreen.tsx` renders it as a plain React text node, never
+  `dangerouslySetInnerHTML`). (PROJECT_SPEC.md:6960)
 - The `reason` field on an escalation is a single fixed `"visitor_requested"` string — the
   inbox cannot distinguish trigger categories (asks-for-a-person / complaint / negative
-  wording / two-fallbacks) without a future schema change. (PROJECT_SPEC.md:6253)
+  wording / two-fallbacks) without a future schema change. **Still accurate, not fixed —
+  a genuine, accepted limitation named in docs/DECISIONS_REGISTER.md's own D-44-reason-
+  fixed-string entry, not this step's job to change the escalation schema.**
+  (PROJECT_SPEC.md:6253)
 - ~~The async unsafe/abusive-input review~~ — **re-owned to POST-PILOT/6.5** (Felix decision
   G, D-postpilot-admin-overrides); no longer this step's job.
 
