@@ -99,3 +99,26 @@ export function pickReadableTextColor(backgroundColor) {
   const contrastWithBlack = _contrastRatio(bgLuminance, BLACK_LUMINANCE);
   return contrastWithWhite >= contrastWithBlack ? "#ffffff" : "#000000";
 }
+
+// Task [ops bugfix]: canonicalises any color `isValidCssColor` accepts
+// (hex, rgb/rgba, hsl/hsla) to a strict lowercase "#rrggbb" string, by
+// reusing this file's own `_parseToRgbFractions` -- the SAME parsing
+// `pickReadableTextColor` itself relies on, never a second, independent
+// parser. This is what lets `color-cache.js` store (and the loader
+// later re-validate with one trivial, fixed-shape regex) a single,
+// uniform format regardless of which syntax the tenant's dashboard
+// happened to save. Returns null if the input cannot be parsed at all
+// (should not happen for anything that already passed `isValidCssColor`,
+// but never throws either way -- the caller treats null as "don't cache").
+function _toHexChannel(fraction) {
+  const clamped = Math.min(1, Math.max(0, fraction));
+  return Math.round(clamped * 255).toString(16).padStart(2, "0");
+}
+
+export function toHexColor(color) {
+  const rgb = _parseToRgbFractions(color);
+  if (rgb === null) {
+    return null;
+  }
+  return `#${rgb.map(_toHexChannel).join("")}`;
+}

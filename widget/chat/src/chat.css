@@ -4,7 +4,10 @@
  * that file's own header).
  *
  * Tenant branding (--sf-primary/--sf-primary-text) is applied via
- * `element.style.setProperty()` (App.js), never a `<style>` block or a
+ * `element.style.setProperty()` on the shared shadow host (chat/src/
+ * mount.js; see also loader/src/widget.js's own cached-color read for
+ * the launcher's own first-paint case) -- inherited down into every
+ * rule below -- never a `<style>` block or a
  * Constructable Stylesheet -- confirmed LIVE, directly, before relying
  * on it: CSP's style-src governs anything that goes through CSS TEXT
  * PARSING (a `<style>` tag's content, a `style=""` markup attribute, a

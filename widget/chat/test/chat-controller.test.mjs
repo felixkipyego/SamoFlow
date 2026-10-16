@@ -41,10 +41,14 @@ test("a normal turn streams tokens, citations, then done", async () => {
         fakeStreamResponse([
           _sseFrame("token", { text: "Hello" }),
           _sseFrame("citations", { items: [{ n: 1, title: "Doc", url: "https://good.example.com" }] }),
-          _sseFrame("done", { message_id: "m1", usage: null, offer_escalation: false }),
+          _sseFrame("done", {
+            message_id: "m1",
+            usage: null,
+            offer_escalation: false,
+            conversation_id: "c1",
+          }),
         ]),
     ],
-    [isConversations, () => fakeStreamResponse([JSON.stringify({ conversations: [{ conversation_id: "c1" }] })])],
   ]);
   const controller = new ChatController("https://api.example.com", "sk_live", { fetchImpl });
 
@@ -254,7 +258,13 @@ test("a network-level fetch failure (offline) surfaces the calm connection-lost 
   assert.equal(errors.length, 1);
 });
 
-test("the second turn reuses the conversation_id discovered after the first turn's done event", async () => {
+test("the second turn reuses the conversation_id the first turn's own done event returned", async () => {
+  // [ops bugfix]: no GET /conversations round trip anymore -- the
+  // backend returns conversation_id directly on `done` (every turn,
+  // not only the first), and that extra request turned out to fail
+  // with a real CORS error in genuine cross-origin production
+  // deployment (see the register) -- removed outright, not merely
+  // bypassed.
   const chatRequests = [];
   const fetchImpl = _makeFetch([
     [isSession, () => _sessionResponse()],
@@ -262,10 +272,11 @@ test("the second turn reuses the conversation_id discovered after the first turn
       isChat,
       (url, init) => {
         chatRequests.push(JSON.parse(init.body));
-        return fakeStreamResponse([_sseFrame("done", { message_id: "m1", usage: null })]);
+        return fakeStreamResponse([
+          _sseFrame("done", { message_id: "m1", usage: null, conversation_id: "real-cid" }),
+        ]);
       },
     ],
-    [isConversations, () => fakeStreamResponse([JSON.stringify({ conversations: [{ conversation_id: "real-cid" }] })])],
   ]);
   const controller = new ChatController("https://api.example.com", "sk_live", { fetchImpl });
 
@@ -274,6 +285,7 @@ test("the second turn reuses the conversation_id discovered after the first turn
 
   assert.equal(chatRequests[0].conversation_id, null);
   assert.equal(chatRequests[1].conversation_id, "real-cid");
+  assert.equal(fetchImpl.calls.filter((c) => isConversations(c.url)).length, 0);
 });
 
 test("a malformed (non-JSON) SSE data payload is skipped, never thrown", async () => {
@@ -418,8 +430,13 @@ test("loadConversation() for a 404 (cross-tenant/unknown cid) throws, never sile
 test("submitEscalation() succeeds and reports the real response", async () => {
   const fetchImpl = _makeFetch([
     [isSession, () => _sessionResponse()],
-    [isChat, () => fakeStreamResponse([_sseFrame("done", { message_id: "m1", offer_escalation: true })])],
-    [isConversations, () => fakeStreamResponse([JSON.stringify({ conversations: [{ conversation_id: "c1" }] })])],
+    [
+      isChat,
+      () =>
+        fakeStreamResponse([
+          _sseFrame("done", { message_id: "m1", offer_escalation: true, conversation_id: "c1" }),
+        ]),
+    ],
     [isEscalate, () => fakeStreamResponse([JSON.stringify({ escalation_id: "e1", status: "new" })])],
   ]);
   const controller = new ChatController("https://api.example.com", "sk_live", { fetchImpl });
@@ -442,8 +459,7 @@ test("submitEscalation() with no known conversation_id is a calm error, never a 
 test("submitEscalation() maps a real 409 (already open) to its own specific calm message", async () => {
   const fetchImpl = _makeFetch([
     [isSession, () => _sessionResponse()],
-    [isChat, () => fakeStreamResponse([_sseFrame("done", { message_id: "m1" })])],
-    [isConversations, () => fakeStreamResponse([JSON.stringify({ conversations: [{ conversation_id: "c1" }] })])],
+    [isChat, () => fakeStreamResponse([_sseFrame("done", { message_id: "m1", conversation_id: "c1" })])],
     [isEscalate, () => fakeStreamResponse([], { status: 409 })],
   ]);
   const controller = new ChatController("https://api.example.com", "sk_live", { fetchImpl });
@@ -458,8 +474,7 @@ test("submitEscalation() maps a real 409 (already open) to its own specific calm
 test("submitEscalation() maps a real 429 to the rate-limit message", async () => {
   const fetchImpl = _makeFetch([
     [isSession, () => _sessionResponse()],
-    [isChat, () => fakeStreamResponse([_sseFrame("done", { message_id: "m1" })])],
-    [isConversations, () => fakeStreamResponse([JSON.stringify({ conversations: [{ conversation_id: "c1" }] })])],
+    [isChat, () => fakeStreamResponse([_sseFrame("done", { message_id: "m1", conversation_id: "c1" })])],
     [isEscalate, () => fakeStreamResponse([], { status: 429, headers: { "retry-after": "30" } })],
   ]);
   const controller = new ChatController("https://api.example.com", "sk_live", { fetchImpl });

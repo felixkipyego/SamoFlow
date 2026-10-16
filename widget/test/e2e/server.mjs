@@ -16,6 +16,7 @@
 import http from "node:http";
 import crypto from "node:crypto";
 import { readFile } from "node:fs/promises";
+import { readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -27,6 +28,21 @@ const widgetRoot = path.resolve(
 const publicDir = path.join(widgetRoot, "test/e2e/public");
 const loaderDistDir = path.join(widgetRoot, "dist");
 const chatDistDir = path.join(widgetRoot, "chat/dist");
+
+// [ops bugfix]: the single committed source of truth for POST /api/v1/
+// chat's own four real SSE event shapes (docs/chat_sse_contract.json's
+// own "_comment" has the full reasoning) -- loaded once, here, so
+// sseFrame() below can enforce it on every single frame this fixture
+// ever builds, for the rest of this file. This is the fix for BUG2's
+// own 4th question (why the real widget broke despite a passing e2e
+// suite): before this, this fixture typed its own payloads completely
+// independently of the real backend, with nothing to catch either side
+// drifting from the other -- confirmed live, that is exactly how the
+// `done` event's real `conversation_id` field went missing here for as
+// long as it did.
+const _sseContract = JSON.parse(
+  readFileSync(path.join(widgetRoot, "..", "docs", "chat_sse_contract.json"), "utf8"),
+);
 
 const CSP = [
   "default-src 'none'",
@@ -50,8 +66,29 @@ const DIST_FILES = {
   "/chat.css": path.join(chatDistDir, "chat.css"),
 };
 
+// [ops bugfix]: every SSE frame this fixture ever builds passes through
+// here -- the one real chokepoint that makes enforcing the shared
+// contract possible without touching every individual call site. `v: 1`
+// is now added here, matching the real backend's own `_sse_event()`
+// (backend/app/chat/routes.py) exactly, so a call site never has to
+// remember to add it itself.
 function sseFrame(event, data) {
-  return `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
+  const contractFields = _sseContract[event];
+  if (!contractFields) {
+    throw new Error(`sseFrame: "${event}" is not a known SSE event type in docs/chat_sse_contract.json`);
+  }
+  const fullData = { ...data, v: 1 };
+  const realFields = Object.keys(fullData).sort();
+  const expectedFields = [...contractFields].sort();
+  if (JSON.stringify(realFields) !== JSON.stringify(expectedFields)) {
+    throw new Error(
+      `sseFrame: "${event}" event fields ${JSON.stringify(realFields)} don't match the ` +
+        `committed contract ${JSON.stringify(expectedFields)} (docs/chat_sse_contract.json) -- ` +
+        "if the real backend's own shape changed deliberately, update the contract file, " +
+        "backend/tests/test_chat_routes.py's own matching test, AND this fixture together.",
+    );
+  }
+  return `event: ${event}\ndata: ${JSON.stringify(fullData)}\n\n`;
 }
 
 function _bearerToken(req) {
@@ -83,6 +120,17 @@ const _failedOnce = new Set();
 const _escalatedConversations = new Set();
 let _lastEscalationContactFields = null;
 
+// [ops bugfix]: lets the "3-turn conversation, turn 2 depends on turn 1"
+// e2e test prove the widget carries a real conversation_id forward
+// across turns -- not the model's own reasoning (that is a backend/eval
+// concern), but the one thing this mock can deterministically prove:
+// turn 2's own answer differs depending on which `conversation_id` its
+// /chat request actually carried, keyed off what THIS exact conversation
+// was told on a previous turn. A real backend would use its own
+// checkpointed graph state for this; this mock's own, much simpler
+// stand-in is a plain per-conversation map.
+const _lastMessageByConversation = new Map();
+
 // Test-isolation, found and fixed live during this step's own e2e run
 // (docs/progress/widget.md has the full story): Playwright's
 // `fullyParallel` config runs every test, across every spec FILE,
@@ -109,7 +157,13 @@ async function handleFakeApi(req, res, pathname) {
       widget_config: {
         title: "Test Widget",
         greeting: "Hi! How can we help?",
-        colors: { primary: "#4f46e5" },
+        // [ops bugfix]: deliberately NOT the loader CSS's own default
+        // (#4f46e5) -- a fixture that happened to match the default
+        // could never catch a regression where the launcher silently
+        // stays on the hardcoded default instead of really applying the
+        // tenant's own color (exactly BUG1, found live against the real
+        // backend). This is Felix's own real test color (teal).
+        colors: { primary: "#14b8a6" },
         logo_url: null,
         privacy_notice_url: null,
       },
@@ -131,9 +185,29 @@ async function handleFakeApi(req, res, pathname) {
       return true;
     }
 
+    // [ops bugfix]: the real backend scopes a conversation to the
+    // visitor's own token (one per session, for this fixture's own
+    // simplification -- see _sessionConversations's own header above);
+    // reused here as the `done` event's own `conversation_id`, exactly
+    // like the real backend returns it (every turn, not only the
+    // first -- Step 6.2's own pre-authorised contract addition).
+    const cid = _sessionConversations.get(_bearerToken(req)) || "fake-conversation-id";
+
     res.writeHead(200, { "Content-Type": "text/event-stream", "Content-Security-Policy": CSP });
-    res.write(sseFrame("token", { text: "Here is a " }));
-    res.write(sseFrame("token", { text: "Here is a safe answer." }));
+
+    if (message === "what did I just tell you?") {
+      // The deterministic "turn 2 depends on turn 1" proof: this only
+      // ever answers correctly if THIS exact request carried the SAME
+      // conversation_id turn 1 did -- a fresh/wrong id would read back
+      // "(nothing yet)" instead, failing the e2e test loudly.
+      const remembered = _lastMessageByConversation.get(cid) ?? "(nothing yet)";
+      res.write(sseFrame("token", { text: `You told me: "${remembered}"` }));
+    } else {
+      res.write(sseFrame("token", { text: "Here is a " }));
+      res.write(sseFrame("token", { text: "Here is a safe answer." }));
+    }
+    _lastMessageByConversation.set(cid, message);
+
     res.write(
       // A real https URL, deliberately NOT this fake server's own
       // plain-http origin -- isHttpsUrl() (render.js) correctly rejects
@@ -149,7 +223,14 @@ async function handleFakeApi(req, res, pathname) {
     // simplification (which real backend condition would produce this
     // is out of scope here; only the widget's own reaction to the flag
     // is under test).
-    res.write(sseFrame("done", { message_id: "fake-message-id", usage: null, offer_escalation: true }));
+    res.write(
+      sseFrame("done", {
+        message_id: "fake-message-id",
+        usage: null,
+        offer_escalation: true,
+        conversation_id: cid,
+      }),
+    );
     res.end();
     return true;
   }

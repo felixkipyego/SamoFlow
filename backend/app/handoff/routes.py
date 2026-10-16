@@ -27,13 +27,14 @@ import logging
 import math
 import uuid
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, Request, Response
 from fastapi.responses import JSONResponse
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agent.entrypoint import read_state
+from app.auth.cors import build_preflight_response
 from app.auth.dependencies import VerifiedIdentity, get_current_visitor
 from app.db import get_db_session
 from app.handoff.models import Escalation
@@ -161,11 +162,25 @@ def _render_escalation_email_html(
     return "\n".join(parts)
 
 
+@router.options("/conversations/{cid}/escalate", include_in_schema=False)
+async def escalate_preflight(request: Request, cid: uuid.UUID) -> Response:
+    # [ops bugfix]: same gap, same fix as app/chat/routes.py's own new
+    # conversations_preflight()/conversation_messages_preflight() -- this
+    # endpoint never had an OPTIONS handler either, so "Talk to a
+    # person" was equally broken in any real cross-origin deployment,
+    # for the identical reason (confirmed live against the real demo
+    # stack while investigating the GET /conversations workaround).
+    return build_preflight_response(
+        request, methods="POST, OPTIONS", headers="Content-Type, Authorization"
+    )
+
+
 @router.post("/conversations/{cid}/escalate", response_model=EscalationResponse)
 async def submit_escalation(
     cid: uuid.UUID,
     payload: EscalationRequest,
     request: Request,
+    response: Response,
     identity: VerifiedIdentity = Depends(get_current_visitor),  # noqa: B008
     session: AsyncSession = Depends(get_db_session),  # noqa: B008
 ) -> EscalationResponse | JSONResponse:
@@ -178,15 +193,32 @@ async def submit_escalation(
     comparison, not three separate "it's 404" assertions trusted to
     match.
     """
+    # [ops bugfix]: Access-Control-Allow-Origin on EVERY real response
+    # branch below, set unconditionally up front -- the identical fix
+    # and reasoning as app/chat/routes.py's own GET /conversations
+    # endpoints (identity.org is already validated against the real
+    # request Origin by get_current_visitor() before this handler runs).
+    response.headers["Access-Control-Allow-Origin"] = identity.org
+    response.headers["Vary"] = "Origin"
+
     repo = TenantScopedRepository(tenant_id=identity.tenant_id, session=session)
     conversation = await repo.get_conversation_by_id(cid, vid=identity.vid)
     if conversation is None or conversation.vid != identity.vid:
-        raise HTTPException(status_code=404, detail="conversation not found")
+        # A plain JSONResponse, not `raise HTTPException`: see app/chat/
+        # routes.py's own get_conversation_messages() for why a raise
+        # would silently drop the headers just set above.
+        return JSONResponse(
+            status_code=404,
+            content={"detail": "conversation not found"},
+            headers=dict(response.headers),
+        )
 
     limiter = _get_per_visitor_limiter(request)
     limiter_key = str(identity.vid)
     if not limiter.check(limiter_key):
-        return _rate_limited_response(limiter.get_retry_after(limiter_key))
+        retry_after_response = _rate_limited_response(limiter.get_retry_after(limiter_key))
+        retry_after_response.headers.update(response.headers)
+        return retry_after_response
 
     # docs/SPEC.md §7: "one open escalation per conversation".
     existing_open = (
@@ -201,6 +233,7 @@ async def submit_escalation(
         return JSONResponse(
             status_code=_CONFLICT_STATUS,
             content={"detail": "an escalation is already open for this conversation"},
+            headers=dict(response.headers),
         )
 
     messages = await _conversation_messages(request, identity, cid)

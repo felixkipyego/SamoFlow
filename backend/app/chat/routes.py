@@ -69,6 +69,7 @@ from sse_starlette.sse import EventSourceResponse
 
 from app.agent.entrypoint import read_state, run_turn
 from app.agent.graph import render_support_details_text
+from app.auth.cors import build_preflight_response
 from app.auth.dependencies import VerifiedIdentity, get_current_visitor
 from app.chat.schemas import (
     ChatRequest,
@@ -363,15 +364,41 @@ async def chat_preflight(request: Request) -> Response:
     # database. Authorization is additionally an allowed request header
     # here (the bearer token), unlike /session's own preflight, which
     # needs none.
-    origins = request.headers.getlist("origin")
-    headers = {
-        "Access-Control-Allow-Methods": "POST, OPTIONS",
-        "Access-Control-Allow-Headers": "Content-Type, Authorization",
-        "Vary": "Origin",
-    }
-    if len(origins) == 1:
-        headers["Access-Control-Allow-Origin"] = origins[0]
-    return Response(status_code=200, headers=headers)
+    return build_preflight_response(
+        request, methods="POST, OPTIONS", headers="Content-Type, Authorization"
+    )
+
+
+# [ops bugfix]: GET /conversations and GET /conversations/{cid}/messages
+# never had an OPTIONS preflight handler or an Access-Control-Allow-
+# Origin header on their own real responses -- unlike /session and
+# /chat, both built with real cross-origin widget support from day one.
+# Confirmed LIVE, not assumed: a real browser calling the widget's own
+# `_discoverConversationIdIfUnknown()` workaround against the real demo
+# stack (a genuinely cross-origin deployment: widget on
+# http://127.0.0.1:4280, API on http://127.0.0.1:8010) failed with a
+# real CORS preflight error, console-visible, caught only because that
+# call was already wrapped in a best-effort try/catch -- meaning
+# `conversation_id` was NEVER learned that way in any real cross-origin
+# deployment, and "Previous chats" (widget/chat/src/ConversationList.js,
+# which calls this same GET /conversations with no such try/catch) was
+# equally broken, just never caught by this project's own e2e suite,
+# which serves the widget page and the fake API from the SAME origin
+# (see widget/test/e2e/server.mjs) and therefore never exercises a real
+# CORS preflight at all. Fixed the same way /session and /chat already
+# are.
+@router.options("/conversations", include_in_schema=False)
+async def conversations_preflight(request: Request) -> Response:
+    return build_preflight_response(
+        request, methods="GET, OPTIONS", headers="Authorization"
+    )
+
+
+@router.options("/conversations/{cid}/messages", include_in_schema=False)
+async def conversation_messages_preflight(request: Request, cid: uuid.UUID) -> Response:
+    return build_preflight_response(
+        request, methods="GET, OPTIONS", headers="Authorization"
+    )
 
 
 class _Stale(Exception):
@@ -810,9 +837,17 @@ async def create_chat_turn(payload: ChatRequest, request: Request) -> Response:
 
 @router.get("/conversations", response_model=ConversationListResponse)
 async def list_conversations_endpoint(
+    response: Response,
     identity: VerifiedIdentity = Depends(get_current_visitor),  # noqa: B008
     session: AsyncSession = Depends(get_db_session),  # noqa: B008
 ) -> ConversationListResponse:
+    # [ops bugfix]: Access-Control-Allow-Origin on the real response too
+    # (not just the OPTIONS preflight above) -- `identity.org` is the
+    # SAME already-validated origin /chat's own real streaming response
+    # echoes back (get_current_visitor() already checked it equals the
+    # request's real Origin header before this handler ever ran).
+    response.headers["Access-Control-Allow-Origin"] = identity.org
+    response.headers["Vary"] = "Origin"
     repo = TenantScopedRepository(tenant_id=identity.tenant_id, session=session)
     conversations = await repo.list_conversations(
         identity.vid, max_results=get_settings().conversation_list_max_results
@@ -834,9 +869,10 @@ async def list_conversations_endpoint(
 async def get_conversation_messages(
     cid: uuid.UUID,
     request: Request,
+    response: Response,
     identity: VerifiedIdentity = Depends(get_current_visitor),  # noqa: B008
     session: AsyncSession = Depends(get_db_session),  # noqa: B008
-) -> ConversationMessagesResponse:
+) -> ConversationMessagesResponse | JSONResponse:
     """docs/SPEC.md §10: "history, showing completed turns only".
 
     Reads the real LangGraph checkpoint via `read_state()` (the same
@@ -857,10 +893,26 @@ async def get_conversation_messages(
     (whether/when to build one) this task does not make unilaterally --
     see PROJECT_SPEC.md's own new §9 marker.
     """
+    # [ops bugfix]: see list_conversations_endpoint()'s own comment just
+    # above -- same fix, same reasoning, set unconditionally so EVERY
+    # branch below (including the 404) carries it, not only the success
+    # path.
+    response.headers["Access-Control-Allow-Origin"] = identity.org
+    response.headers["Vary"] = "Origin"
+
     repo = TenantScopedRepository(tenant_id=identity.tenant_id, session=session)
     conversation = await repo.get_conversation_by_id(cid, vid=identity.vid)
     if conversation is None or conversation.vid != identity.vid:
-        raise HTTPException(status_code=404, detail="conversation not found")
+        # A plain JSONResponse, not `raise HTTPException`: FastAPI's
+        # exception handling constructs its own response independently
+        # of this handler's own `response` parameter, which would
+        # silently drop the CORS headers just set above for this one
+        # branch -- returning explicitly is what keeps them attached.
+        return JSONResponse(
+            status_code=404,
+            content={"detail": "conversation not found"},
+            headers=dict(response.headers),
+        )
 
     graph = request.app.state.graph
     snapshot = await read_state(graph, identity, cid)

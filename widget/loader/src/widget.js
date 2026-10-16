@@ -18,6 +18,7 @@ import { resolveConfig } from "./config.js";
 import { createLauncher } from "./dom.js";
 import { ensureChatLoaded } from "./chat-loader.js";
 import { getCachedPosition } from "./position-cache.js";
+import { getCachedColor } from "./color-cache.js";
 
 // Captured synchronously, at top-level script execution -- NOT inside
 // any deferred callback. document.currentScript is only set while this
@@ -53,6 +54,24 @@ function mount() {
   // left)` rule for why that distinction matters under a strict CSP.
   if (getCachedPosition(config.siteKey) === "left") {
     host.classList.add("sf-position-left");
+  }
+
+  // [ops bugfix]: same early-paint fix as the position cache immediately
+  // above, for the launcher's own brand color (docs/SPEC.md §11) --
+  // `host`, not the launcher button itself, because `host` is the one
+  // ancestor shared by the launcher AND the chat panel once the chat
+  // bundle mounts into the SAME shadow root (chat/src/mount.js sets the
+  // identical two custom properties on this exact element once it has a
+  // freshly-fetched, non-cached value to apply). CSS custom properties
+  // inherit across the shadow boundary from host to shadow tree by
+  // design (confirmed live, see widget.css's own header) -- setting them
+  // here, before createLauncher() below, is what lets a RETURNING
+  // visitor's launcher paint in the correct brand color immediately,
+  // with no flash, instead of the default indigo until their next click.
+  const cachedColor = getCachedColor(config.siteKey);
+  if (cachedColor) {
+    host.style.setProperty("--sf-primary", cachedColor.hex);
+    host.style.setProperty("--sf-primary-text", cachedColor.text);
   }
 
   // Open, not closed (deliberate choice -- see docs/progress/widget.md):
