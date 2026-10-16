@@ -236,6 +236,55 @@ async def test_escalate_404_is_indistinguishable_for_nonexistent_vs_someone_else
     assert nonexistent_response.json() == not_mine_response.json()
 
 
+async def test_escalate_now_carries_real_cors_headers_on_every_branch(
+    monkeypatch, _seeded, _capture_sent_emails
+):
+    # [ops bugfix]: POST /conversations/{cid}/escalate never had an
+    # OPTIONS preflight handler or an Access-Control-Allow-Origin header
+    # on ANY of its real responses -- found while investigating why the
+    # widget's chat input stayed stuck disabled; fixing that bug meant
+    # removing the GET /conversations workaround this same gap also
+    # broke, which led to confirming live that "Talk to a person" has
+    # the identical gap (same root cause: no CORS support was ever built
+    # for ANY of the three conversations/escalate endpoints, unlike
+    # /session and /chat, which both got it from day one). Checks the
+    # preflight, the real 200, the 404 (a `raise HTTPException` would
+    # silently drop these headers -- see app/handoff/routes.py's own
+    # comment) and the real 409 (double-open-escalation) branch.
+    app = await _build_app(monkeypatch)
+    token = _token_for(_seeded)
+    async with db_session() as session:
+        repo = TenantScopedRepository(tenant_id=_seeded["tenant"], session=session)
+        conversation = await repo.create_conversation(vid=_seeded["visitor"])
+        await session.commit()
+        cid = conversation.cid
+    nonexistent_cid = uuid.uuid4()
+
+    async with await http_client(app) as client:
+        preflight = await client.options(
+            f"/api/v1/conversations/{cid}/escalate", headers={"Origin": ORIGIN}
+        )
+        success = await _escalate(client, token, cid)
+        not_found = await _escalate(client, token, nonexistent_cid)
+        conflict = await _escalate(client, token, cid)
+
+    assert preflight.status_code == 200
+    assert preflight.headers["access-control-allow-origin"] == ORIGIN
+    assert preflight.headers["vary"] == "Origin"
+
+    assert success.status_code == 200
+    assert success.headers["access-control-allow-origin"] == ORIGIN
+    assert success.headers["vary"] == "Origin"
+
+    assert not_found.status_code == 404
+    assert not_found.headers["access-control-allow-origin"] == ORIGIN
+    assert not_found.headers["vary"] == "Origin"
+
+    assert conflict.status_code == 409
+    assert conflict.headers["access-control-allow-origin"] == ORIGIN
+    assert conflict.headers["vary"] == "Origin"
+
+
 # --- contact field validation / email header injection ----------------------
 
 

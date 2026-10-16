@@ -21,6 +21,7 @@ import asyncio
 import json
 import uuid
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 import psycopg
 import pytest
@@ -52,6 +53,14 @@ from tests.conftest import (
 pytestmark = pytest.mark.usefixtures("close_any_checkpointer_pool_left_open")
 
 ORIGIN = "https://widget.example"
+
+# [ops bugfix]: the single committed source of truth for this endpoint's
+# four real SSE event shapes (docs/SPEC.md §10), shared with the widget's
+# own e2e mock (widget/test/e2e/server.mjs) -- see that file's header and
+# docs/chat_sse_contract.json's own "_comment" for the full reasoning.
+_SSE_CONTRACT_PATH = (
+    Path(__file__).resolve().parent.parent.parent / "docs" / "chat_sse_contract.json"
+)
 
 
 @pytest.fixture(autouse=True)
@@ -581,6 +590,73 @@ async def test_overall_timeout_emits_a_timeout_error_event(monkeypatch, _seeded)
     assert error_events[0]["code"] == "timeout"
 
 
+async def test_done_and_other_sse_events_match_the_committed_contract(monkeypatch, _seeded):
+    # [ops bugfix]: fixes the real gap behind BUG2's own 4th question --
+    # the widget's e2e suite kept passing while the real widget was
+    # broken because its mock (widget/test/e2e/server.mjs) typed its own
+    # `done` payload completely independently of this endpoint's real
+    # one, with no shared source either side could drift against; the
+    # mock simply never grew the `conversation_id` field this endpoint
+    # already added at Step 6.2. This test is the BACKEND half of the
+    # fix: it fails the moment a real event payload's own field set
+    # stops matching docs/chat_sse_contract.json, so a future field
+    # rename/addition/removal cannot silently ship past CI without this
+    # test (or the widget's own matching scripts/check-sse-contract.mjs)
+    # catching it on at least one side.
+    contract = json.loads(_SSE_CONTRACT_PATH.read_text())
+
+    # token + citations + done, from one real, successful turn.
+    chunks = build_fake_answer_arg_chunks(
+        can_answer=True, used_chunk_ids=["c1"], answer="A fixed test answer."
+    )
+    fake_model = FakeAnswerToolChatModel(arg_chunks=chunks)
+    app = await _build_app(monkeypatch, chat_model=fake_model, retrieve_chunks=_answer_chunks())
+    token = _token_for(_seeded)
+    async with await http_client(app) as client:
+        async with client.stream(
+            "POST",
+            "/api/v1/chat",
+            json={"message": "what is the answer", "client_message_id": str(uuid.uuid4())},
+            headers={"Authorization": f"Bearer {token}", "Origin": ORIGIN},
+        ) as response:
+            body = await response.aread()
+    success_events = _parse_sse(body.decode())
+
+    # error, from one real model failure.
+    failing_chunks = build_fake_answer_arg_chunks(
+        can_answer=True, used_chunk_ids=["c1"], answer="partial"
+    )
+    failing_model = FakeAnswerToolChatModel(
+        arg_chunks=failing_chunks, fail_after=len(failing_chunks) - 1
+    )
+    error_app = await _build_app(
+        monkeypatch, chat_model=failing_model, retrieve_chunks=_answer_chunks()
+    )
+    async with await http_client(error_app) as client:
+        async with client.stream(
+            "POST",
+            "/api/v1/chat",
+            json={"message": "what is the answer", "client_message_id": str(uuid.uuid4())},
+            headers={"Authorization": f"Bearer {token}", "Origin": ORIGIN},
+        ) as response:
+            error_body = await response.aread()
+    error_events = _parse_sse(error_body.decode())
+
+    all_events = success_events + error_events
+    seen_types = {e["event"] for e in all_events}
+    assert seen_types == {"token", "citations", "done", "error"}, seen_types
+
+    for event in all_events:
+        event_type = event["event"]
+        real_fields = set(event.keys()) - {"event"}
+        assert real_fields == set(contract[event_type]), (
+            f"{event_type} event fields {sorted(real_fields)} no longer match "
+            f"the committed contract {sorted(contract[event_type])} at "
+            f"{_SSE_CONTRACT_PATH} -- if deliberate, update that file AND "
+            "widget/test/e2e/server.mjs together, in the same change."
+        )
+
+
 async def test_retrying_the_same_client_message_id_after_completion_replays_once(
     monkeypatch, _seeded
 ):
@@ -985,6 +1061,65 @@ async def test_list_conversations_returns_only_this_visitors_own_conversations(
     other_body = other_response.json()
     assert len(other_body["conversations"]) == 1
     assert other_body["conversations"][0]["title"] == "not mine"
+
+
+async def test_conversations_endpoints_now_carry_real_cors_headers(monkeypatch, _seeded):
+    # [ops bugfix]: GET /conversations and GET /conversations/{cid}/
+    # messages never had an OPTIONS preflight handler or an
+    # Access-Control-Allow-Origin header on their own real responses --
+    # confirmed live against the real demo stack (a genuinely
+    # cross-origin deployment) while investigating why the widget's own
+    # `conversation_id` discovery workaround silently failed in
+    # production: the browser blocked it at the PREFLIGHT, before the
+    # real GET was ever even sent. /session and /chat both already got
+    # this right from day one; this is the same fix, extended to the two
+    # endpoints that never had it, plus the new escalate preflight
+    # (tests/test_handoff_routes.py).
+    app = await _build_app(monkeypatch)
+    token = _token_for(_seeded)
+    async with db_session() as session:
+        repo = TenantScopedRepository(tenant_id=_seeded["tenant"], session=session)
+        conversation = await repo.create_conversation(vid=_seeded["visitor"])
+        await session.commit()
+        cid = conversation.cid
+    nonexistent_cid = uuid.uuid4()
+
+    async with await http_client(app) as client:
+        list_preflight = await client.options("/api/v1/conversations", headers={"Origin": ORIGIN})
+        messages_preflight = await client.options(
+            f"/api/v1/conversations/{cid}/messages", headers={"Origin": ORIGIN}
+        )
+        list_response = await client.get(
+            "/api/v1/conversations",
+            headers={"Authorization": f"Bearer {token}", "Origin": ORIGIN},
+        )
+        messages_response = await client.get(
+            f"/api/v1/conversations/{cid}/messages",
+            headers={"Authorization": f"Bearer {token}", "Origin": ORIGIN},
+        )
+        # The 404 branch too -- a plain `raise HTTPException` here would
+        # have silently dropped these same headers (FastAPI builds an
+        # exception response independently of this handler's own
+        # injected `response` object); this is exactly the regression
+        # this test guards against.
+        not_found_response = await client.get(
+            f"/api/v1/conversations/{nonexistent_cid}/messages",
+            headers={"Authorization": f"Bearer {token}", "Origin": ORIGIN},
+        )
+
+    for response in (list_preflight, messages_preflight):
+        assert response.status_code == 200
+        assert response.headers["access-control-allow-origin"] == ORIGIN
+        assert response.headers["vary"] == "Origin"
+
+    for response in (list_response, messages_response):
+        assert response.status_code == 200
+        assert response.headers["access-control-allow-origin"] == ORIGIN
+        assert response.headers["vary"] == "Origin"
+
+    assert not_found_response.status_code == 404
+    assert not_found_response.headers["access-control-allow-origin"] == ORIGIN
+    assert not_found_response.headers["vary"] == "Origin"
 
 
 async def test_a_real_turn_advances_last_message_at_and_reorders_previous_chats(

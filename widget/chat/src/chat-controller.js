@@ -305,7 +305,20 @@ export class ChatController {
             callbacks.onCitations?.(items);
           } else if (frame.event === "done") {
             sawDone = true;
-            await this._discoverConversationIdIfUnknown();
+            // [ops bugfix]: the `done` event now carries `conversation_id`
+            // directly (backend/app/chat/routes.py, on EVERY turn, Step
+            // 6.2's own pre-authorised contract addition) -- this
+            // replaces `_discoverConversationIdIfUnknown()`'s own extra
+            // GET /conversations round trip entirely. That workaround is
+            // removed outright, not merely bypassed: it depended on a
+            // GET /conversations call that turned out to fail with a
+            // real browser CORS error in genuine cross-origin production
+            // deployment (confirmed live -- see the register), so it was
+            // silently never actually working there; reading this field
+            // instead costs nothing extra and cannot fail independently.
+            if (typeof data.conversation_id === "string") {
+              this._conversationId = data.conversation_id;
+            }
             callbacks.onDone?.({ truncated: false, offerEscalation: Boolean(data.offer_escalation) });
           } else if (frame.event === "error") {
             const message = SSE_ERROR_MESSAGES[data.code] ?? DEFAULT_SSE_ERROR_MESSAGE;
@@ -330,39 +343,6 @@ export class ChatController {
     }
   }
 
-  // Workaround for a real, named contract gap (PROJECT_SPEC.md §9,
-  // Step 5.1 Part D): POST /api/v1/chat never returns the
-  // conversation_id of a conversation it just created for a first
-  // turn (conversation_id: null in the request) -- not in any SSE
-  // event, not in a response header. Using only already-locked
-  // endpoints: GET /api/v1/conversations is ordered most-recently-
-  // active first (`last_message_at` DESC, touched at lease-acquire
-  // time -- before the stream even starts), scoped to this visitor's
-  // own token, so the conversation this exact turn just touched is
-  // reliably conversations[0]. Costs one extra request, only once per
-  // browser session (on the first turn only; this._conversationId is
-  // cached for every later turn) -- documented, not hidden.
-  async _discoverConversationIdIfUnknown() {
-    if (this._conversationId !== null) {
-      return;
-    }
-    try {
-      const response = await this._fetch(`${this._baseUrl}/api/v1/conversations`, {
-        headers: { authorization: `Bearer ${this._sessionToken}` },
-      });
-      if (!response.ok) {
-        return; // best-effort: a failure here just means the NEXT turn also starts a new conversation
-      }
-      const body = await response.json();
-      const first = body.conversations?.[0];
-      if (first?.conversation_id) {
-        this._conversationId = first.conversation_id;
-      }
-    } catch {
-      // Best-effort, per the comment above -- never surfaced as a
-      // visible error for what was otherwise a successfully completed turn.
-    }
-  }
 }
 
 function _parseFrameData(raw) {

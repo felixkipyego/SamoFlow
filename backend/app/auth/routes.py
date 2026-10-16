@@ -52,6 +52,7 @@ from fastapi import APIRouter, Depends, Request
 from fastapi.responses import JSONResponse, Response
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.auth.cors import build_preflight_response
 from app.auth.origin import origin_is_allowed
 from app.auth.schemas import SessionRequest, SessionResponse
 from app.auth.secrets import generate_visitor_secret, hash_visitor_secret
@@ -182,15 +183,9 @@ async def session_preflight(request: Request) -> Response:
     # wanted to. It only tells the browser an actual POST to this origin,
     # with these methods/headers, would be allowed to be ATTEMPTED --
     # actual authorization happens on the real POST request itself, above.
-    origins = request.headers.getlist("origin")
-    headers = {
-        "Access-Control-Allow-Methods": "POST, OPTIONS",
-        "Access-Control-Allow-Headers": "Content-Type",
-        "Vary": "Origin",
-    }
-    if len(origins) == 1:
-        headers["Access-Control-Allow-Origin"] = origins[0]
-    return Response(status_code=200, headers=headers)
+    return build_preflight_response(
+        request, methods="POST, OPTIONS", headers="Content-Type"
+    )
 
 
 @router.post("/session", response_model=SessionResponse)

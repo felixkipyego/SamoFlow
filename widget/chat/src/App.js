@@ -4,7 +4,6 @@ import { useEffect, useRef, useState } from "preact/hooks";
 import { parseMarkdown } from "./markdown.js";
 import { renderMarkdown } from "./render.js";
 import { isHttpsUrl } from "./url-safety.js";
-import { pickReadableTextColor } from "./contrast.js";
 import { MAX_MESSAGE_LENGTH } from "./chat-controller.js";
 import { ConversationList } from "./ConversationList.js";
 import { EscalationPanel } from "./EscalationPanel.js";
@@ -74,22 +73,34 @@ export function App({ controller, config, launcherEl }) {
   const [banner, setBanner] = useState(null);
   const [offerEscalation, setOfferEscalation] = useState(false);
   const [escalationSubmitted, setEscalationSubmitted] = useState(false);
+  // [ops bugfix]: the real bug behind "only one message can be sent".
+  // `controller.isStreaming` is a plain mutable property on a class
+  // instance, not Preact state -- reading it directly here (as the
+  // `disabled` prop below used to) can never, by itself, cause a
+  // re-render when it changes. The LAST re-render during a turn is
+  // triggered by `onDone`/`onError` calling `setMessages`/`setBanner`
+  // from INSIDE `_consumeStream` -- which runs, and finishes, BEFORE
+  // `ChatController.send()`'s/`retry()`'s own `finally` block ever sets
+  // `isStreaming = false`. So that render reads `controller.isStreaming`
+  // as still `true`, and nothing ever renders again afterward: the input
+  // stays disabled forever, confirmed live against the real backend.
+  // This component now tracks its OWN reactive copy instead, set in
+  // `runTurn()` below around the exact same call, so Preact always gets
+  // a render when it flips back.
+  const [isStreaming, setIsStreaming] = useState(false);
   const listRef = useRef(null);
   const panelRef = useRef(null);
   const liveRegionRef = useRef(null);
+  const textareaRef = useRef(null);
 
-  // Task 5.5: tenant branding, applied via CSSOM property assignment
-  // (never a <style> block / Constructable Stylesheet -- see chat.css's
-  // own header for the live CSP proof) -- and its own automatically
-  // computed, always-readable text color (contrast.js), so a tenant's
-  // primary color choice can never make the header/launcher text
-  // unreadable.
-  useEffect(() => {
-    if (panelRef.current) {
-      panelRef.current.style.setProperty("--sf-primary", config.colors.primary);
-      panelRef.current.style.setProperty("--sf-primary-text", pickReadableTextColor(config.colors.primary));
-    }
-  }, [config.colors.primary]);
+  // [ops bugfix]: tenant branding (--sf-primary/--sf-primary-text) is no
+  // longer set here -- mount.js now sets it once, imperatively, on
+  // `hostEl` (the shadow host shared by the launcher AND this panel),
+  // before this component ever renders. Setting it on `panelRef` alone,
+  // as this effect used to, scoped the custom properties to the panel's
+  // own subtree only -- the launcher button is a SIBLING of the panel
+  // under that same shadow root, not a descendant of it, so it never
+  // inherited the color at all. See mount.js's own header for the fix.
 
   useEffect(() => {
     const onToggle = () => setOpen((o) => !o);
@@ -162,6 +173,27 @@ export function App({ controller, config, launcherEl }) {
     };
   }, [open, launcherEl]);
 
+  // [ops bugfix]: the input must come back enabled AND focused after
+  // EVERY way a turn can end (a normal answer, the fallback, an
+  // escalation offer, a 409/503, quota exhausted, a network drop
+  // mid-stream, an aborted/timed-out stream, or the visitor closing and
+  // reopening the panel mid-stream) -- no spec-mandated terminal state
+  // exists that should leave it dead (docs/SPEC.md §9/§11: quota-
+  // exhausted still routes through this SAME `done` event with a fixed
+  // fallback reply, "the escalation form still works"; §11's own state
+  // list names no permanently-disabled state at all). Re-running this
+  // effect on `open` too (not only `isStreaming`) is what restores focus
+  // correctly even when a turn finished WHILE the panel was closed
+  // (hidden elements cannot receive real focus, so that case needs a
+  // second chance once the panel becomes visible again); `view` guards
+  // against stealing focus onto a textarea that is not even rendered in
+  // the "conversations"/"escalation" views.
+  useEffect(() => {
+    if (open && !isStreaming && view === "chat") {
+      textareaRef.current?.focus();
+    }
+  }, [isStreaming, open, view]);
+
   const announce = (text) => {
     if (liveRegionRef.current) {
       liveRegionRef.current.textContent = text;
@@ -170,6 +202,7 @@ export function App({ controller, config, launcherEl }) {
 
   const runTurn = (text, { isRetry }) => {
     setBanner(null);
+    setIsStreaming(true);
     if (!isRetry) {
       setMessages((prev) => [
         ...prev,
@@ -207,16 +240,21 @@ export function App({ controller, config, launcherEl }) {
       },
     };
 
-    if (isRetry) {
-      controller.retry(callbacks);
-    } else {
-      controller.send(text, callbacks);
-    }
+    // [ops bugfix]: `setIsStreaming(false)` in a `finally` -- this is
+    // what the old code was missing entirely for RENDERING purposes.
+    // `controller.send()`/`.retry()` themselves already always resolve
+    // (every internal failure path -- a non-OK response, a thrown
+    // network error, a dropped connection, an SSE `error` event -- calls
+    // one of `callbacks` above and returns normally; see chat-
+    // controller.js's own `_sendOnce()`/`_consumeStream()`), so `.finally()`
+    // here runs for every one of those cases too, not only success.
+    const turnPromise = isRetry ? controller.retry(callbacks) : controller.send(text, callbacks);
+    turnPromise.finally(() => setIsStreaming(false));
   };
 
   const handleSend = () => {
     const text = inputValue.trim();
-    if (!text || controller.isStreaming) {
+    if (!text || isStreaming) {
       return;
     }
     setInputValue("");
@@ -224,7 +262,7 @@ export function App({ controller, config, launcherEl }) {
   };
 
   const handleRetry = () => {
-    if (controller.isStreaming) {
+    if (isStreaming) {
       return;
     }
     runTurn(null, { isRetry: true });
@@ -305,17 +343,18 @@ export function App({ controller, config, launcherEl }) {
       "div",
       { className: "sf-input-row" },
       h("textarea", {
+        ref: textareaRef,
         className: "sf-input",
         value: inputValue,
         maxLength: MAX_MESSAGE_LENGTH,
-        disabled: controller.isStreaming,
+        disabled: isStreaming,
         "aria-label": "Message",
         onInput: (event) => setInputValue(event.currentTarget.value),
         onKeyDown: onInputKeyDown,
       }),
       h(
         "button",
-        { type: "button", className: "sf-send", disabled: controller.isStreaming || inputValue.trim() === "", onClick: handleSend },
+        { type: "button", className: "sf-send", disabled: isStreaming || inputValue.trim() === "", onClick: handleSend },
         "Send",
       ),
     ),
