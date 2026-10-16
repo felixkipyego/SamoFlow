@@ -4,54 +4,37 @@
 # test_dashboard_tenant_routes.py (owner_a/owner_b, two tenants, for
 # cross-tenant proof), plus a real Visitor/SiteKey pair -- Escalation.
 # vid is a real FK, not nullable.
+#
+# Duplication check (Step 6.6): this file originally redefined its own
+# local copies of dashboard_http_client()/attach_csrf()/create_
+# dashboard_user()/login_as() -- a FOURTH occurrence of the exact
+# pattern tests/dashboard_test_helpers.py was already extracted for at
+# Step 6.3 (that module's own header comment: "every dashboard route
+# test file should import from here instead of redefining these").
+# Fixed here by importing the shared module directly, the way this
+# file should have from the start -- test_dashboard_tenant_routes.py's
+# own still-local copies are left as-is (rule 2: that task is already
+# complete; not retrofitted here).
 import uuid
 from datetime import UTC, datetime
 
 import pytest
 import sqlalchemy as sa
-from fastapi_users.db import SQLAlchemyUserDatabase
-from httpx import ASGITransport, AsyncClient
 
 from app.auth.secrets import generate_visitor_secret, hash_visitor_secret
-from app.dashboard.csrf import CSRF_COOKIE_NAME, CSRF_HEADER_NAME
-from app.dashboard.models import User
-from app.dashboard.passwords import password_helper
 from app.dashboard.repository import create_membership
 from app.handoff.models import Escalation
 from app.main import create_app
 from app.plans.models import Plan, UsageEvent
 from app.tenancy.models import Conversation, SiteKey, Tenant, Visitor
 from tests.conftest import db_session
+from tests.dashboard_test_helpers import (
+    create_dashboard_user,
+    dashboard_http_client,
+    login_as,
+)
 
-_PASSWORD = "correct horse battery staple 1"  # noqa: S105
 _ORIGIN = "https://tenant.example"
-
-
-def _dashboard_http_client(app) -> AsyncClient:
-    return AsyncClient(transport=ASGITransport(app=app), base_url="https://test")
-
-
-async def _attach_csrf(client: AsyncClient) -> dict[str, str]:
-    response = await client.get("/api/v1/dashboard/auth/csrf")
-    assert response.status_code == 204
-    token = client.cookies[CSRF_COOKIE_NAME]
-    return {CSRF_HEADER_NAME: token}
-
-
-async def _create_user(session, email: str, password: str = _PASSWORD) -> User:
-    user_db = SQLAlchemyUserDatabase(session, User)
-    return await user_db.create({"email": email, "hashed_password": password_helper.hash(password)})
-
-
-async def _login(client: AsyncClient, email: str) -> dict[str, str]:
-    headers = await _attach_csrf(client)
-    response = await client.post(
-        "/api/v1/dashboard/auth/login",
-        json={"email": email, "password": _PASSWORD},
-        headers=headers,
-    )
-    assert response.status_code == 200
-    return headers
 
 
 @pytest.fixture
@@ -69,8 +52,8 @@ async def _seeded(reset_test_database):
             ]
         )
         await session.flush()
-        owner_a = await _create_user(session, "owner-a@example.com")
-        owner_b = await _create_user(session, "owner-b@example.com")
+        owner_a = await create_dashboard_user(session, "owner-a@example.com")
+        owner_b = await create_dashboard_user(session, "owner-b@example.com")
         await session.flush()
         await create_membership(session, user_id=owner_a.id, tenant_id=ids["tenant_a"])
         await create_membership(session, user_id=owner_b.id, tenant_id=ids["tenant_b"])
@@ -152,8 +135,8 @@ async def test_list_escalations_is_tenant_scoped(_seeded):
         await session.commit()
 
     app = create_app()
-    async with _dashboard_http_client(app) as client:
-        await _login(client, "owner-a@example.com")
+    async with dashboard_http_client(app) as client:
+        await login_as(client, "owner-a@example.com")
         response = await client.get("/api/v1/dashboard/escalations")
     assert response.status_code == 200
     body = response.json()
@@ -166,7 +149,7 @@ async def test_list_escalations_is_tenant_scoped(_seeded):
 
 async def test_list_escalations_without_login_is_401(_seeded):
     app = create_app()
-    async with _dashboard_http_client(app) as client:
+    async with dashboard_http_client(app) as client:
         response = await client.get("/api/v1/dashboard/escalations")
     assert response.status_code == 401
 
@@ -189,8 +172,8 @@ async def test_open_count_counts_new_and_seen_but_not_resolved(_seeded):
         await session.commit()
 
     app = create_app()
-    async with _dashboard_http_client(app) as client:
-        await _login(client, "owner-a@example.com")
+    async with dashboard_http_client(app) as client:
+        await login_as(client, "owner-a@example.com")
         response = await client.get("/api/v1/dashboard/escalations/open-count")
     assert response.status_code == 200
     assert response.json()["count"] == 2
@@ -222,8 +205,8 @@ async def test_transcript_is_markdown_unescaped(_seeded):
         await session.commit()
 
     app = create_app()
-    async with _dashboard_http_client(app) as client:
-        await _login(client, "owner-a@example.com")
+    async with dashboard_http_client(app) as client:
+        await login_as(client, "owner-a@example.com")
         response = await client.get(f"/api/v1/dashboard/escalations/{escalation_id}")
     assert response.status_code == 200
     body = response.json()
@@ -240,16 +223,16 @@ async def test_get_escalation_for_another_tenant_is_404(_seeded):
         await session.commit()
 
     app = create_app()
-    async with _dashboard_http_client(app) as client:
-        await _login(client, "owner-a@example.com")
+    async with dashboard_http_client(app) as client:
+        await login_as(client, "owner-a@example.com")
         response = await client.get(f"/api/v1/dashboard/escalations/{escalation_id}")
     assert response.status_code == 404
 
 
 async def test_get_unknown_escalation_is_404(_seeded):
     app = create_app()
-    async with _dashboard_http_client(app) as client:
-        await _login(client, "owner-a@example.com")
+    async with dashboard_http_client(app) as client:
+        await login_as(client, "owner-a@example.com")
         response = await client.get(f"/api/v1/dashboard/escalations/{uuid.uuid4()}")
     assert response.status_code == 404
 
@@ -274,8 +257,8 @@ async def test_update_status_to_resolved_persists(_seeded):
         await session.commit()
 
     app = create_app()
-    async with _dashboard_http_client(app) as client:
-        headers = await _login(client, "owner-a@example.com")
+    async with dashboard_http_client(app) as client:
+        headers = await login_as(client, "owner-a@example.com")
         response = await client.patch(
             f"/api/v1/dashboard/escalations/{escalation_id}/status",
             json={"status": "resolved"},
@@ -292,8 +275,8 @@ async def test_update_status_rejects_new_as_a_value(_seeded):
         await session.commit()
 
     app = create_app()
-    async with _dashboard_http_client(app) as client:
-        headers = await _login(client, "owner-a@example.com")
+    async with dashboard_http_client(app) as client:
+        headers = await login_as(client, "owner-a@example.com")
         response = await client.patch(
             f"/api/v1/dashboard/escalations/{escalation_id}/status",
             json={"status": "new"},
@@ -310,8 +293,8 @@ async def test_update_status_without_csrf_is_rejected(_seeded):
     escalation_id = escalation.id
 
     app = create_app()
-    async with _dashboard_http_client(app) as client:
-        await _login(client, "owner-a@example.com")
+    async with dashboard_http_client(app) as client:
+        await login_as(client, "owner-a@example.com")
         response = await client.patch(
             f"/api/v1/dashboard/escalations/{escalation_id}/status",
             json={"status": "resolved"},
@@ -336,8 +319,8 @@ async def test_update_status_for_another_tenants_escalation_is_404(_seeded):
         await session.commit()
 
     app = create_app()
-    async with _dashboard_http_client(app) as client:
-        headers = await _login(client, "owner-a@example.com")
+    async with dashboard_http_client(app) as client:
+        headers = await login_as(client, "owner-a@example.com")
         response = await client.patch(
             f"/api/v1/dashboard/escalations/{escalation_id}/status",
             json={"status": "resolved"},
@@ -366,8 +349,8 @@ async def test_delete_escalation_removes_it(_seeded):
         await session.commit()
 
     app = create_app()
-    async with _dashboard_http_client(app) as client:
-        headers = await _login(client, "owner-a@example.com")
+    async with dashboard_http_client(app) as client:
+        headers = await login_as(client, "owner-a@example.com")
         response = await client.delete(
             f"/api/v1/dashboard/escalations/{escalation_id}", headers=headers
         )
@@ -397,8 +380,8 @@ async def test_delete_escalation_without_csrf_is_rejected(_seeded):
         await session.commit()
 
     app = create_app()
-    async with _dashboard_http_client(app) as client:
-        await _login(client, "owner-a@example.com")
+    async with dashboard_http_client(app) as client:
+        await login_as(client, "owner-a@example.com")
         response = await client.delete(f"/api/v1/dashboard/escalations/{escalation_id}")
     assert response.status_code == 403
 
@@ -420,8 +403,8 @@ async def test_delete_for_another_tenants_escalation_is_404(_seeded):
         await session.commit()
 
     app = create_app()
-    async with _dashboard_http_client(app) as client:
-        headers = await _login(client, "owner-a@example.com")
+    async with dashboard_http_client(app) as client:
+        headers = await login_as(client, "owner-a@example.com")
         response = await client.delete(
             f"/api/v1/dashboard/escalations/{escalation_id}", headers=headers
         )
@@ -433,8 +416,8 @@ async def test_delete_for_another_tenants_escalation_is_404(_seeded):
 
 async def test_usage_with_no_plan_assigned(_seeded):
     app = create_app()
-    async with _dashboard_http_client(app) as client:
-        await _login(client, "owner-a@example.com")
+    async with dashboard_http_client(app) as client:
+        await login_as(client, "owner-a@example.com")
         response = await client.get("/api/v1/dashboard/usage")
     assert response.status_code == 200
     body = response.json()
@@ -502,8 +485,8 @@ async def test_usage_state_normal_below_80_percent(_seeded):
     await _add_usage_events(_seeded["tenant_a"], _seeded["vid_a"], count=10)
 
     app = create_app()
-    async with _dashboard_http_client(app) as client:
-        await _login(client, "owner-a@example.com")
+    async with dashboard_http_client(app) as client:
+        await login_as(client, "owner-a@example.com")
         response = await client.get("/api/v1/dashboard/usage")
     assert response.status_code == 200
     body = response.json()
@@ -518,8 +501,8 @@ async def test_usage_state_warning_at_80_percent(_seeded):
     await _add_usage_events(_seeded["tenant_a"], _seeded["vid_a"], count=80)
 
     app = create_app()
-    async with _dashboard_http_client(app) as client:
-        await _login(client, "owner-a@example.com")
+    async with dashboard_http_client(app) as client:
+        await login_as(client, "owner-a@example.com")
         response = await client.get("/api/v1/dashboard/usage")
     assert response.json()["state"] == "warning"
 
@@ -529,8 +512,8 @@ async def test_usage_state_exceeded_at_100_percent(_seeded):
     await _add_usage_events(_seeded["tenant_a"], _seeded["vid_a"], count=100)
 
     app = create_app()
-    async with _dashboard_http_client(app) as client:
-        await _login(client, "owner-a@example.com")
+    async with dashboard_http_client(app) as client:
+        await login_as(client, "owner-a@example.com")
         response = await client.get("/api/v1/dashboard/usage")
     assert response.json()["state"] == "exceeded"
 
@@ -540,8 +523,8 @@ async def test_usage_is_tenant_scoped(_seeded):
     await _add_usage_events(_seeded["tenant_a"], _seeded["vid_a"], count=100)
 
     app = create_app()
-    async with _dashboard_http_client(app) as client:
-        await _login(client, "owner-b@example.com")
+    async with dashboard_http_client(app) as client:
+        await login_as(client, "owner-b@example.com")
         response = await client.get("/api/v1/dashboard/usage")
     assert response.status_code == 200
     body = response.json()
