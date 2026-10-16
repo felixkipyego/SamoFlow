@@ -211,6 +211,24 @@ Confirm: `curl -I https://api.softwareske.com/health` returns `200` with
 no `Server:` header (backend/smoke-image.sh already proves this at the
 image level); `https://app.softwareske.com` loads the dashboard login.
 
+**Never run more than one `api` process** (never `docker compose up
+--scale api=2`, never add `--workers` to entrypoint.sh's own uvicorn
+command, never a `deploy.replicas` entry on the `api` service) without
+FIRST moving `chat_active_streams`/`chat_stop_requests`
+(`backend/app/chat/routes.py`) -- and re-checking every other
+in-process mechanism this project documents the same way (the usage
+counters, the various rate limiters, `StatusCache`) -- to shared state
+(Postgres, keyed by vid/lease_token, no new service needed). A second
+process can never see the first process's own in-process state: a
+visitor's own `POST /chat/stop` landing on the WRONG process would
+silently do nothing, and a visitor could be double-counted or
+rate-limited inconsistently depending on which process happened to
+serve which request. `backend/tests/test_single_api_process_guard.py`
+fails the build the moment entrypoint.sh or either compose file tries
+to raise this above one process on its own, but an operator-issued
+`--scale` flag at the command line is invisible to that guard --
+reading this paragraph is the only thing that catches that case.
+
 ### Admin CLI commands (after the first deploy, as pilot tenants onboard)
 
 All run the same way, via the `migrate` service's `admin` mode
