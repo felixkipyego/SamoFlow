@@ -50,7 +50,7 @@
 # docstring already states for `client_id` -- the caller (Step 4.1's real
 # `/chat` endpoint) carries that obligation, not this module.
 import uuid
-from collections.abc import AsyncIterator, Mapping
+from collections.abc import AsyncIterator, Callable, Mapping
 from typing import Any
 
 from langchain_core.runnables import RunnableConfig
@@ -125,6 +125,7 @@ def _build_thread_config(
     *,
     quota_exhausted: bool = False,
     support_text: str | None = None,
+    stop_requested: Callable[[], bool] | None = None,
 ) -> RunnableConfig:
     """The ONE place a LangGraph config dict is ever constructed in this
     codebase -- every public function below routes through this, nothing
@@ -199,6 +200,17 @@ def _build_thread_config(
     into persisted metadata today -- a pre-existing Task 4.3 gap, not
     introduced here, left unfixed as out of this task's own scope
     (non-sensitive, a boolean flag) but flagged in the register.
+
+    [SECURITY] Part D: also carries `stop_requested` -- a zero-argument
+    callable (never a plain `bool`), because unlike every other key
+    here it must report a LIVE signal that can change mid-turn, after
+    this config was already built and handed to `graph.astream()`. See
+    `app.agent.context.stop_requested_from_config()`'s own docstring for
+    why a callable needs no `{"text": ...}`-style wrapping guard the way
+    `support_text` does. `None` by default -- every pre-Part-D caller
+    unaffected, identical reasoning to `quota_exhausted`/`support_text`
+    above. Not recomputed on resume, for the same reasoning those two
+    give: a resume continues a turn already past its own answer step.
     """
     if not isinstance(identity.tenant_id, uuid.UUID):
         raise ValueError("identity.tenant_id must be a uuid.UUID")
@@ -216,6 +228,9 @@ def _build_thread_config(
             # Wrapped, not a bare str -- see this function's own
             # docstring for why (checkpoint-metadata leak guard).
             "support_text": {"text": support_text},
+            # Bare callable, deliberately NOT wrapped -- see this
+            # function's own docstring, Part D paragraph.
+            "stop_requested": stop_requested,
         }
     }
 
@@ -267,6 +282,7 @@ async def run_turn(
     *,
     quota_exhausted: bool = False,
     support_text: str | None = None,
+    stop_requested: Callable[[], bool] | None = None,
 ) -> AsyncIterator[Any]:
     """Runs one turn (`graph.astream`), yielding whatever the graph itself
     yields unchanged. `input` is forwarded to `astream()` exactly as
@@ -284,9 +300,20 @@ async def run_turn(
     details fallback text (`app.agent.graph.render_support_details_
     text()`, applied to the tenant's own `config` dict), forwarded
     identically.
+
+    Part D: `stop_requested` is the SAME caller's own zero-argument
+    callable closing over its in-process "has this visitor asked to
+    stop" set (`app/chat/routes.py`'s own `_get_stop_requests()`),
+    forwarded identically -- see `_build_thread_config()`'s own
+    docstring for why this one, alone, is a callable rather than a
+    plain value.
     """
     config = _build_thread_config(
-        identity, conversation_id, quota_exhausted=quota_exhausted, support_text=support_text
+        identity,
+        conversation_id,
+        quota_exhausted=quota_exhausted,
+        support_text=support_text,
+        stop_requested=stop_requested,
     )
     async for chunk in graph.astream(input, config, stream_mode=_STREAM_MODE):
         yield chunk

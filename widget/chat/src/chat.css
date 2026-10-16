@@ -150,6 +150,15 @@
   border: 1px solid #e53e3e;
 }
 
+/* Part D (docs/SPEC.md §9's "Stop mid-stream"): a plain, muted marker --
+   never styled to resemble real answer text, same reasoning as
+   App.js's own separate-element comment next to this class's usage. */
+.sf-stopped-indicator {
+  color: #6b6b76;
+  font-size: 12px;
+  font-style: italic;
+}
+
 .sf-retry {
   all: initial;
   display: inline-block;

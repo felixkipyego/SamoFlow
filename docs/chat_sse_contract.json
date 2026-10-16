@@ -2,6 +2,6 @@
   "_comment": "[ops bugfix] The field names of POST /api/v1/chat's four real SSE event types (docs/SPEC.md §10), as a single committed source of truth both sides read from -- never maintained independently. Backend: backend/tests/test_chat_routes.py's test_done_and_other_sse_events_match_the_committed_contract asserts the REAL _sse_event()-built payload for each event type has exactly these keys. Widget: widget/test/e2e/server.mjs's fake API builds its own done/token/citations/error payloads from this same file (scripts/check-sse-contract.mjs enforces it at test time), so the e2e mock cannot silently drift from the real backend's own wire shape the way it did before this fix -- the conversation_id field this file lists on 'done' is exactly the field BUG2's own real production defect turned on: the widget's e2e suite never caught the missing field because the mock never modeled it as part of a shared contract at all, only as an ad hoc, independently-typed literal.",
   "token": ["text", "v"],
   "citations": ["items", "v"],
-  "done": ["message_id", "usage", "offer_escalation", "conversation_id", "v"],
+  "done": ["message_id", "usage", "offer_escalation", "conversation_id", "stopped", "v"],
   "error": ["code", "message", "v"]
 }

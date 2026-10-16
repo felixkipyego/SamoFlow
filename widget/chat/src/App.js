@@ -58,6 +58,12 @@ function Message({ message, onRetry }) {
     "div",
     { className: `sf-message sf-message-assistant${message.status === "error" ? " sf-message-error" : ""}` },
     renderMarkdown(parseMarkdown(message.text), allowedUrls),
+    // Part D (docs/SPEC.md §9's "Stop mid-stream"): a visible, plain-text
+    // marker on a turn the visitor stopped early -- never styled to look
+    // like part of the model's own answer text (a separate element, not
+    // concatenated into `message.text`), so it can never be mistaken for
+    // real streamed content.
+    message.status === "stopped" ? h("span", { className: "sf-stopped-indicator" }, " (stopped)") : null,
     message.citations?.length ? h(Citations, { items: message.citations }) : null,
     message.status === "error" && onRetry
       ? h("button", { type: "button", className: "sf-retry", onClick: onRetry }, "Retry")
@@ -226,13 +232,25 @@ export function App({ controller, config, launcherEl }) {
         setMessages((prev) => _updateLast(prev, "assistant", (m) => ({ ...m, citations: items })));
       },
       onDone: (info) => {
+        // Part D: a stopped turn is marked "stopped", never "done" --
+        // `Message()`'s own render picks a different, distinct status
+        // class/indicator from this alone.
+        const status = info.stopped ? "stopped" : "done";
         setMessages((prev) => {
-          const next = _updateLast(prev, "assistant", (m) => ({ ...m, status: "done" }));
+          const next = _updateLast(prev, "assistant", (m) => ({ ...m, status }));
           const last = next[next.length - 1];
-          announce(`Assistant: ${last.text}`);
+          // Screen readers get BOTH an accessible label (the Stop
+          // button's own `aria-label` below) and an accessible STATE
+          // change here: the announced text itself says "(stopped)",
+          // so a screen-reader user hears the difference between a
+          // completed answer and one they stopped early, not just
+          // silence where the rest of the answer would have been.
+          announce(info.stopped ? `Assistant: ${last.text} (stopped)` : `Assistant: ${last.text}`);
           return next;
         });
-        setOfferEscalation(Boolean(info.offerEscalation));
+        // A stopped turn never offers escalation -- it was cut short by
+        // the visitor's own choice, not a fixed-reply node's verdict.
+        setOfferEscalation(info.stopped ? false : Boolean(info.offerEscalation));
       },
       onError: (message) => {
         setBanner(message);
@@ -266,6 +284,18 @@ export function App({ controller, config, launcherEl }) {
       return;
     }
     runTurn(null, { isRetry: true });
+  };
+
+  // Part D (docs/SPEC.md §9's "Stop mid-stream"): `controller.stop()`
+  // itself resolves once the local abort has already happened
+  // (chat-controller.js's own `stop()`), which is what makes `onDone`
+  // fire (with `stopped: true`) and `isStreaming` flip back to `false`
+  // promptly -- no extra state to manage here beyond calling it.
+  const handleStop = () => {
+    if (!isStreaming) {
+      return;
+    }
+    controller.stop();
   };
 
   const handleOpenConversation = (cid) => {
@@ -352,11 +382,34 @@ export function App({ controller, config, launcherEl }) {
         onInput: (event) => setInputValue(event.currentTarget.value),
         onKeyDown: onInputKeyDown,
       }),
-      h(
-        "button",
-        { type: "button", className: "sf-send", disabled: isStreaming || inputValue.trim() === "", onClick: handleSend },
-        "Send",
-      ),
+      // Part D: the SAME button slot swaps between Send and Stop on
+      // `isStreaming` -- never two separate buttons swapped via
+      // hidden/visible (which would leave a stale, invisible Send
+      // button still in the tab order under a strict a11y audit).
+      // `aria-label`/visible text/`onClick` all change together, so a
+      // screen reader hears the real current action, not a stale one.
+      isStreaming
+        ? h(
+            "button",
+            {
+              type: "button",
+              className: "sf-send",
+              "aria-label": "Stop generating",
+              onClick: handleStop,
+            },
+            "Stop",
+          )
+        : h(
+            "button",
+            {
+              type: "button",
+              className: "sf-send",
+              "aria-label": "Send",
+              disabled: inputValue.trim() === "",
+              onClick: handleSend,
+            },
+            "Send",
+          ),
     ),
     config.privacyNoticeUrl && isHttpsUrl(config.privacyNoticeUrl)
       ? h(

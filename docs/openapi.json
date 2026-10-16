@@ -1303,6 +1303,30 @@
         "title": "ValidationError",
         "type": "object"
       },
+      "WidgetAppearanceResponse": {
+        "description": "[SECURITY] Step 7-follow-up, Part C: GET /api/v1/widget-\nappearance's own response -- an explicit, closed allow-list of\nexactly the fields the LAUNCHER itself ever renders (confirmed by\nreading widget/loader/src/dom.js directly: a hardcoded \"Chat\" label,\nno logo, no title -- only its own background/text color and its\nleft/right position are tenant-configurable at all). Deliberately\nNOT reusing `_public_widget_config()`'s own six-key shape: that\nresponse is for an authenticated chat SESSION (title/greeting/logo_\nurl/privacy_notice_url included); this one is public, unauthenticated,\nheavily cached, and must never grow a field beyond what the launcher\nitself can show, by construction of this class, not by convention.",
+        "properties": {
+          "position": {
+            "title": "Position",
+            "type": "string"
+          },
+          "primary": {
+            "title": "Primary",
+            "type": "string"
+          },
+          "primary_text": {
+            "title": "Primary Text",
+            "type": "string"
+          }
+        },
+        "required": [
+          "primary",
+          "primary_text",
+          "position"
+        ],
+        "title": "WidgetAppearanceResponse",
+        "type": "object"
+      },
       "WidgetColors": {
         "additionalProperties": false,
         "properties": {
@@ -1496,6 +1520,18 @@
           }
         },
         "summary": "Create Chat Turn"
+      }
+    },
+    "/api/v1/chat/stop": {
+      "post": {
+        "description": "Part D (docs/SPEC.md \u00a79's \"Stop mid-stream\"): the EXPLICIT stop\nsignal, deliberately a separate endpoint rather than relying on the\nwidget simply dropping/aborting its own `/chat` connection -- the\nspec's own wording requires stop to be \"distinct from a dropped\nconnection\", and a raw aborted fetch is, at the transport level,\nindistinguishable from a real network failure. The widget's own\n`AbortController` (widget/chat/src/chat-controller.js) is used to\nstop the WIDGET's own local reading/rendering of the stream\nimmediately (so the input re-enables without waiting on a round\ntrip); THIS endpoint is the one thing that actually tells the\nbackend to cancel generation.\n\nNo request body, no `conversation_id` -- `_get_active_streams()`'s\nown existing cap is already \"1 concurrent stream per visitor\"\n(docs/SPEC.md \u00a79), so a visitor's own vid alone unambiguously\nidentifies which turn (if any) to stop; it is the same identity the\nconcurrent-stream guard already keys on.\n\nIdempotent and a deliberate no-op, never an error, when nothing is\nrunning for this visitor (already finished, already stopped, or\nnever started) -- matches `/chat`'s own \"busy conversation\" 409\nbeing the ONLY conflict signal this API surfaces; \"stop\" has no\ncomparable failure mode worth reporting, and a visitor's own stop\nclick racing the stream's natural completion is a normal, expected\ntiming, not an error.",
+        "operationId": "stop_chat_turn_api_v1_chat_stop_post",
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Stop Chat Turn"
       }
     },
     "/api/v1/conversations": {
@@ -2818,6 +2854,45 @@
           }
         },
         "summary": "Create Session"
+      }
+    },
+    "/api/v1/widget-appearance": {
+      "get": {
+        "operationId": "get_widget_appearance_api_v1_widget_appearance_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "site_key",
+            "required": true,
+            "schema": {
+              "title": "Site Key",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WidgetAppearanceResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Widget Appearance"
       }
     },
     "/health": {

@@ -69,7 +69,6 @@ from sse_starlette.sse import EventSourceResponse
 
 from app.agent.entrypoint import read_state, run_turn
 from app.agent.graph import render_support_details_text
-from app.auth.cors import build_preflight_response
 from app.auth.dependencies import VerifiedIdentity, get_current_visitor
 from app.chat.schemas import (
     ChatRequest,
@@ -209,6 +208,26 @@ def _get_active_streams(request: Request) -> set[uuid.UUID]:
         streams = set()
         request.app.state.chat_active_streams = streams
     return streams
+
+
+def _get_stop_requests(request: Request) -> set[uuid.UUID]:
+    """Part D (docs/SPEC.md §9's "Stop mid-stream"): the in-process set
+    of vids who have asked their CURRENTLY STREAMING turn to stop --
+    same app.state-lazy-singleton shape as `_get_active_streams()`
+    above, for the identical reason (fresh/empty per `create_app()`, no
+    explicit reset needed between tests, single-API-instance scope).
+    A vid is added by `POST /chat/stop` only while it is ALSO present in
+    `_get_active_streams()`'s own set (so stopping a visitor with
+    nothing running is a harmless no-op, never a stale flag that lingers
+    into that visitor's NEXT, unrelated turn), and removed by `_stream_
+    turn()`'s own `finally` below unconditionally, win or lose -- the
+    same cleanup guarantee `active_streams.discard()` already has.
+    """
+    stops = getattr(request.app.state, "chat_stop_requests", None)
+    if stops is None:
+        stops = set()
+        request.app.state.chat_stop_requests = stops
+    return stops
 
 
 async def _acquire_lease(
@@ -357,48 +376,13 @@ def _build_citations_event(event_id: int, citations: list[dict]) -> dict:
     return _sse_event(event_id, "citations", {"items": items})
 
 
-@router.options("/chat", include_in_schema=False)
-async def chat_preflight(request: Request) -> Response:
-    # Mirrors app/auth/routes.py's own session_preflight() exactly --
-    # no Depends(get_db_session), no body parsing, cannot touch the
-    # database. Authorization is additionally an allowed request header
-    # here (the bearer token), unlike /session's own preflight, which
-    # needs none.
-    return build_preflight_response(
-        request, methods="POST, OPTIONS", headers="Content-Type, Authorization"
-    )
-
-
-# [ops bugfix]: GET /conversations and GET /conversations/{cid}/messages
-# never had an OPTIONS preflight handler or an Access-Control-Allow-
-# Origin header on their own real responses -- unlike /session and
-# /chat, both built with real cross-origin widget support from day one.
-# Confirmed LIVE, not assumed: a real browser calling the widget's own
-# `_discoverConversationIdIfUnknown()` workaround against the real demo
-# stack (a genuinely cross-origin deployment: widget on
-# http://127.0.0.1:4280, API on http://127.0.0.1:8010) failed with a
-# real CORS preflight error, console-visible, caught only because that
-# call was already wrapped in a best-effort try/catch -- meaning
-# `conversation_id` was NEVER learned that way in any real cross-origin
-# deployment, and "Previous chats" (widget/chat/src/ConversationList.js,
-# which calls this same GET /conversations with no such try/catch) was
-# equally broken, just never caught by this project's own e2e suite,
-# which serves the widget page and the fake API from the SAME origin
-# (see widget/test/e2e/server.mjs) and therefore never exercises a real
-# CORS preflight at all. Fixed the same way /session and /chat already
-# are.
-@router.options("/conversations", include_in_schema=False)
-async def conversations_preflight(request: Request) -> Response:
-    return build_preflight_response(
-        request, methods="GET, OPTIONS", headers="Authorization"
-    )
-
-
-@router.options("/conversations/{cid}/messages", include_in_schema=False)
-async def conversation_messages_preflight(request: Request, cid: uuid.UUID) -> Response:
-    return build_preflight_response(
-        request, methods="GET, OPTIONS", headers="Authorization"
-    )
+# [SECURITY] Step 7-follow-up: every OPTIONS preflight handler that used
+# to live here (chat_preflight/conversations_preflight/
+# conversation_messages_preflight) is REMOVED -- app.auth.cors.
+# WidgetCORSMiddleware now answers every one of this file's own
+# visitor-facing OPTIONS requests centrally, before the request ever
+# reaches a route handler at all. See that module's own header for the
+# full design and docs/DECISIONS_REGISTER.md for the register row.
 
 
 class _Stale(Exception):
@@ -449,6 +433,7 @@ async def _check_idempotency(
 
 async def _stream_turn(
     active_streams: set[uuid.UUID],
+    stop_requests: set[uuid.UUID],
     identity: VerifiedIdentity,
     conversation_id: uuid.UUID,
     lease_token: uuid.UUID,
@@ -488,6 +473,20 @@ async def _stream_turn(
     extension, not built here -- out of scope for this task, which
     focuses on the cases docs/SPEC.md §9 names explicitly: a real
     answer, and quota-exhausted).
+
+    Part D: `stop_requests` is threaded into `run_turn()` as a plain
+    `lambda: identity.vid in stop_requests` closure -- `_answer_node`
+    (app/agent/graph.py) calls it fresh on every emitted delta via
+    `app.agent.context.stop_requested_from_config()`, never a value
+    snapshotted once here (it must see a Stop click that lands AFTER
+    this generator started). `counted_toward_quota`/usage-recording
+    below are UNCHANGED by a stop: `_answer_node` still returns through
+    its own normal `can_answer=True` path (see that node's own
+    docstring), so `last_node == "answer"` still holds and this turn
+    still counts once toward quota either way, matching docs/SPEC.md
+    §9's "a stopped message counts once toward quota" literally, via
+    the SAME code that already counts a normal completed answer once --
+    no separate stopped-turn branch needed here.
     """
     event_id = 0
 
@@ -530,6 +529,10 @@ async def _stream_turn(
                     "usage": None,
                     "offer_escalation": False,
                     "conversation_id": str(conversation_id),
+                    # Part D: a replay is never a stopped turn -- the
+                    # original turn already completed (that's what makes
+                    # it replayable at all).
+                    "stopped": False,
                 },
             )
             return
@@ -548,6 +551,7 @@ async def _stream_turn(
                     graph_input,
                     quota_exhausted=quota_exhausted,
                     support_text=support_text,
+                    stop_requested=lambda: identity.vid in stop_requests,
                 ):
                     if mode == "custom":
                         event_id += 1
@@ -639,10 +643,18 @@ async def _stream_turn(
                 # unchanged; it simply has a cheaper, direct way to learn
                 # this value available once it chooses to read it.
                 "conversation_id": str(conversation_id),
+                # Part D: True only when `_answer_node` itself broke its
+                # own streaming loop early on an explicit stop request --
+                # see that node's own docstring for why this can only
+                # ever be True when `counted_toward_quota` above is also
+                # True (a stop is never honoured before real answer text
+                # exists to stop).
+                "stopped": bool(last_output.get("answer_stopped")),
             },
         )
     finally:
         active_streams.discard(identity.vid)
+        stop_requests.discard(identity.vid)
         await _release_lease(identity.tenant_id, conversation_id, lease_token)
         context.detach(trace_context_token)
 
@@ -681,6 +693,18 @@ async def create_chat_turn(payload: ChatRequest, request: Request) -> Response:
     try:
         async with _session_factory()() as session:
             identity = await get_current_visitor(request, session)
+            # [SECURITY] Step 7-follow-up: set as EARLY as possible,
+            # right after the real Origin header is positively verified
+            # against this token's own `org` claim (get_current_visitor()
+            # already did that check) -- every branch below this line,
+            # success or error (429/503/409x3/the final stream), picks
+            # this up automatically via app.auth.cors.WidgetCORSMiddleware,
+            # with no per-branch header to remember. The 413 check above
+            # this `try` block, and a 401 raised BY get_current_visitor()
+            # itself, both run before this line and are deliberately left
+            # without a header -- see app/auth/cors.py's own header, point
+            # 3, for why that is the safe default, not an oversight.
+            request.state.cors_allowed_origin = identity.org
             graph = request.app.state.graph
 
             ip = request.client.host if request.client else "unknown"
@@ -795,10 +819,13 @@ async def create_chat_turn(payload: ChatRequest, request: Request) -> Response:
         )
 
     active_streams.add(identity.vid)
+    stop_requests = _get_stop_requests(request)
+    stop_requests.discard(identity.vid)
 
     return EventSourceResponse(
         _stream_turn(
             active_streams,
+            stop_requests,
             identity,
             conversation.cid,
             lease_token,
@@ -816,10 +843,46 @@ async def create_chat_turn(payload: ChatRequest, request: Request) -> Response:
         headers={
             "Cache-Control": "no-cache",
             "X-Accel-Buffering": "no",
-            "Access-Control-Allow-Origin": identity.org,
-            "Vary": "Origin",
         },
     )
+
+
+@router.post("/chat/stop", status_code=204)
+async def stop_chat_turn(
+    request: Request,
+    identity: VerifiedIdentity = Depends(get_current_visitor),  # noqa: B008
+) -> Response:
+    """Part D (docs/SPEC.md §9's "Stop mid-stream"): the EXPLICIT stop
+    signal, deliberately a separate endpoint rather than relying on the
+    widget simply dropping/aborting its own `/chat` connection -- the
+    spec's own wording requires stop to be "distinct from a dropped
+    connection", and a raw aborted fetch is, at the transport level,
+    indistinguishable from a real network failure. The widget's own
+    `AbortController` (widget/chat/src/chat-controller.js) is used to
+    stop the WIDGET's own local reading/rendering of the stream
+    immediately (so the input re-enables without waiting on a round
+    trip); THIS endpoint is the one thing that actually tells the
+    backend to cancel generation.
+
+    No request body, no `conversation_id` -- `_get_active_streams()`'s
+    own existing cap is already "1 concurrent stream per visitor"
+    (docs/SPEC.md §9), so a visitor's own vid alone unambiguously
+    identifies which turn (if any) to stop; it is the same identity the
+    concurrent-stream guard already keys on.
+
+    Idempotent and a deliberate no-op, never an error, when nothing is
+    running for this visitor (already finished, already stopped, or
+    never started) -- matches `/chat`'s own "busy conversation" 409
+    being the ONLY conflict signal this API surfaces; "stop" has no
+    comparable failure mode worth reporting, and a visitor's own stop
+    click racing the stream's natural completion is a normal, expected
+    timing, not an error.
+    """
+    request.state.cors_allowed_origin = identity.org
+    active_streams = _get_active_streams(request)
+    if identity.vid in active_streams:
+        _get_stop_requests(request).add(identity.vid)
+    return Response(status_code=204)
 
 
 # --- Task 4.2: conversations endpoints (docs/SPEC.md §10) -------------------
@@ -837,17 +900,15 @@ async def create_chat_turn(payload: ChatRequest, request: Request) -> Response:
 
 @router.get("/conversations", response_model=ConversationListResponse)
 async def list_conversations_endpoint(
-    response: Response,
+    request: Request,
     identity: VerifiedIdentity = Depends(get_current_visitor),  # noqa: B008
     session: AsyncSession = Depends(get_db_session),  # noqa: B008
 ) -> ConversationListResponse:
-    # [ops bugfix]: Access-Control-Allow-Origin on the real response too
-    # (not just the OPTIONS preflight above) -- `identity.org` is the
-    # SAME already-validated origin /chat's own real streaming response
-    # echoes back (get_current_visitor() already checked it equals the
-    # request's real Origin header before this handler ever ran).
-    response.headers["Access-Control-Allow-Origin"] = identity.org
-    response.headers["Vary"] = "Origin"
+    # [SECURITY] Step 7-follow-up: see create_chat_turn()'s own matching
+    # comment -- app.auth.cors.WidgetCORSMiddleware attaches the real
+    # CORS header to whatever response follows this line, success or
+    # error, with no header to set per branch.
+    request.state.cors_allowed_origin = identity.org
     repo = TenantScopedRepository(tenant_id=identity.tenant_id, session=session)
     conversations = await repo.list_conversations(
         identity.vid, max_results=get_settings().conversation_list_max_results
@@ -869,10 +930,9 @@ async def list_conversations_endpoint(
 async def get_conversation_messages(
     cid: uuid.UUID,
     request: Request,
-    response: Response,
     identity: VerifiedIdentity = Depends(get_current_visitor),  # noqa: B008
     session: AsyncSession = Depends(get_db_session),  # noqa: B008
-) -> ConversationMessagesResponse | JSONResponse:
+) -> ConversationMessagesResponse:
     """docs/SPEC.md §10: "history, showing completed turns only".
 
     Reads the real LangGraph checkpoint via `read_state()` (the same
@@ -893,26 +953,27 @@ async def get_conversation_messages(
     (whether/when to build one) this task does not make unilaterally --
     see PROJECT_SPEC.md's own new §9 marker.
     """
-    # [ops bugfix]: see list_conversations_endpoint()'s own comment just
-    # above -- same fix, same reasoning, set unconditionally so EVERY
-    # branch below (including the 404) carries it, not only the success
-    # path.
-    response.headers["Access-Control-Allow-Origin"] = identity.org
-    response.headers["Vary"] = "Origin"
+    # [SECURITY] Step 7-follow-up: see list_conversations_endpoint()'s
+    # own matching comment -- set once, unconditionally, so EVERY branch
+    # below (including the 404) is covered by the middleware, not only
+    # the success path.
+    request.state.cors_allowed_origin = identity.org
 
     repo = TenantScopedRepository(tenant_id=identity.tenant_id, session=session)
     conversation = await repo.get_conversation_by_id(cid, vid=identity.vid)
     if conversation is None or conversation.vid != identity.vid:
-        # A plain JSONResponse, not `raise HTTPException`: FastAPI's
-        # exception handling constructs its own response independently
-        # of this handler's own `response` parameter, which would
-        # silently drop the CORS headers just set above for this one
-        # branch -- returning explicitly is what keeps them attached.
-        return JSONResponse(
-            status_code=404,
-            content={"detail": "conversation not found"},
-            headers=dict(response.headers),
-        )
+        # [SECURITY] A plain `raise HTTPException` is fine here -- unlike
+        # the FastAPI-injected `response: Response` DI parameter the
+        # prior widget bugfix batch had to work around, Starlette's own
+        # `ExceptionMiddleware` sits BELOW app.auth.cors.
+        # WidgetCORSMiddleware in the stack, so it converts this
+        # exception into a real Response BEFORE this middleware's own
+        # `call_next()` ever returns -- confirmed live (not assumed): a
+        # direct probe raising HTTPException after setting `request.
+        # state.cors_allowed_origin` showed the header correctly attached
+        # by the outer middleware. See PROJECT_SPEC.md's own decision-log
+        # entry for this task for the exact script and output.
+        raise HTTPException(status_code=404, detail="conversation not found")
 
     graph = request.app.state.graph
     snapshot = await read_state(graph, identity, cid)

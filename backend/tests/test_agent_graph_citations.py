@@ -335,7 +335,7 @@ async def test_streamed_text_equals_persisted_text_when_escaping_fires(monkeypat
 
     state["messages"] = [HumanMessage(content="q")]
 
-    result = await graph_module._answer_node(state)
+    result = await graph_module._answer_node(state, {})
 
     streamed = "".join(e["text"] for e in writer_events)
     persisted = result["messages"][0].content
@@ -364,7 +364,7 @@ async def test_streamed_text_equals_persisted_text_on_the_happy_path(monkeypatch
         "prepared_query": "q",
         "retrieved_chunks": [_chunk("doc-a", "Alpha.", "https://example.com/a")],
     }
-    result = await graph_module._answer_node(state)
+    result = await graph_module._answer_node(state, {})
 
     streamed = "".join(e["text"] for e in writer_events)
     assert streamed == result["messages"][0].content == "A perfectly plain answer."
@@ -391,7 +391,7 @@ async def test_citations_state_matches_what_was_cited_and_actually_retrieved(mon
             _chunk("doc-b", "Beta (upload).", None),
         ],
     }
-    result = await graph_module._answer_node(state)
+    result = await graph_module._answer_node(state, {})
 
     assert result["cited_chunk_labels"] == ["c1", "c99", "c2"]
     assert result["citations"] == [{"url": "https://example.com/a", "heading_path": []}]

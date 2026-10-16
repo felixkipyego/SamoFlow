@@ -24,6 +24,7 @@
 # qdrant_client at all, and is REMOVED from CLIENT_ACCESS_ALLOWLIST again.
 import logging
 import re
+from contextlib import aclosing
 from typing import TypedDict
 from urllib.parse import urlsplit
 
@@ -45,6 +46,7 @@ from pydantic import BaseModel, Field
 from app.agent.chat_model import get_chat_model
 from app.agent.context import (
     quota_exhausted_from_config,
+    stop_requested_from_config,
     support_text_from_config,
     tenant_id_from_config,
 )
@@ -143,6 +145,22 @@ class AgentState(MessagesState):
     resolved_model: str | None
     prompt_tokens: int | None
     completion_tokens: int | None
+    # Part D (docs/SPEC.md §9's "Stop mid-stream"): `_answer_node`'s own
+    # signal that this turn's `AIMessage` is a PARTIAL answer, broken off
+    # early by an explicit visitor stop request -- never set by any other
+    # node, and only ever True once `started_emitting` is already True
+    # (see `_answer_node`'s own docstring for why a stop before any real
+    # text has streamed is never honoured as a "stopped" turn at all).
+    # Plain (OVERWRITE), reset every turn by `_reset_turn_state_node`,
+    # same reasoning as every other per-turn field above: a stale True
+    # from an earlier turn must never linger into a later, normally-
+    # completed one. Read by `app/chat/routes.py` to add `"stopped":
+    # true` to the `done` SSE event -- same "only the MOST RECENT turn's
+    # own value is ever recoverable from state" limitation `citations`
+    # already has (Task 3.4.e's own decision, reused here rather than
+    # re-litigated): a conversation's history has no per-message record
+    # of which earlier turns were stopped, only this turn's own.
+    answer_stopped: bool
 
 
 # Task 3.4.e [SECURITY-adjacent]: every per-turn field in AgentState,
@@ -197,6 +215,7 @@ def _reset_turn_state_node(state: AgentState) -> dict:
         "resolved_model": None,
         "prompt_tokens": None,
         "completion_tokens": None,
+        "answer_stopped": False,
     }
 
 
@@ -1042,7 +1061,7 @@ def _build_citations(
     return citations
 
 
-async def _answer_node(state: AgentState) -> dict:
+async def _answer_node(state: AgentState, config: RunnableConfig) -> dict:
     """The real Retrieval Specialist's own answer step (Task 3.4.b, output
     safety/citations added at Task 3.4.c): turns the Answer tool's own
     streaming JSON into SANITISED visible text, emitted as `{"type":
@@ -1106,6 +1125,38 @@ async def _answer_node(state: AgentState) -> dict:
         has already started delivering (confirmed live) -- and no
         partial answer, and (since Task 3.4.g) no citations either, is
         ever returned as completed state in either case.
+
+    Part D (docs/SPEC.md §9's "Stop mid-stream" -- "distinct from a
+    dropped connection... the server must actually cancel generation...
+    the partial answer is kept, marked as stopped, and stored as an
+    interrupted turn"): `config`'s own `stop_requested` (`app.agent.
+    context.stop_requested_from_config()`) is checked once per emitted
+    delta, ONLY after `started_emitting` is already True for THIS call
+    -- never before. A stop that lands before the model has streamed any
+    real answer text yet is deliberately NOT honoured as a "stopped"
+    turn at all: it simply lets the loop continue to its own next
+    decision point (either the fast `can_answer=False` return above, or
+    the first real delta), because there is no partial answer to keep in
+    that case, and the spec's own wording ("the partial answer is kept")
+    presumes one exists. This also means a stop is only ever actually
+    applied from inside the SAME branch that guarantees `can_answer_
+    value` is already True, so the loop can safely `break` straight into
+    this node's own EXISTING post-loop citation-building/return code
+    below -- no separate early-return path, no risk of a stopped turn
+    ever claiming `can_answer=False` or skipping usage/citation
+    bookkeeping that already works correctly for a normal completion.
+
+    The underlying model stream is wrapped in `contextlib.aclosing()`,
+    not a bare `async for` -- confirmed live, not assumed: breaking out
+    of an `async for` loop does NOT itself call `.aclose()` on the
+    underlying async generator (that only happens via GC, eventually),
+    which would leave the model provider's own HTTP stream connection
+    open and still generating/billing tokens after a visitor's stop
+    click even though this node stopped reading them. `aclosing()`
+    guarantees `.aclose()` runs on normal completion, on `break`, AND on
+    an exception -- the real mechanism that makes "the server must
+    actually cancel generation" true, not merely "the server stops
+    looking at the generation."
     """
     writer = get_stream_writer()
     # Task 3.7.a follow-up [correctness]: `state["prepared_query"]`
@@ -1150,43 +1201,54 @@ async def _answer_node(state: AgentState) -> dict:
     # not skip the usage-only chunk, which carries no tool_call_chunks
     # at all.
     accumulated_chunk: AIMessageChunk | None = None
+    was_stopped = False
     try:
-        async for chunk in model.astream(messages):
-            accumulated_chunk = chunk if accumulated_chunk is None else accumulated_chunk + chunk
-            tool_call_chunks = chunk.tool_call_chunks
-            if not tool_call_chunks or not tool_call_chunks[0].get("args"):
-                continue
-            accumulated_args += tool_call_chunks[0]["args"]
-            partial = parse_partial_json(accumulated_args) or {}
-
-            if not can_answer_known and "can_answer" in partial:
-                can_answer_known = True
-                can_answer_value = bool(partial["can_answer"])
-                if not can_answer_value:
-                    # Relies on `_reset_turn_state_node` (Task 3.4.e) for
-                    # `cited_chunk_labels`/`citations` already being this
-                    # turn's own fresh `[]` -- not re-set here
-                    # redundantly (see that node's own header comment).
-                    return {"can_answer": False}
-
-            if not can_answer_known or not can_answer_value:
-                continue
-
-            new_answer = partial.get("answer") or ""
-            if len(new_answer) < len(emitted_raw_answer) or not new_answer.startswith(
-                emitted_raw_answer
-            ):
-                raise AnswerStreamNotAppendOnlyError(
-                    f"partial answer text shrank or diverged: had {emitted_raw_answer!r}, "
-                    f"now {new_answer!r}"
+        async with aclosing(model.astream(messages)) as stream:
+            async for chunk in stream:
+                accumulated_chunk = (
+                    chunk if accumulated_chunk is None else accumulated_chunk + chunk
                 )
-            if len(new_answer) > len(emitted_raw_answer):
-                delta = new_answer[len(emitted_raw_answer) :]
-                emitted_raw_answer = new_answer
-                sanitized_delta = _sanitize_answer_text(delta)
-                writer({"type": "token", "text": sanitized_delta})
-                started_emitting = True
-                emitted_sanitized += sanitized_delta
+                tool_call_chunks = chunk.tool_call_chunks
+                if not tool_call_chunks or not tool_call_chunks[0].get("args"):
+                    continue
+                accumulated_args += tool_call_chunks[0]["args"]
+                partial = parse_partial_json(accumulated_args) or {}
+
+                if not can_answer_known and "can_answer" in partial:
+                    can_answer_known = True
+                    can_answer_value = bool(partial["can_answer"])
+                    if not can_answer_value:
+                        # Relies on `_reset_turn_state_node` (Task 3.4.e)
+                        # for `cited_chunk_labels`/`citations` already
+                        # being this turn's own fresh `[]` -- not re-set
+                        # here redundantly (see that node's own header
+                        # comment).
+                        return {"can_answer": False}
+
+                if not can_answer_known or not can_answer_value:
+                    continue
+
+                new_answer = partial.get("answer") or ""
+                if len(new_answer) < len(emitted_raw_answer) or not new_answer.startswith(
+                    emitted_raw_answer
+                ):
+                    raise AnswerStreamNotAppendOnlyError(
+                        f"partial answer text shrank or diverged: had {emitted_raw_answer!r}, "
+                        f"now {new_answer!r}"
+                    )
+                if len(new_answer) > len(emitted_raw_answer):
+                    delta = new_answer[len(emitted_raw_answer) :]
+                    emitted_raw_answer = new_answer
+                    sanitized_delta = _sanitize_answer_text(delta)
+                    writer({"type": "token", "text": sanitized_delta})
+                    started_emitting = True
+                    emitted_sanitized += sanitized_delta
+                    # Part D: see this node's own docstring for why the
+                    # check lives HERE specifically (only once real
+                    # answer text exists to stop).
+                    if stop_requested_from_config(config):
+                        was_stopped = True
+                        break
     except AnswerStreamNotAppendOnlyError:
         raise
     except Exception as exc:
@@ -1240,6 +1302,7 @@ async def _answer_node(state: AgentState) -> dict:
         "resolved_model": resolved_model,
         "prompt_tokens": usage.get("input_tokens") if usage else None,
         "completion_tokens": usage.get("output_tokens") if usage else None,
+        "answer_stopped": was_stopped,
     }
 
 
