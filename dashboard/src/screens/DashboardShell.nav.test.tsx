@@ -5,6 +5,7 @@ import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import { DashboardShell } from "./DashboardShell";
+import * as escalationApi from "@/lib/escalation-api";
 import * as tenantApi from "@/lib/tenant-api";
 
 const session = {
@@ -16,6 +17,9 @@ describe("DashboardShell navigation", () => {
   it("starts on Overview and switches screens when a sidebar item is clicked", async () => {
     vi.spyOn(tenantApi, "getTenantConfig").mockImplementation(() => new Promise(() => {}));
     vi.spyOn(tenantApi, "getGoLiveCheck").mockImplementation(() => new Promise(() => {}));
+    vi.spyOn(escalationApi, "getOpenEscalationCount").mockImplementation(
+      () => new Promise(() => {}),
+    );
     render(<DashboardShell session={session} onLoggedOut={vi.fn()} />);
 
     expect(screen.getByRole("heading", { name: "Overview" })).toBeInTheDocument();

@@ -3,6 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { DashboardShell } from "./DashboardShell";
 import * as api from "@/lib/api";
+import * as escalationApi from "@/lib/escalation-api";
 import * as tenantApi from "@/lib/tenant-api";
 
 const session = {
@@ -25,6 +26,11 @@ describe("DashboardShell", () => {
       has_enabled_source: false,
       ready_for_go_live: false,
     });
+    // DashboardShell also fetches the sidebar's own open-escalation
+    // count unconditionally on mount, regardless of which screen is
+    // active -- mocked for the identical reason as getGoLiveCheck
+    // above.
+    vi.spyOn(escalationApi, "getOpenEscalationCount").mockResolvedValue({ count: 0 });
   });
 
   it("shows the tenant name and the signed-in user's email", async () => {

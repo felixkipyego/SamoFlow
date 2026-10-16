@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useCallback, useState } from "react";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -11,6 +11,8 @@ import {
 } from "@/components/ui/dialog";
 import { Sidebar } from "@/components/Sidebar";
 import { logout, type DashboardSessionResponse } from "@/lib/api";
+import { getOpenEscalationCount } from "@/lib/escalation-api";
+import { useAsyncData } from "@/lib/use-async-data";
 import { InboxScreen } from "@/screens/InboxScreen";
 import { OverviewScreen } from "@/screens/OverviewScreen";
 import type { ScreenKey } from "@/screens/screens";
@@ -24,7 +26,13 @@ interface DashboardShellProps {
   onLoggedOut: () => void;
 }
 
-function ActiveScreen({ screen }: { screen: ScreenKey }) {
+function ActiveScreen({
+  screen,
+  onOpenCountChanged,
+}: {
+  screen: ScreenKey;
+  onOpenCountChanged: () => void;
+}) {
   switch (screen) {
     case "overview":
       return <OverviewScreen />;
@@ -33,7 +41,7 @@ function ActiveScreen({ screen }: { screen: ScreenKey }) {
     case "sources":
       return <SourcesScreen />;
     case "inbox":
-      return <InboxScreen />;
+      return <InboxScreen onOpenCountChanged={onOpenCountChanged} />;
     case "usage":
       return <UsageScreen />;
     case "settings":
@@ -44,6 +52,9 @@ function ActiveScreen({ screen }: { screen: ScreenKey }) {
 export function DashboardShell({ session, onLoggedOut }: DashboardShellProps) {
   const [loggingOut, setLoggingOut] = useState(false);
   const [screen, setScreen] = useState<ScreenKey>("overview");
+  const openCountFetcher = useCallback(() => getOpenEscalationCount(), []);
+  const { state: openCountState, reload: reloadOpenCount } = useAsyncData(openCountFetcher);
+  const openEscalationCount = openCountState.status === "ready" ? openCountState.data.count : null;
 
   async function handleConfirmLogout() {
     setLoggingOut(true);
@@ -96,9 +107,13 @@ export function DashboardShell({ session, onLoggedOut }: DashboardShellProps) {
         </Dialog>
       </header>
       <div className="flex flex-1">
-        <Sidebar active={screen} onNavigate={setScreen} openEscalationCount={null} />
+        <Sidebar
+          active={screen}
+          onNavigate={setScreen}
+          openEscalationCount={openEscalationCount}
+        />
         <main className="flex-1 p-6">
-          <ActiveScreen screen={screen} />
+          <ActiveScreen screen={screen} onOpenCountChanged={reloadOpenCount} />
         </main>
       </div>
     </div>
