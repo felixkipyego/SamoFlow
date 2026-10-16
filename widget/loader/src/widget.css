@@ -15,6 +15,16 @@
  * CSS (color, font-family, line-height, ...) from crossing into this
  * shadow tree -- shadow DOM isolates selectors by construction, but
  * inherited properties still cascade through :host unless reset.
+ *
+ * [ops bugfix] `all: initial` does NOT reset custom properties (the
+ * `all` shorthand is explicitly scoped to normal CSS properties) -- so
+ * `--sf-primary`/`--sf-primary-text`, set on the shadow HOST element
+ * itself (loader/src/widget.js, chat/src/mount.js), still inherit
+ * through `:host` into this stylesheet's own `.samoflow-launcher` rule
+ * below, exactly as they already do into chat.css's rules on the other
+ * side of the same shadow root -- before this fix, the launcher
+ * hardcoded a literal color with no `var()` reference at all, which is
+ * the whole reason it never picked up the tenant's brand color.
  */
 :host {
   all: initial;
@@ -40,8 +50,8 @@
   height: 56px;
   padding: 0 16px;
   border-radius: 28px;
-  background: #4f46e5;
-  color: #fff;
+  background: var(--sf-primary, #4f46e5);
+  color: var(--sf-primary-text, #fff);
   border: none;
   cursor: pointer;
   font: 14px/1 system-ui, -apple-system, sans-serif;
@@ -49,6 +59,13 @@
 }
 
 .samoflow-launcher:focus-visible {
+  /* Deliberately NOT tied to --sf-primary-text: this outline sits
+   * OUTSIDE the button (outline-offset below), over the HOST PAGE's own
+   * background, not the button's fill -- a color chosen for contrast
+   * against the tenant's primary color has no bearing on contrast
+   * against an arbitrary host page, so changing this would not be a
+   * real fix, just a different fixed value. Out of scope for this bug
+   * (readability of the launcher's own text/icon against its fill). */
   outline: 2px solid #fff;
   outline-offset: 2px;
 }
