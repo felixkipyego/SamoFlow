@@ -378,6 +378,72 @@
         "title": "DomainResponse",
         "type": "object"
       },
+      "EscalationDetailResponse": {
+        "properties": {
+          "contact_email": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Contact Email"
+          },
+          "contact_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Contact Name"
+          },
+          "contact_phone": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Contact Phone"
+          },
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "transcript": {
+            "title": "Transcript",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "status",
+          "contact_name",
+          "contact_email",
+          "contact_phone",
+          "created_at",
+          "transcript"
+        ],
+        "title": "EscalationDetailResponse",
+        "type": "object"
+      },
       "EscalationRequest": {
         "additionalProperties": false,
         "properties": {
@@ -438,6 +504,83 @@
           "status"
         ],
         "title": "EscalationResponse",
+        "type": "object"
+      },
+      "EscalationSummaryResponse": {
+        "properties": {
+          "contact_email": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Contact Email"
+          },
+          "contact_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Contact Name"
+          },
+          "contact_phone": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Contact Phone"
+          },
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "status",
+          "contact_name",
+          "contact_email",
+          "contact_phone",
+          "created_at"
+        ],
+        "title": "EscalationSummaryResponse",
+        "type": "object"
+      },
+      "EscalationsListResponse": {
+        "properties": {
+          "escalations": {
+            "items": {
+              "$ref": "#/components/schemas/EscalationSummaryResponse"
+            },
+            "title": "Escalations",
+            "type": "array"
+          }
+        },
+        "required": [
+          "escalations"
+        ],
+        "title": "EscalationsListResponse",
         "type": "object"
       },
       "GoLiveCheckResponse": {
@@ -528,6 +671,19 @@
           "password"
         ],
         "title": "LoginRequest",
+        "type": "object"
+      },
+      "OpenEscalationCountResponse": {
+        "properties": {
+          "count": {
+            "title": "Count",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "count"
+        ],
+        "title": "OpenEscalationCountResponse",
         "type": "object"
       },
       "RetentionUpdate": {
@@ -1003,6 +1159,24 @@
         "title": "TraceTextUpdate",
         "type": "object"
       },
+      "UpdateEscalationStatusRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "status": {
+            "enum": [
+              "seen",
+              "resolved"
+            ],
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "status"
+        ],
+        "title": "UpdateEscalationStatusRequest",
+        "type": "object"
+      },
       "UpdateUrlsSourceRequest": {
         "additionalProperties": false,
         "properties": {
@@ -1034,6 +1208,59 @@
           }
         },
         "title": "UpdateUrlsSourceRequest",
+        "type": "object"
+      },
+      "UsageResponse": {
+        "properties": {
+          "fraction_used": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Fraction Used"
+          },
+          "plan_assigned": {
+            "title": "Plan Assigned",
+            "type": "boolean"
+          },
+          "quota": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Quota"
+          },
+          "state": {
+            "enum": [
+              "no_plan",
+              "normal",
+              "warning",
+              "exceeded"
+            ],
+            "title": "State",
+            "type": "string"
+          },
+          "used_this_month": {
+            "title": "Used This Month",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "plan_assigned",
+          "quota",
+          "used_this_month",
+          "fraction_used",
+          "state"
+        ],
+        "title": "UsageResponse",
         "type": "object"
       },
       "ValidationError": {
@@ -1580,6 +1807,188 @@
           }
         ],
         "summary": "Verify Domain"
+      }
+    },
+    "/api/v1/dashboard/escalations": {
+      "get": {
+        "operationId": "list_escalations_api_v1_dashboard_escalations_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EscalationsListResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "security": [
+          {
+            "APIKeyCookie": []
+          }
+        ],
+        "summary": "List Escalations"
+      }
+    },
+    "/api/v1/dashboard/escalations/open-count": {
+      "get": {
+        "operationId": "get_open_escalation_count_api_v1_dashboard_escalations_open_count_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OpenEscalationCountResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "security": [
+          {
+            "APIKeyCookie": []
+          }
+        ],
+        "summary": "Get Open Escalation Count"
+      }
+    },
+    "/api/v1/dashboard/escalations/{escalation_id}": {
+      "delete": {
+        "operationId": "delete_escalation_api_v1_dashboard_escalations__escalation_id__delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "escalation_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Escalation Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "APIKeyCookie": []
+          }
+        ],
+        "summary": "Delete Escalation"
+      },
+      "get": {
+        "operationId": "get_escalation_api_v1_dashboard_escalations__escalation_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "escalation_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Escalation Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EscalationDetailResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "APIKeyCookie": []
+          }
+        ],
+        "summary": "Get Escalation"
+      }
+    },
+    "/api/v1/dashboard/escalations/{escalation_id}/status": {
+      "patch": {
+        "operationId": "update_escalation_status_api_v1_dashboard_escalations__escalation_id__status_patch",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "escalation_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Escalation Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateEscalationStatusRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EscalationSummaryResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "APIKeyCookie": []
+          }
+        ],
+        "summary": "Update Escalation Status"
       }
     },
     "/api/v1/dashboard/sources": {
@@ -2348,6 +2757,29 @@
           }
         ],
         "summary": "Update Widget Look"
+      }
+    },
+    "/api/v1/dashboard/usage": {
+      "get": {
+        "operationId": "get_usage_api_v1_dashboard_usage_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UsageResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "security": [
+          {
+            "APIKeyCookie": []
+          }
+        ],
+        "summary": "Get Usage"
       }
     },
     "/api/v1/session": {
