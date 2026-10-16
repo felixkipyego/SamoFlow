@@ -66,3 +66,14 @@ e2bee49e8d8706c23f3cf734a279903dc5e299a7:backend/tests/test_tokens.py:generic-ap
 # than leaving a permanent, unexplained finding for Step 7.2 to
 # re-discover and have to re-investigate from scratch.
 037028ed98f2fd228f58b83978f645b0b86120e9:backend/adversarial_probe_DELETE_ME.py:github-pat:1
+
+# PROJECT_SPEC.md (commit 49ec872, fixed one commit later by 6777f88):
+# this batch's own PART B decision-log paragraph originally repeated
+# ops/security/scan-secrets.sh's own GITLEAKS_IMAGE digest (a public,
+# well-known Docker image digest, not a secret) in prose -- a 64-char
+# hex string is itself indistinguishable from a real secret to a
+# generic entropy-based scanner. Fixed by removing the duplicate (the
+# digest now lives in exactly one place, the script itself); kept
+# visible in history, never rewritten, same reasoning as the
+# adversarial-probe entry above.
+49ec872fde67f4fa56645d928159777daa3b891b:PROJECT_SPEC.md:generic-api-key:7680
