@@ -365,6 +365,23 @@ async def get_widget_appearance(
     if not site_key_limiter.check(site_key_limit_key):
         return _rate_limited_response(site_key_limiter.get_retry_after(site_key_limit_key))
 
+    # [SECURITY] Named, not silently left, timing-class asymmetry (PART
+    # 0 audit, 2026-10-16): body and status are byte-identical across
+    # all three failure reasons (test_widget_appearance.py's own
+    # `test_unknown_suspended_or_inactive_tenant_all_get_the_identical_
+    # generic_response`), but this branch and the suspended/unknown one
+    # above do NOT cost the same number of queries -- an inactive-tenant
+    # request does a SECOND query (get_tenant(), below) a merely-unknown
+    # or merely-suspended site key never reaches. This is the exact same
+    # shape `/session`'s own `create_session()` has for its own
+    # identical four-reasons-one-response design (step (d) there also
+    # does one more query than steps (b)/(c)) -- not a new gap this
+    # endpoint introduces, and not fixed here: equalizing query count
+    # (or deliberately padding latency) is its own fragile piece of
+    # work that would need doing for BOTH endpoints together, and a
+    # single extra local Postgres round-trip is a weak signal against
+    # real network jitter for any remote attacker. Flagged in the
+    # register rather than quietly assumed away.
     row = await get_site_key_by_key(session, site_key)
     if row is None or row.status == "suspended":
         return _appearance_not_found()

@@ -223,6 +223,34 @@ async def test_per_ip_rate_limit_trips_with_retry_after(monkeypatch, _seeded):
     assert "retry-after" in {k.lower() for k in limited.headers}
 
 
+async def test_per_site_key_rate_limit_trips_independently_of_the_per_ip_one(monkeypatch, _seeded):
+    # [SECURITY] PART 0 audit: the per-IP limiter (tested above) and the
+    # per-(ip, site_key) limiter are two SEPARATE `RateLimiter`
+    # instances with disjoint keys -- this proves the second one
+    # actually trips too, not merely that SOME limiter exists. The
+    # per-IP budget is set deliberately HIGH here so it could never
+    # trip first and mask this one.
+    set_valid_env(
+        monkeypatch,
+        VALID_ENV,
+        WIDGET_APPEARANCE_RATE_LIMIT_PER_SITE_KEY="2",
+        WIDGET_APPEARANCE_RATE_LIMIT_PER_IP="1000",
+    )
+    get_settings.cache_clear()
+    app = create_app()
+    async with await http_client(app) as client:
+        for _ in range(2):
+            response = await client.get(
+                "/api/v1/widget-appearance", params={"site_key": "pk_live_live_key"}
+            )
+            assert response.status_code != 429
+        limited = await client.get(
+            "/api/v1/widget-appearance", params={"site_key": "pk_live_live_key"}
+        )
+    assert limited.status_code == 429
+    assert "retry-after" in {k.lower() for k in limited.headers}
+
+
 async def test_no_preflight_handler_needed_a_plain_get_has_no_custom_headers(monkeypatch, _seeded):
     # Documents, rather than merely asserts, WHY no OPTIONS route exists
     # for this endpoint: a plain cross-origin GET with no custom request
