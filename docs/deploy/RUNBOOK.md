@@ -372,3 +372,49 @@ specific migration you're reverting past is confirmed safe to reverse
 this project are additive-only and were never written with a real
 downgrade path in mind). If in doubt, restore from the most recent
 nightly backup (§6) into a fresh stack instead of downgrading in place.
+
+## 11. Local demo
+
+`ops/demo/start.sh` brings up a full local stack -- postgres/qdrant/api/
+worker (Docker, its own Compose project `samoflow-demo`, distinct ports
+from any other stack already running), the real dashboard dev server,
+and a static page embedding the real widget -- with a seeded demo
+tenant, a Growth-plan assignment, a site key, support details, and the
+golden-set pages uploaded as content. Idempotent: rerunning it resumes
+the same seeded tenant/content rather than starting from scratch, except
+the owner's password, which is ALWAYS freshly rotated and printed once
+(never persisted anywhere, including by the script itself).
+
+```
+./ops/demo/start.sh
+# ... prints the dashboard URL, login email, a fresh password, and the
+# widget test page URL at the end ...
+./ops/demo/stop.sh   # stops containers + the two dev servers; data volume kept
+```
+
+Needs `.env` at the repo root with a real `OPENAI_API_KEY` (chat answers
+and embeddings both need it); the script creates `.env` from
+`.env.example` and exits with instructions if one didn't already exist.
+Uses Chrome for the widget test page (other browsers are not verified
+against the widget's shadow-DOM/CSP requirements for this quick local
+check).
+
+Never touches any other Compose project or container on this machine
+(`COMPOSE_PROJECT_NAME=samoflow-demo`, distinct host ports for every
+published service) -- safe to run alongside a track worktree's own
+`make up`.
+
+**Known limitation, by design, not a defect**: a citation badge never
+appears on an answer in this local demo. docs/SPEC.md §6.3 restricts
+citations to domain-verified web pages ("Sources shown... for web pages
+only. No labels for uploads or database content") -- `app/agent/
+graph.py`'s own `_build_citations()` drops any chunk whose `source_url`
+is `None`, which every chunk ingested through the upload path (`POST
+/api/v1/dashboard/sources/upload`, this demo's only way to get content
+in without a real, publicly-resolvable domain) always is. Domain
+verification itself cannot happen against `127.0.0.1` either --
+`app/ingest/safe_fetch.py`'s SSRF guard correctly rejects loopback/
+private destinations, by design, with no dev-mode bypass. Answers are
+still real, grounded, and correctly cited IN SUBSTANCE (confirmed live
+against this demo's own content); only the citation UI badge, which
+needs a real crawled/verified domain, cannot be demonstrated locally.

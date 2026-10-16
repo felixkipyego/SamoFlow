@@ -7594,6 +7594,14 @@ A new §9 marker (owner Step 7.2, see §9 below) records the deeper lesson: the 
 
 Verified: full offline `backend/tests` suite, **1155 passed, 568 skipped** (two new tests included), `ruff check backend evals hooks.py` clean, both new `deploy/smoke-image.sh` checks (g)/(h) pass live against the real rebuilt image, `docker ps -a` / `docker network ls` confirmed clean afterward.
 
+### Production bug fix: worker healthcheck timeout margin (2026-10-16)
+
+Found and fixed while verifying the local demo (`ops/demo/start.sh`): `samoflow-demo-worker-1` reported `unhealthy` after a forced Docker restart. Diagnosed as a real defect, not a transient engine hiccup: `docker exec`-ing `deploy/docker-compose.yml`'s own worker healthcheck command directly inside the running container, 5 consecutive cold-process runs took **5.4-5.8 seconds every single time** — already exceeding the shared `x-healthcheck-timing` anchor's `timeout: 5s` with zero margin, since `python3 -c "... from app.worker import check_heartbeat_fresh ..."` imports the whole `app.worker` module and its own heaviest transitive dependency tree (fastembed/onnxruntime, langchain, etc.) on every single check. Confirmed by contrast: the api service's own healthcheck (`urllib.request` only, no `app.worker` import) measured 0.5-0.65s the same way. Any ordinary cold-cache moment (a fresh container start, a restart, brief CPU contention) tips an inherently ~5.5s check over a 5s timeout — exactly the "unhealthy after a forced restart" symptom reported, reproduced, and now understood, not merely worked around.
+
+**Fixed**: `deploy/docker-compose.yml`'s `worker` service now has its own `interval: 15s`/`timeout: 15s`/`retries: 3` instead of the shared `*healthcheck-timing` anchor (postgres/qdrant/phoenix/api/migrate are all cheap HTTP/TCP/`pg_isready` checks and keep the shared 5s timing unchanged). Verified live: rebuilt and recreated the demo stack with this change, then confirmed 5 consecutive real healthcheck runs inside the running container all completed in 4.5-5.8s with `FailingStreak: 0` throughout, including during active chat/escalation traffic against the same stack.
+
+Verified: `docker compose --env-file .env -f deploy/docker-compose.yml config --quiet` clean (no parse error); `docker ps` showed both `api`/`worker` healthy immediately after rebuild+recreate; `docker inspect`'s own `.State.Health.Log` showed zero timeout failures across 5 real checks afterward.
+
 
 ## 6. Project constraints
 

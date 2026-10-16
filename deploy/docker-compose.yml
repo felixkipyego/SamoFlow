@@ -275,7 +275,26 @@ services:
           "-c",
           "import sys; from app.worker import check_heartbeat_fresh; sys.exit(0 if check_heartbeat_fresh() else 1)",
         ]
-      <<: *healthcheck-timing
+      # NOT *healthcheck-timing (found live, 2026-10-16, diagnosing a
+      # real "unhealthy" worker after a forced Docker restart): `import
+      # app.worker` pulls in this project's own heaviest transitive
+      # dependency tree (fastembed/onnxruntime, langchain, etc.) through
+      # the full `app` package -- timed directly inside this exact
+      # container, 5 consecutive cold-process runs of this literal
+      # command took 5.4-5.8s EVERY time, already exceeding
+      # *healthcheck-timing's shared 5s timeout with no margin at all,
+      # unlike the api service's own healthcheck (urllib only, no
+      # `app.worker` import, ~0.5-0.65s measured the same way) -- a
+      # structural timeout-margin defect, not a transient engine hiccup:
+      # any ordinary cold-cache moment (a fresh container start, a
+      # restart, brief CPU contention) tips an inherently ~5.5s check
+      # over a 5s timeout. Interval/timeout widened well past the
+      # observed worst case; retries kept lower (3, not 5) since each
+      # individual check now has real margin instead of relying on
+      # repetition to average out a too-tight timeout.
+      interval: 15s
+      timeout: 15s
+      retries: 3
     restart: unless-stopped
 
   migrate:

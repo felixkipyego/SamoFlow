@@ -1,0 +1,23 @@
+# ops/demo/docker-compose.override.yml
+# Used ONLY by ops/demo/start.sh/stop.sh, layered on top of
+# deploy/docker-compose.yml via `-f`. deploy/docker-compose.yml's own
+# api service is hard-coded to host port 8000 -- fine for the single
+# "the" dev stack, but this local demo runs under its own Compose
+# project (COMPOSE_PROJECT_NAME=samoflow-demo) ALONGSIDE whatever other
+# docker-compose.yml-based stack (e.g. a track worktree's own `make up`)
+# is already using 8000 on this machine. A distinct host port keeps the
+# two projects from ever colliding, without touching the other stack.
+#
+# phoenix/test-db/test-qdrant are not started by start.sh at all (the
+# demo only needs postgres/qdrant/api/worker), so they need no override
+# here.
+services:
+  api:
+    # `!override` (not a plain list): Compose merges `ports:` additively
+    # by default, which would otherwise try to ALSO publish the base
+    # file's host port 8000 -- confirmed live, `docker compose config`
+    # showed both 8000 and 8010 without this tag -- and 8000 is already
+    # taken by another stack on this machine. `!override` replaces the
+    # base file's list outright instead of appending to it.
+    ports: !override
+      - "127.0.0.1:8010:8000"
