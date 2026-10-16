@@ -157,7 +157,7 @@ def build_preflight_response(request: Request, *, methods: str, headers: str) ->
 
 class WidgetCORSMiddleware(BaseHTTPMiddleware):
     """[SECURITY] The one real CORS mechanism for /session, /chat,
-    /conversations, /conversations/{cid}/messages and
+    /chat/stop, /conversations, /conversations/{cid}/messages and
     /conversations/{cid}/escalate. See this module's own header for the
     full design and the deliberate cases left without a header.
 
@@ -222,5 +222,5 @@ class WidgetCORSMiddleware(BaseHTTPMiddleware):
         # `credentials: "include"` (confirmed by reading session.js/
         # chat-controller.js directly), so the browser never attaches
         # any cookie to a cross-origin request here regardless, and this
-        # header is never sent for any of these five routes.
+        # header is never sent for any of these six routes.
         return response

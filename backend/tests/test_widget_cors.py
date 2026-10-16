@@ -369,6 +369,12 @@ async def test_chat_oversized_message_413_deliberately_gets_no_acao(monkeypatch,
         )
     assert response.status_code == 413
     assert "access-control-allow-origin" not in {k.lower() for k in response.headers}
+    # [SECURITY] Vary: Origin is still set here -- the middleware adds it
+    # to EVERY matched-route response unconditionally (app/auth/cors.py's
+    # own dispatch(), before the ACAO decision), so a cache sitting in
+    # front of this API never conflates one Origin's 413 with another's,
+    # even on a branch that deliberately never gets ACAO itself.
+    assert response.headers["vary"] == "Origin"
 
 
 async def test_chat_pool_exhaustion_503_deliberately_gets_no_acao(monkeypatch, _seeded):
@@ -408,6 +414,9 @@ async def test_chat_pool_exhaustion_503_deliberately_gets_no_acao(monkeypatch, _
             )
         assert response.status_code == 503
         assert "access-control-allow-origin" not in {k.lower() for k in response.headers}
+        # [SECURITY] Same unconditional guarantee as the 413 case above --
+        # Vary: Origin survives even a pool-exhaustion failure this early.
+        assert response.headers["vary"] == "Origin"
     finally:
         await holder.close()
         await tiny_engine.dispose()
@@ -441,6 +450,49 @@ async def test_conversations_and_escalate_never_wildcard_or_credentials(monkeypa
     for response in (list_response, escalate_response):
         assert response.headers["access-control-allow-origin"] == ORIGIN
         _assert_no_oracle(response)
+
+
+async def test_conversations_messages_and_escalate_disallowed_origin_gets_no_acao(
+    monkeypatch, _seeded
+):
+    # [SECURITY] Rule 4 ("a disallowed origin gets no ACAO on any
+    # branch"), proven on these three routes specifically -- the prior
+    # tests above only ever send the real, allowed ORIGIN; nothing in
+    # this file previously exercised a disallowed origin against
+    # /conversations, /conversations/{cid}/messages or /escalate (every
+    # disallowed-origin test elsewhere covers /session, /chat or
+    # /chat/stop only). The underlying mechanism is the SAME
+    # get_current_visitor() origin-vs-`org`-claim check already proven
+    # for /chat (test_chat_disallowed_origin_gets_no_acao_even_on_the_
+    # success_branch above) -- a 401 before the handler body (and
+    # therefore `request.state.cors_allowed_origin`) is ever reached --
+    # confirmed directly here too, not merely assumed to carry over.
+    app = await _build_app(monkeypatch)
+    token = _chat_token_for(_seeded)
+    async with db_session() as session:
+        repo = TenantScopedRepository(tenant_id=_seeded["tenant"], session=session)
+        conversation = await repo.create_conversation(vid=_seeded["visitor"])
+        await session.commit()
+        cid = conversation.cid
+
+    async with await http_client(app) as client:
+        list_response = await client.get(
+            "/api/v1/conversations",
+            headers={"Authorization": f"Bearer {token}", "Origin": DISALLOWED_ORIGIN},
+        )
+        messages_response = await client.get(
+            f"/api/v1/conversations/{cid}/messages",
+            headers={"Authorization": f"Bearer {token}", "Origin": DISALLOWED_ORIGIN},
+        )
+        escalate_response = await client.post(
+            f"/api/v1/conversations/{cid}/escalate",
+            json={},
+            headers={"Authorization": f"Bearer {token}", "Origin": DISALLOWED_ORIGIN},
+        )
+
+    for response in (list_response, messages_response, escalate_response):
+        assert response.status_code == 401
+        assert "access-control-allow-origin" not in {k.lower() for k in response.headers}
 
 
 # --- dashboard/admin stays CORS-free (D-6.1-cors-same-origin) ---------------

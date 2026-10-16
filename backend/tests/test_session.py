@@ -354,6 +354,37 @@ async def test_draft_key_fails_identically_from_a_non_allowed_origin(_seeded):
     assert _normalized(from_disallowed_origin) == _normalized(reference_failure)
 
 
+async def test_an_origin_allowed_for_one_site_key_is_rejected_for_a_different_one(_seeded):
+    # [SECURITY] The real property behind "ACAO only ever echoes an
+    # origin allowed for THAT site key" -- not just "some origin is
+    # globally disallowed" (every other failure test in this file uses
+    # DISALLOWED_ORIGIN, a string on NO site key's own allow-list at
+    # all, which cannot distinguish per-key scoping from a blanket
+    # allow-list). `site_key_live`'s own ALLOWED_ORIGIN is a perfectly
+    # real, working origin -- for its OWN site key. Presented against
+    # `site_key_draft` (same tenant, a genuinely DIFFERENT
+    # allowed_origins list: DRAFT_ALLOWED_ORIGIN only), it must fail
+    # exactly like any other disallowed origin -- proving `origin_is_
+    # allowed()` is called with THIS site key's own list (app/auth/
+    # routes.py's own `site_key.allowed_origins`), never a different
+    # key's, a cached/stale one, or a merged "any known origin" set.
+    app = create_app()
+    async with await http_client(app) as client:
+        cross_key_origin = await client.post(
+            "/api/v1/session",
+            json={"site_key": "pk_live_draft_key"},
+            headers={"Origin": ALLOWED_ORIGIN},
+        )
+        reference_failure = await client.post(
+            "/api/v1/session",
+            json={"site_key": "pk_live_does_not_exist"},
+            headers={"Origin": ALLOWED_ORIGIN},
+        )
+    assert cross_key_origin.status_code == 403
+    assert "access-control-allow-origin" not in {k.lower() for k in cross_key_origin.headers}
+    assert _normalized(cross_key_origin) == _normalized(reference_failure)
+
+
 async def test_success_response_never_leaks_private_tenant_config_fields(_seeded):
     app = create_app()
     async with await http_client(app) as client:
