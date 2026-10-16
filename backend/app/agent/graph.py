@@ -297,7 +297,7 @@ def _is_escalation_intent(state: AgentState) -> bool:
     built here (the other two -- unsafe/abusive input, quota exhausted
     -- are each already a SEPARATE `route()` rule of their own, checked
     before this one ever runs): (1) the CURRENT message matches one of
-    config/escalation_phrases.yaml's own asks-for-a-person/complaint/
+    app/agent/phrases/escalation_phrases.yaml's own asks-for-a-person/complaint/
     negative entries (`escalation_phrase_category()`, a pure, rules-
     only, no-LLM-call text matcher -- see that module's own [SECURITY]
     header comment for why this is structurally immune to prompt

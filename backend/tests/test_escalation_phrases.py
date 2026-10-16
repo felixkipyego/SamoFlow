@@ -1,5 +1,5 @@
 # backend/tests/test_escalation_phrases.py
-# Step 4.4: config/escalation_phrases.yaml + app/agent/escalation_
+# Step 4.4: phrases/escalation_phrases.yaml + app/agent/escalation_
 # phrases.py -- the real file this task loads, schema-validated, the
 # identical rigor tests/test_greeting_phrases.py's own Task 3.4.f file
 # already established.
@@ -12,7 +12,7 @@ from app.agent.escalation_phrases import _PhraseFile, escalation_phrase_category
 
 
 def test_the_real_file_loads_and_validates_against_the_schema():
-    raw = yaml.safe_load(escalation_phrases_module._PHRASES_PATH.read_text(encoding="utf-8"))
+    raw = yaml.safe_load(escalation_phrases_module._PHRASES_RESOURCE.read_text(encoding="utf-8"))
     parsed = _PhraseFile.model_validate(raw)
     assert 50 <= len(parsed.entries) <= 200  # docs/SPEC.md §7's own named range
     categories = {entry.category for entry in parsed.entries}
@@ -20,7 +20,7 @@ def test_the_real_file_loads_and_validates_against_the_schema():
 
 
 def test_every_real_entry_has_a_golden_ref():
-    raw = yaml.safe_load(escalation_phrases_module._PHRASES_PATH.read_text(encoding="utf-8"))
+    raw = yaml.safe_load(escalation_phrases_module._PHRASES_RESOURCE.read_text(encoding="utf-8"))
     parsed = _PhraseFile.model_validate(raw)
     for entry in parsed.entries:
         assert entry.golden_ref
@@ -109,7 +109,7 @@ def test_first_matching_category_wins_file_order():
     # (file order, first match), not an error or a combined result.
     # This message matches BOTH an asks_for_person pattern ("talk to a
     # real person") and a negative phrase ("worst service") --
-    # asks_for_person entries are listed first in config/escalation_
+    # asks_for_person entries are listed first in phrases/escalation_
     # phrases.yaml, so that is the real, deterministic winner.
     category = escalation_phrase_category(
         "this is the worst service, I want to talk to a real person"
@@ -135,7 +135,7 @@ def test_injected_instruction_text_does_not_suppress_a_real_trigger_phrase():
 
 def test_injected_instruction_text_does_not_force_a_match_with_no_real_trigger_phrase():
     # The converse: an instruction-shaped message that merely NAMES the
-    # word "complaint" -- but contains none of config/escalation_
+    # word "complaint" -- but contains none of phrases/escalation_
     # phrases.yaml's own actual multi-word phrases/patterns ("file a
     # complaint", "want to complain", etc.) -- matches nothing. There is
     # no semantic interpretation step here for an injected instruction

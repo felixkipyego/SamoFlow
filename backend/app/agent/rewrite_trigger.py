@@ -40,13 +40,19 @@
 #      only a slightly broader query, never a model-call latency cost.
 import re
 from functools import lru_cache
-from pathlib import Path
+from importlib import resources
 
 import yaml
 from pydantic import BaseModel
 
-# Same `parents[2]` reasoning as greeting_phrases.py's own identical line.
-_PHRASES_PATH = Path(__file__).resolve().parents[2] / "config" / "rewrite_trigger_phrases.yaml"
+# Same fix, same reasoning, as greeting_phrases.py's own identical line
+# -- see that module's own header comment for the full reasoning. The
+# yaml file lives INSIDE the `app` package (app/agent/phrases/) so it
+# is real package data, resolved through importlib.resources rather
+# than hand-computed path arithmetic.
+_PHRASES_RESOURCE = resources.files("app.agent").joinpath(
+    "phrases", "rewrite_trigger_phrases.yaml"
+)
 _SHORT_MESSAGE_WORD_THRESHOLD = 4
 _TRAILING_PUNCTUATION = re.compile(r"[!.?,;:]+$")
 _INTERNAL_WHITESPACE = re.compile(r"\s+")
@@ -69,7 +75,7 @@ def _normalize(text: str) -> str:
 
 @lru_cache
 def _load_phrase_patterns() -> tuple[re.Pattern, ...]:
-    raw = yaml.safe_load(_PHRASES_PATH.read_text(encoding="utf-8"))
+    raw = yaml.safe_load(_PHRASES_RESOURCE.read_text(encoding="utf-8"))
     parsed = _PhraseFile.model_validate(raw)
     return tuple(
         re.compile(r"\b" + re.escape(_normalize(entry.phrase)) + r"\b")

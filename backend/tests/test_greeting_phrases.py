@@ -11,7 +11,7 @@ from app.agent import greeting_phrases
 @pytest.fixture(autouse=True)
 def _clear_cache():
     # The real loader is an @lru_cache singleton -- clear before AND
-    # after every test so a monkeypatched _PHRASES_PATH in one test
+    # after every test so a monkeypatched _PHRASES_RESOURCE in one test
     # (the malformed-file cases below) can never leak a cached result
     # into a later test using the REAL file.
     greeting_phrases._load_normalized_phrases.cache_clear()
@@ -123,14 +123,14 @@ def _write_phrases_file(tmp_path, content: str):
 
 def test_malformed_yaml_raises(tmp_path, monkeypatch):
     path = _write_phrases_file(tmp_path, "entries: [this is not a list of mappings")
-    monkeypatch.setattr(greeting_phrases, "_PHRASES_PATH", path)
+    monkeypatch.setattr(greeting_phrases, "_PHRASES_RESOURCE", path)
     with pytest.raises(yaml.YAMLError):
         greeting_phrases._load_normalized_phrases()
 
 
 def test_entry_missing_required_key_raises(tmp_path, monkeypatch):
     path = _write_phrases_file(tmp_path, "entries:\n  - category: greeting\n")
-    monkeypatch.setattr(greeting_phrases, "_PHRASES_PATH", path)
+    monkeypatch.setattr(greeting_phrases, "_PHRASES_RESOURCE", path)
     with pytest.raises(Exception, match="phrase"):
         greeting_phrases._load_normalized_phrases()
 
@@ -139,20 +139,20 @@ def test_entry_with_invalid_category_raises(tmp_path, monkeypatch):
     path = _write_phrases_file(
         tmp_path, "entries:\n  - phrase: hi\n    category: not-a-real-category\n"
     )
-    monkeypatch.setattr(greeting_phrases, "_PHRASES_PATH", path)
+    monkeypatch.setattr(greeting_phrases, "_PHRASES_RESOURCE", path)
     with pytest.raises(Exception, match="category"):
         greeting_phrases._load_normalized_phrases()
 
 
 def test_missing_entries_key_raises(tmp_path, monkeypatch):
     path = _write_phrases_file(tmp_path, "not_entries: []\n")
-    monkeypatch.setattr(greeting_phrases, "_PHRASES_PATH", path)
+    monkeypatch.setattr(greeting_phrases, "_PHRASES_RESOURCE", path)
     with pytest.raises(Exception, match="entries"):
         greeting_phrases._load_normalized_phrases()
 
 
 def test_the_real_committed_file_loads_and_validates_successfully():
-    # No monkeypatch -- the real backend/config/greeting_phrases.yaml,
+    # No monkeypatch -- the real app/agent/phrases/greeting_phrases.yaml,
     # proving it is itself valid against its own schema, not just that
     # the schema works on synthetic data.
     phrases = greeting_phrases._load_normalized_phrases()

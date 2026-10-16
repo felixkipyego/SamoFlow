@@ -5,8 +5,8 @@
 # own §9 marker, owner Step 6.4, and app/agent/graph.py's own
 # _is_unsafe_or_abusive() for the full reasoning).
 #
-# Loads backend/config/greeting_phrases.yaml -- a data file, not Python,
-# mirroring the shape docs/SPEC.md §7 describes for the sibling
+# Loads app/agent/phrases/greeting_phrases.yaml -- a data file, not
+# Python, mirroring the shape docs/SPEC.md §7 describes for the sibling
 # escalation trigger-phrase file (not yet built, Step 4.4): one entry per
 # phrase, a category, loaded once (an `@lru_cache` singleton, this
 # project's own established lazy-load-once convention -- `get_settings()`
@@ -39,18 +39,31 @@
 #      exists to avoid, not a hypothetical one).
 import re
 from functools import lru_cache
-from pathlib import Path
+from importlib import resources
 from typing import Literal
 
 import yaml
 from pydantic import BaseModel
 
-# `parents[2]`: this file lives at app/agent/greeting_phrases.py, so
-# parents[0]=app/agent, parents[1]=app, parents[2]=the backend root --
-# correct both in a local checkout (backend/) and inside the built image
-# (WORKDIR /app, confirmed against the Dockerfile's own new `COPY
-# --chmod=0644 config/ ./config/` line, Task 3.4.f).
-_PHRASES_PATH = Path(__file__).resolve().parents[2] / "config" / "greeting_phrases.yaml"
+# NOT Path(__file__).resolve().parents[N] or Path.cwd(): both are real
+# production bugs, found live inside the actual built image (2026-10-16)
+# -- __file__-relative arithmetic only reaches the backend root when
+# `app` is imported from the source checkout, not once installed as a
+# real package (`pip install --no-deps .`, what the Dockerfile runs),
+# where __file__ resolves under site-packages instead; Path.cwd() only
+# happens to work when the process's current directory is whatever the
+# Dockerfile's WORKDIR happens to be, breaking for any other real entry
+# point (a different WORKDIR, a different launcher, pytest run from a
+# different directory). `importlib.resources` resolves a package's own
+# data file through Python's real import machinery instead of hand-
+# computed path arithmetic, so it is correct for an editable install, a
+# non-editable install and the built image alike -- the yaml file now
+# lives INSIDE the `app` package (app/agent/phrases/) specifically so it
+# is real package data, not a sibling directory a wheel build has no
+# reason to include.
+_PHRASES_RESOURCE = resources.files("app.agent").joinpath(
+    "phrases", "greeting_phrases.yaml"
+)
 _MAX_MESSAGE_LENGTH = 40
 _TRAILING_PUNCTUATION = re.compile(r"[!.?,;:]+$")
 _INTERNAL_WHITESPACE = re.compile(r"\s+")
@@ -74,7 +87,7 @@ def _normalize(text: str) -> str:
 
 @lru_cache
 def _load_normalized_phrases() -> frozenset[str]:
-    raw = yaml.safe_load(_PHRASES_PATH.read_text(encoding="utf-8"))
+    raw = yaml.safe_load(_PHRASES_RESOURCE.read_text(encoding="utf-8"))
     parsed = _PhraseFile.model_validate(raw)
     return frozenset(_normalize(entry.phrase) for entry in parsed.entries)
 

@@ -83,17 +83,20 @@ COPY --from=builder /venv /venv
 COPY --chmod=0755 entrypoint.sh /usr/local/bin/entrypoint.sh
 COPY --chmod=0644 alembic.ini ./alembic.ini
 COPY --chmod=0755 alembic/ ./alembic/
-# Task 3.4.f: docs/SPEC.md §7's own "a YAML file in the backend config
-# folder" convention (the escalation trigger-phrase file, Step 4.4, not
-# built yet) -- this task's own greeting/thanks phrase list is the first
-# real file in it. Read-only data, root-owned (app user never needs
-# write access to it, matching alembic.ini's own treatment exactly) --
-# `app/` alone (COPY'd in the builder stage above) does NOT include this,
-# confirmed live: this directory is a sibling of `app/`, not nested
-# inside it, and the Dockerfile's own existing COPY list is an explicit
-# allow-list, not a wildcard -- a new top-level directory is invisible to
-# the running container unless named here.
-COPY --chmod=0644 config/ ./config/
+# NOT a `COPY config/ ./config/` line here anymore: the config-path bug
+# (found live, 2026-10-16) was exactly this -- app/agent/{escalation,
+# greeting,rewrite_trigger}_phrases.py each resolved their own yaml file
+# relative to `app`'s own location (Path(__file__)-relative arithmetic,
+# then a Path.cwd()-relative follow-up fix that was just as wrong in
+# principle), and a sibling backend/config/ directory copied in as a
+# SECOND, separate COPY line was the thing that arithmetic depended on
+# existing. The three yaml files now live INSIDE the `app` package
+# (app/agent/phrases/, declared as wheel-build `include` data in
+# pyproject.toml) and are loaded via `importlib.resources` -- real
+# package data, already present in /venv's site-packages from the
+# builder stage's `pip install --no-deps .` above, with no second COPY
+# needed at all. See each phrase-loading module's own header comment for
+# the full reasoning.
 
 # Task 2.7.a: pre-create the upload-storage mount point, owned by the app
 # user, while still root. Found live, not assumed: Docker seeds a brand
