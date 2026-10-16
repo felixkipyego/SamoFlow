@@ -161,6 +161,19 @@ requirement, proven live in §6 below):
   single compromised location defeats the whole point of encrypting
   backups at all.
 
+**Full-history secret scan** (this repo is public): `./ops/security/scan-secrets.sh`
+runs a gitleaks full-history scan via its own official container image,
+pinned to an exact version and digest (never `:latest`, no new repo
+dependency -- nothing is installed, Docker pulls the image fresh each
+run). Already-reviewed false positives are suppressed via the committed
+`.gitleaksignore` (repo root), each entry carrying its own one-line
+reason. Run this as part of Step 7.2's own full security run, and
+whenever in doubt before a push -- it exits non-zero on anything not
+already in that file. If it ever finds a REAL credential: do NOT rewrite
+history (this is a shared, public repo); rotate the exposed credential
+immediately at its real provider, then follow up with whether history
+rewriting is still worth it given the credential is already rotated.
+
 ## 5. First deploy
 
 ```

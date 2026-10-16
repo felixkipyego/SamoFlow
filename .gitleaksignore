@@ -1,0 +1,68 @@
+# [SECURITY] PART B full-history scan (2026-10-17, ops/security/scan-secrets.sh).
+# Every fingerprint below was individually reviewed by reading the real
+# source at that exact commit/file/line (never assumed from the rule name
+# or entropy score alone) -- each is an obviously-labeled placeholder/
+# test-fixture value (gitleaks' own "generic-api-key" rule is a broad
+# entropy heuristic with no concept of "this literally says smoke-test/
+# placeholder/distinctive/harmless in the value itself"), confirmed NOT a
+# real credential. One line of reason per entry, as required. Re-run
+# `ops/security/scan-secrets.sh` after adding an entry here to confirm it
+# actually suppresses the finding it claims to (never add one you haven't
+# verified empirically).
+
+# deploy/smoke-image.sh: STACK_ENV/APP_ENV_ARGS hardcode throwaway values
+# for a disposable, ephemeral container the script itself starts and
+# tears down (QDRANT_API_KEY=test-qdrant-key, JWT_SIGNING_KEY=smoke-test-
+# jwt-signing-key-32-chars-ok, DATABASE_URL=...widgetplatform:change-me@...)
+# -- never a real deployment credential, confirmed by reading every one
+# of these commits' own file content directly.
+3d8f717fa985f4ff47a1dfebe1d2dae939ce9dcb:deploy/smoke-image.sh:generic-api-key:209
+1202972d978d8338d48346bf7dc8ac4dabca2888:deploy/smoke-image.sh:generic-api-key:29
+d380d9a28b8638459eec29ecce98ac712da3113e:deploy/smoke-image.sh:generic-api-key:29
+1124da6b549736f1ca879ca84ee57b8904b78160:deploy/smoke-image.sh:generic-api-key:29
+4b3b87b7e6ad21a0f27c4b0c8b682d527fcd06ce:deploy/smoke-image.sh:generic-api-key:29
+c824719a9022469d92a16644a7e66f6b92f6dc12:deploy/smoke-image.sh:generic-api-key:29
+f88f2efce3996e272799d85b7a0a5489360158ef:deploy/smoke-image.sh:generic-api-key:29
+0b823d2670941616d8b6e112f3f6932726b805ba:deploy/smoke-image.sh:generic-api-key:29
+
+# backend/scripts/generate_openapi_schema.py: _MINIMAL_ENV's own literal
+# "placeholder-..." values, used only to let app.openapi() introspect
+# routes with no real database/API connection -- confirmed by reading the
+# file directly, every value is prefixed "placeholder-" in the source.
+ebf97fc4f35800095009a02c840fbb3007a2d90c:backend/scripts/generate_openapi_schema.py:generic-api-key:44
+
+# backend/tests/test_main.py, test_alembic.py, conftest.py: Settings
+# fixture dicts (VALID_ENV and similar) carrying literal "test-jwt-
+# signing-key-at-least-32-chars"/"harmless-jwt-signing-key-32-chars-ok"/
+# "distinctive-pw-..." values, several already carrying their own
+# "# noqa: S105 (test fixture value, not a real secret)" comment --
+# confirmed by reading every one of these commits' own file content
+# directly, never a real credential.
+5e4257bbc4774c88cbed6621c43c44426701e70c:backend/tests/test_main.py:generic-api-key:168
+0b823d2670941616d8b6e112f3f6932726b805ba:backend/tests/test_main.py:generic-api-key:18
+0b823d2670941616d8b6e112f3f6932726b805ba:backend/tests/conftest.py:generic-api-key:131
+0b823d2670941616d8b6e112f3f6932726b805ba:backend/tests/test_alembic.py:generic-api-key:53
+8847278f59cec5848039f38165f1ca255086ca46:backend/tests/test_alembic.py:generic-api-key:234
+
+# backend/tests/test_tokens.py: JWT key-rotation tests, deliberately
+# using two or more DIFFERENT literal key strings in the same test
+# ("key-a-for-signing-32-characters-long-ok", "distinctive-current-key-
+# 32-characters-ok" and similar) to prove rotation actually switches
+# which key verifies a token -- confirmed by reading the file directly,
+# never a real credential.
+664457cade2b7eb96a8efb4ff92fe8a940fa65d4:backend/tests/test_tokens.py:generic-api-key:211
+664457cade2b7eb96a8efb4ff92fe8a940fa65d4:backend/tests/test_tokens.py:generic-api-key:246
+e2bee49e8d8706c23f3cf734a279903dc5e299a7:backend/tests/test_tokens.py:generic-api-key:177
+e2bee49e8d8706c23f3cf734a279903dc5e299a7:backend/tests/test_tokens.py:generic-api-key:181
+
+# backend/adversarial_probe_DELETE_ME.py (commit 037028e, reverted by
+# caeebc5 one commit later): a randomly-generated, never-real GitHub-
+# PAT-SHAPED token, committed deliberately to prove ops/security/
+# scan-secrets.sh actually fails on a genuinely new finding -- confirmed
+# live (the script exited non-zero against this exact commit before
+# this ignore entry existed), then reverted. Kept visible in history
+# (never rewritten) per this project's own "never discard work, prefer
+# a reversible step" rule -- this entry documents what it is, rather
+# than leaving a permanent, unexplained finding for Step 7.2 to
+# re-discover and have to re-investigate from scratch.
+037028ed98f2fd228f58b83978f645b0b86120e9:backend/adversarial_probe_DELETE_ME.py:github-pat:1
