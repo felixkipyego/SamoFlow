@@ -844,6 +844,41 @@ class Settings(BaseSettings):
             raise ValueError("PUBLIC_API_BASE_URL must be an https:// URL with a hostname")
         return value
 
+    # [SECURITY] L1 PART C (#7) (out-of-band Phase 7 batch, 2026-10-17):
+    # the api service's OWN public hostname (deploy/Caddyfile's
+    # {$API_HOSTNAME} -- read here from the SAME env var, not a second
+    # copy, so the two can never drift apart). app/main.py's own
+    # TrustedHostMiddleware (production only) rejects any request whose
+    # Host header is not this value or "127.0.0.1" (the api service's
+    # own healthcheck, deploy/docker-compose.yml, which curls itself
+    # over loopback and therefore never carries this public hostname).
+    # Unset in development/test (no Caddy, no public hostname to
+    # validate against) -- required in production, see
+    # _require_api_hostname_in_production below.
+    api_hostname: str | None = Field(default=None)
+    # [SECURITY] L1 PART C (#7): the ONE trust boundary for the forwarded-
+    # client-IP headers app/client_ip.py reads -- a request's own stated
+    # client IP is honoured only when the immediate TCP peer resolves (by DNS,
+    # not a hardcoded CIDR -- deploy/docker-compose.yml assigns no
+    # static subnet) to this hostname, Caddy's own service name on the
+    # compose network. "caddy" is a safe default (matches deploy/
+    # Caddyfile's own service name); an operator who runs without Caddy
+    # in front (or a Caddy under a different service name) can repoint
+    # this. An unresolvable hostname (the default "caddy" in
+    # development/test, where no such service exists at all) already
+    # degrades safely to "nothing is trusted, use the raw socket peer",
+    # so this field needs no separate explicit disable value.
+    trusted_proxy_hostname: str = Field(default="caddy")
+
+    @field_validator("api_hostname", mode="before")
+    @classmethod
+    def _empty_api_hostname_means_unset(cls, value: object) -> object:
+        # Same established convention as public_api_base_url's own
+        # before-validator above.
+        if value == "":
+            return None
+        return value
+
     @field_validator("database_url")
     @classmethod
     def _require_postgres_psycopg_scheme(cls, value: SecretStr) -> SecretStr:
@@ -1039,6 +1074,23 @@ class Settings(BaseSettings):
             # Message names only the variable(s), never a value -- see
             # check_raw_secret_values()'s own docstring.
             raise ValueError(" ".join(violations))
+        return self
+
+    # [SECURITY] L1 PART C (#7) (out-of-band Phase 7 batch, 2026-10-17):
+    # api_hostname has no app-breaking default in production the way
+    # trusted_proxy_hostname's "caddy" does -- an unset value there would
+    # leave app/main.py's TrustedHostMiddleware with no real hostname to
+    # allow, locking out every genuine request while looking, from the
+    # outside, like a silent misconfiguration rather than a loud startup
+    # failure. Same "fail fast at startup" discipline as every other
+    # required-in-production setting on this class.
+    @model_validator(mode="after")
+    def _require_api_hostname_in_production(self) -> "Settings":
+        if self.app_env == "production" and self.api_hostname is None:
+            raise ValueError(
+                "API_HOSTNAME must be set in production (deploy/Caddyfile already "
+                "requires it; app/main.py's TrustedHostMiddleware needs it too)."
+            )
         return self
 
     def database_url_str(self) -> str:

@@ -153,6 +153,93 @@ async def test_docs_disabled_in_production(monkeypatch, path):
     assert response.status_code == 404
 
 
+# [SECURITY] L1 PART C (#7) (out-of-band Phase 7 batch, 2026-10-17): Host
+# validation, app layer. deploy/Caddyfile's own per-hostname site blocks
+# already reject anything else at the proxy (no catch-all site exists
+# there) -- this is the SECOND, defence-in-depth layer, for any request
+# that reaches the api service directly. Production only (see app/
+# main.py's own comment for why); a distinct API_HOSTNAME is used here
+# instead of PRODUCTION_REALISTIC_SECRET_OVERRIDES's own "test" value
+# (chosen there only so EXISTING http_client() tests keep sending
+# Host: test unmodified) so every assertion below names the real
+# configured value explicitly.
+_HOST_VALIDATION_ENV = {
+    **VALID_ENV,
+    "APP_ENV": "production",
+    "QDRANT_API_KEY": "zQ7mK2pR9xLaUeVbNcOd",  # noqa: S105 (realistic-looking, not a real secret)
+    "QDRANT_READ_ONLY_API_KEY": "aB3dE6fG9hJkLmNoPqRs",  # noqa: S105
+    "JWT_SIGNING_KEY": "zQ7mK2pR9xLaUeVbNcOdTfGhIjKlMnOp",  # noqa: S105
+    "DB_CONNECTION_ENCRYPTION_KEY": "aB3dE6fG9hJkLmNoPqRsTuVwXyZ01234",  # noqa: S105
+    "OPENAI_API_KEY": "aB3dE6fG9hJkLmNoPqRs",  # noqa: S105 (realistic-looking, not a real secret)
+    "API_HOSTNAME": "api.example.test",
+}
+
+
+async def test_trusted_host_middleware_allows_the_configured_api_hostname(monkeypatch):
+    set_valid_env(monkeypatch, _HOST_VALIDATION_ENV)
+    app = create_app()
+    async with await http_client(app) as client:
+        response = await client.get("/health", headers={"Host": "api.example.test"})
+    assert response.status_code == 200
+
+
+async def test_trusted_host_middleware_allows_127_0_0_1_for_the_container_healthcheck(
+    monkeypatch,
+):
+    # deploy/docker-compose.yml's own api healthcheck curls
+    # http://127.0.0.1:8000/ready from inside the SAME container, over
+    # loopback -- this must keep working regardless of API_HOSTNAME.
+    set_valid_env(monkeypatch, _HOST_VALIDATION_ENV)
+    app = create_app()
+    async with await http_client(app) as client:
+        response = await client.get("/ready", headers={"Host": "127.0.0.1"})
+    assert response.status_code in (200, 503)  # a real DB check, not this test's concern
+
+
+async def test_trusted_host_middleware_rejects_an_unconfigured_host_without_leaking_hosts(
+    monkeypatch,
+):
+    set_valid_env(monkeypatch, _HOST_VALIDATION_ENV)
+    app = create_app()
+    async with await http_client(app) as client:
+        response = await client.get("/health", headers={"Host": "evil.com"})
+    assert response.status_code == 400
+    body = response.text
+    assert "api.example.test" not in body
+    assert "127.0.0.1" not in body
+
+
+async def test_trusted_host_middleware_rejects_an_ip_literal_host(monkeypatch):
+    set_valid_env(monkeypatch, _HOST_VALIDATION_ENV)
+    app = create_app()
+    async with await http_client(app) as client:
+        response = await client.get("/health", headers={"Host": "203.0.113.9"})
+    assert response.status_code == 400
+
+
+async def test_trusted_host_middleware_accepts_the_configured_host_with_a_port_suffix(
+    monkeypatch,
+):
+    # Starlette's TrustedHostMiddleware strips a ":port" suffix before
+    # comparing against allowed_hosts -- a browser that includes the
+    # port in its own Host header must not be rejected for it.
+    set_valid_env(monkeypatch, _HOST_VALIDATION_ENV)
+    app = create_app()
+    async with await http_client(app) as client:
+        response = await client.get(
+            "/health", headers={"Host": "api.example.test:443"}
+        )
+    assert response.status_code == 200
+
+
+async def test_trusted_host_middleware_is_absent_outside_production(monkeypatch):
+    set_valid_env(monkeypatch, VALID_ENV, APP_ENV="development")
+    app = create_app()
+    async with await http_client(app) as client:
+        response = await client.get("/health", headers={"Host": "evil.com"})
+    assert response.status_code == 200
+
+
 @pytest.mark.parametrize("path", ["/docs", "/redoc", "/openapi.json"])
 async def test_docs_enabled_in_development(monkeypatch, path):
     set_valid_env(monkeypatch, VALID_ENV, APP_ENV="development")

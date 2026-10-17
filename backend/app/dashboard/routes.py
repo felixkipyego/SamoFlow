@@ -30,6 +30,8 @@ from fastapi import APIRouter, Depends, Request, Response
 from fastapi.responses import JSONResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.client_ip import get_client_ip
+from app.config import get_settings
 from app.dashboard.auth_backend import (
     SESSION_COOKIE_NAME,
     HashedDatabaseStrategy,
@@ -139,7 +141,7 @@ async def login(
     # Cheapest-first (docs/SPEC.md §9's own ordering philosophy, applied
     # here): per-IP rate limit, then CSRF (no I/O either), then the
     # per-account rate limit, then the real database/password work.
-    ip = request.client.host if request.client else "unknown"
+    ip = get_client_ip(request, get_settings())
     per_ip_limiter = _get_per_ip_limiter(request)
     if not per_ip_limiter.check(ip):
         return _rate_limited_response(per_ip_limiter.get_retry_after(ip))

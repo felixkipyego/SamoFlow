@@ -33,11 +33,47 @@
 # Compose network -- deploy/docker-compose.yml's own comment). An operator
 # reaches it only via an SSH tunnel (docs/deploy/RUNBOOK.md).
 #
-# Backend changes this proxy will need, NOT built here (register entries
-# owned by the Phase 7 batch, docs/DECISIONS_REGISTER.md):
-#   - trusted X-Forwarded-For for the rate limiter (every request.client.
-#     host read today becomes Caddy's own IP once this proxy is in front)
-#   - Host-header validation on the api service
+# [SECURITY] L1 PART C (#7) (out-of-band Phase 7 batch, 2026-10-17): the
+# forwarded-client-IP trust boundary and Host validation this file's own
+# previous version named as "not built here" are now both built --
+# app/client_ip.py (the api service's own one IP-derivation helper) and
+# app/main.py's TrustedHostMiddleware respectively.
+#
+# Forwarded-client-IP: deliberately NO `trusted_proxies` global option is
+# set below. Confirmed against Caddy 2.10.2's own docs (the pinned
+# `caddy:2.10.2` image above) -- the reverse_proxy directive page and the
+# global `servers > trusted_proxies` option page -- that:
+#   - with no `trusted_proxies` configured, Caddy trusts NO peer, and its
+#     own forwarded-header behavior does not depend on this setting at
+#     all: reverse_proxy "ignore[s] [X-Forwarded-For's] values from
+#     incoming requests, to prevent spoofing" and sets a fresh header
+#     instead -- unconditionally, for every request, trusted or not.
+#   - `trusted_proxies` instead controls something this deployment does
+#     not need: whether CADDY ITSELF treats an incoming request's own
+#     X-Forwarded-For as authoritative for ITS OWN features (access
+#     logs, the `client_ip` placeholder/matcher). This architecture has
+#     no CDN or other proxy in front of Caddy (docs/SPEC.md §14 names
+#     Caddy as THE proxy) -- Caddy is always the first hop a real
+#     visitor's TCP connection reaches, so there is no "more upstream"
+#     peer whose claimed IP Caddy would ever need to trust. Leaving
+#     `trusted_proxies` at its secure, empty default is therefore the
+#     CORRECT choice, not a gap.
+#   - net effect: every X-Forwarded-For Caddy forwards to `api:8000`
+#     contains exactly one value -- the real TCP peer Caddy itself
+#     accepted the connection from -- regardless of what a visitor's own
+#     browser/script claims. app/client_ip.py still parses defensively
+#     (right-most entry only, never raises on a malformed/multi-valued
+#     header) so this stays correct even if a future CDN is added in
+#     front of Caddy with its own `trusted_proxies`.
+#
+# Host validation: every site block below is its own exact hostname, and
+# there is no catch-all/wildcard site -- Caddy's own HTTP server only
+# ever matches a request to a site whose address it was given; anything
+# else gets no site block, which Caddy answers itself (not proxied to any
+# backend), already satisfying "only the configured hostnames are
+# accepted" at this layer. app/main.py's TrustedHostMiddleware (api
+# service, production only) is the SECOND, defence-in-depth layer, for
+# any request that reaches that container directly.
 {
 	email {$CADDY_ACME_EMAIL}
 }
@@ -173,4 +209,27 @@
 	@assets path *.js *.css
 	header @assets Cache-Control "public, max-age=300, must-revalidate"
 	file_server
+}
+
+# ---------------------------------------------------------------------------
+# [SECURITY] L1 PART C (#7) (out-of-band Phase 7 batch, 2026-10-17):
+# catch-all for any Host NOT matched by one of the three site blocks
+# above -- a real gap found LIVE, not assumed: with no site block of its
+# own, a request whose Host matches none of the three above does NOT get
+# rejected by Caddy on its own; Caddy's own un-matched-route default is
+# a bare "200 OK, Content-Length: 0" (confirmed live, `curl -H "Host:
+# evil.com"` against this exact Caddyfile before this block existed),
+# not a rejection -- which the task's own "anything else is rejected"
+# requirement rules out. `abort` closes the connection with NO response
+# at all (not even a status code) -- the strongest rejection available,
+# leaking nothing about which hostnames this deployment actually serves
+# (an error PAGE, or even a distinct status code, could itself be a
+# signal an attacker probing Host values could use). Plain `http://`
+# (no hostname) matches only the unencrypted port -- the one port this
+# gap exists on: an HTTPS request with an unrecognised SNI is already
+# rejected by Caddy's own TLS layer before HTTP routing ever runs (no
+# certificate exists for a hostname Caddy was never told to manage), so
+# no separate catch-all is needed for 443.
+http:// {
+	abort
 }

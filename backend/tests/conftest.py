@@ -334,12 +334,30 @@ TEST_PASSWORD = "sup3r-secret-pw"  # noqa: S105 (test fixture value, not a real 
 # own TEST-NET-3 address, proving /health never contacts anything) for no
 # real benefit -- a test that specifically needs a weak DATABASE_URL
 # password builds that DSN inline, scoped to itself.
+#
+# [SECURITY] L1 PART C (2026-10-17): also carries API_HOSTNAME -- not a
+# secret-class value, but the SAME shape ("VALID_ENV has none; production
+# genuinely requires one") as every entry above, via a DIFFERENT
+# validator (_require_api_hostname_in_production, app/config.py). Every
+# site below already combines this dict with APP_ENV=production, so one
+# dict covering "everything production additionally needs beyond
+# VALID_ENV" is simpler than two dicts every caller would have to
+# remember to spread together (rule 11).
 PRODUCTION_REALISTIC_SECRET_OVERRIDES = {
     "QDRANT_API_KEY": "zQ7mK2pR9xLaUeVbNcOd",  # noqa: S105 (realistic-looking, not a real secret)
     "QDRANT_READ_ONLY_API_KEY": "aB3dE6fG9hJkLmNoPqRs",  # noqa: S105
     "JWT_SIGNING_KEY": "zQ7mK2pR9xLaUeVbNcOdTfGhIjKlMnOp",  # noqa: S105
     "DB_CONNECTION_ENCRYPTION_KEY": "aB3dE6fG9hJkLmNoPqRsTuVwXyZ01234",  # noqa: S105
     "OPENAI_API_KEY": "aB3dE6fG9hJkLmNoPqRs",  # noqa: S105 (realistic-looking, not a real secret)
+    # "test", not a prettier placeholder like "api.example.test": every
+    # existing production-mode test that also sends a real request
+    # (http_client() above, AsyncClient(base_url="http://test")) sends
+    # Host: test, and app/main.py's TrustedHostMiddleware (production
+    # only) would otherwise 400 every one of those pre-existing tests
+    # the moment this dict's own APP_ENV=production took effect. A test
+    # that specifically exercises Host validation (test_main.py) uses
+    # its own distinct hostname instead of this shared dict.
+    "API_HOSTNAME": "test",
 }
 
 

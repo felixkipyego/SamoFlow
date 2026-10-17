@@ -329,6 +329,7 @@ realistic_out=$(docker run --rm --entrypoint python3 \
     -e DB_CONNECTION_ENCRYPTION_KEY=bN4oPqR7sTuVwXyZaB1cD2eF3gH4iJ5k \
     -e OPENAI_API_KEY=sk-live-rK9mLpQ2vXzNcHdWaTfYbGjUeSoIhAkR \
     -e API_HOST=0.0.0.0 -e API_PORT=8000 \
+    -e API_HOSTNAME=api.smoke-test.local \
     "$image" -c "from app.config import get_settings; get_settings(); print('OK')" 2>&1)
 rc=$?
 set -e
@@ -344,6 +345,19 @@ echo "PASS: Settings construction succeeds under APP_ENV=production with real-lo
 # expected "Permission denied" noise from scanning root-owned
 # directories as the image's own non-root uid 10001 -- that noise is not
 # a signal either way, only stdout (an actual match) would be.
+#
+# `find` itself exits non-zero whenever it hits ANY unreadable directory
+# while traversing (confirmed live: `/root`, `/etc/ssl/private` and
+# similar root-owned paths, scanning as the image's own non-root uid
+# 10001) -- under this script's own `set -eu`, an unguarded `found=$(...)`
+# would abort the WHOLE script right here with no FAIL message at all
+# (confirmed live: this is exactly what happened before this fix). `set
+# +e`/`set -e` around it, matching check (i)'s own established style
+# above, so only $found's actual CONTENT (whether any ".env*" path was
+# printed to stdout) decides this check -- find's own traversal-error
+# exit code is not the thing being tested here.
+set +e
 found=$(docker run --rm --entrypoint find "$image" / -xdev -iname ".env*" 2>/dev/null)
+set -e
 [ -z "$found" ] || fail "found .env-named file(s) inside the built image: $found"
 echo "PASS: no .env-named file exists anywhere inside the built image"

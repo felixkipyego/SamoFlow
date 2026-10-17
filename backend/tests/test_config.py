@@ -622,3 +622,54 @@ def test_production_leaves_an_optional_unset_secret_alone(monkeypatch):
     assert settings.anthropic_api_key_str() is None
     assert settings.smtp_password_str() is None
     assert settings.jwt_signing_key_previous_str() is None
+
+
+# --- [SECURITY] L1 PART C (#7) (out-of-band Phase 7 batch, 2026-10-17):
+# api_hostname/trusted_proxy_hostname --
+
+
+def test_api_hostname_unset_is_fine_outside_production(monkeypatch):
+    for app_env in ("development", "test"):
+        set_valid_env(monkeypatch, VALID_ENV, APP_ENV=app_env)
+        settings = Settings()
+        assert settings.api_hostname is None
+
+
+def test_api_hostname_required_in_production(monkeypatch):
+    set_valid_env(
+        monkeypatch,
+        VALID_ENV,
+        APP_ENV="production",
+        **{k: v for k, v in PRODUCTION_REALISTIC_SECRET_OVERRIDES.items() if k != "API_HOSTNAME"},
+    )
+    with pytest.raises(ValidationError, match="API_HOSTNAME"):
+        Settings()
+
+
+def test_api_hostname_empty_string_means_unset(monkeypatch):
+    set_valid_env(monkeypatch, VALID_ENV, API_HOSTNAME="")
+    settings = Settings()
+    assert settings.api_hostname is None
+
+
+def test_api_hostname_accepts_a_real_value_in_production(monkeypatch):
+    set_valid_env(
+        monkeypatch,
+        VALID_ENV,
+        APP_ENV="production",
+        **PRODUCTION_REALISTIC_SECRET_OVERRIDES,
+    )
+    settings = Settings()
+    assert settings.api_hostname == "test"
+
+
+def test_trusted_proxy_hostname_defaults_to_caddy(monkeypatch):
+    set_valid_env(monkeypatch, VALID_ENV)
+    settings = Settings()
+    assert settings.trusted_proxy_hostname == "caddy"
+
+
+def test_trusted_proxy_hostname_is_configurable(monkeypatch):
+    set_valid_env(monkeypatch, VALID_ENV, TRUSTED_PROXY_HOSTNAME="a-different-proxy")
+    settings = Settings()
+    assert settings.trusted_proxy_hostname == "a-different-proxy"

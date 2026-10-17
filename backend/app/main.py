@@ -51,6 +51,7 @@ from contextlib import asynccontextmanager
 from importlib.metadata import version
 
 from fastapi import FastAPI
+from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from app.admin.routes import router as admin_router
 from app.agent.checkpointer import close_checkpointer_pool, get_checkpointer, open_checkpointer_pool
@@ -58,7 +59,7 @@ from app.agent.graph import build_graph
 from app.auth.cors import WidgetCORSMiddleware
 from app.auth.routes import router as auth_router
 from app.chat.routes import router as chat_router
-from app.config import Settings, get_settings
+from app.config import Settings, SettingsError, get_settings
 from app.dashboard.escalation_routes import router as dashboard_escalation_router
 from app.dashboard.routes import router as dashboard_router
 from app.dashboard.source_routes import router as dashboard_source_router
@@ -310,6 +311,38 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # dashboard/admin/health path (D-6.1-cors-same-origin: that surface
     # stays CORS-free by design).
     app.add_middleware(WidgetCORSMiddleware)
+    # [SECURITY] L1 PART C (#7) (out-of-band Phase 7 batch, 2026-10-17):
+    # defence in depth alongside deploy/Caddyfile's own per-hostname site
+    # blocks plus its catch-all (`http:// { abort }`, added by this same
+    # part after finding live that Caddy's own un-matched-route default
+    # is a bare 200, not a rejection) -- this middleware is what keeps a
+    # mismatched Host rejected even for a request that reaches this
+    # container directly, bypassing Caddy entirely. Production only, same
+    # app_env check
+    # as docs_enabled above: every other environment's tests send
+    # Host: testserver (Starlette's own TestClient default) or similar,
+    # and there is no real public hostname to validate against until a
+    # real Caddy deployment exists in front of this process anyway.
+    # "127.0.0.1" (not a wildcard, not api_hostname's own value) is the
+    # ONE other allowed value: deploy/docker-compose.yml's own api
+    # healthcheck curls http://127.0.0.1:8000/ready from inside the SAME
+    # container, over loopback -- Settings._require_api_hostname_in_
+    # production (app/config.py) already guarantees api_hostname is set
+    # whenever this branch runs, so there is always a real value to pass
+    # here. TrustedHostMiddleware's own rejection response ("Invalid host
+    # header", HTTP 400) names no allowed host, so a disallowed Host
+    # cannot be used to enumerate which hostnames this deployment serves.
+    if settings.app_env == "production":
+        if settings.api_hostname is None:
+            # Unreachable in practice -- Settings._require_api_hostname_in_
+            # production (app/config.py) already guarantees this -- but a
+            # real raise (not `assert`, which `python -O` strips) in case
+            # that guarantee is ever weakened without this call site
+            # noticing.
+            raise SettingsError("API_HOSTNAME must be set in production.")
+        app.add_middleware(
+            TrustedHostMiddleware, allowed_hosts=[settings.api_hostname, "127.0.0.1"]
+        )
     app.include_router(health_router)
     app.include_router(auth_router)
     app.include_router(chat_router)
