@@ -27,6 +27,8 @@ from urllib.parse import urlsplit
 from pydantic import Field, SecretStr, ValidationError, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from app.secrets_policy import SECRET_CLASS_SETTINGS, check_raw_secret_values
+
 # SQLAlchemy 2.0 maps a plain "postgresql://" DSN to the psycopg2 driver,
 # which this project does not install (Step 1.1.a installs psycopg[binary],
 # i.e. psycopg 3). This scheme selects the psycopg (v3) driver instead.
@@ -1002,6 +1004,41 @@ class Settings(BaseSettings):
             == self.jwt_signing_key.get_secret_value()
         ):
             raise ValueError("JWT_SIGNING_KEY_PREVIOUS must differ from JWT_SIGNING_KEY.")
+        return self
+
+    # [SECURITY] L1 (out-of-band Phase 7 batch, 2026-10-17), Decision D
+    # (D-pilot-placeholder-secrets-gate): under APP_ENV=production, every
+    # secret-class setting (app/secrets_policy.py's own SECRET_CLASS_
+    # SETTINGS, found by introspecting this class's own SecretStr-typed
+    # fields -- see backend/tests/test_secrets_policy_guard.py) must not be
+    # a known placeholder/test value, and must meet its own stated minimum
+    # length where one exists. "Missing or empty" is already covered,
+    # unconditionally, by each required field's own existing field_
+    # validator above (an empty SecretStr is rejected in every environment,
+    # not just production) -- this validator's own job is the part that is
+    # legitimate in development/test but must fail loudly in production:
+    # a real "change-me"/"test-..."/"smoke-..."/"placeholder-..." value
+    # that WOULD otherwise start up successfully. api, worker and migrate
+    # all go through this identical check: every one of them constructs
+    # Settings only via get_settings() (app/config.py's own test_config_
+    # guard.py enforces this), so this one model_validator covers all three
+    # processes with no separate wiring at each entrypoint.
+    @model_validator(mode="after")
+    def _reject_weak_secrets_in_production(self) -> "Settings":
+        if self.app_env != "production":
+            return self
+        raw_values: dict[str, str | None] = {}
+        for setting in SECRET_CLASS_SETTINGS:
+            value = getattr(self, setting.attr)
+            if value is None:
+                raw_values[setting.env_var] = None
+            else:
+                raw_values[setting.env_var] = value.get_secret_value()
+        violations = check_raw_secret_values(raw_values)
+        if violations:
+            # Message names only the variable(s), never a value -- see
+            # check_raw_secret_values()'s own docstring.
+            raise ValueError(" ".join(violations))
         return self
 
     def database_url_str(self) -> str:

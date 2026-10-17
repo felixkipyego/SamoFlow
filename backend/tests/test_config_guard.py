@@ -88,6 +88,18 @@ ALLOWED_OPENAI_API_KEY_CALLERS: tuple[str, ...] = (
 # set (Q2).
 ALLOWED_ANTHROPIC_API_KEY_CALLERS: tuple[str, ...] = ("app/agent/chat_model.py",)
 
+# NOTE: adding a file here is a deliberate decision: it means that file
+# receives the real SMTP password (Task 4.3). Review it by hand. A real,
+# pre-existing gap found while enumerating every secret accessor for the
+# out-of-band Phase 7 [SECURITY] L1 batch (2026-10-17): smtp_password_str()
+# has existed since Task 4.3 with a real caller (app/notifications/
+# service.py) but was never added to this file's own allow-list
+# enforcement, unlike every other secret accessor -- fixed here, in the
+# same pass that found it, not left as a second tracked marker for a gap
+# this project's own established pattern already covers for every sibling
+# accessor.
+ALLOWED_SMTP_PASSWORD_CALLERS: tuple[str, ...] = ("app/notifications/service.py",)
+
 # Duplication check after 1.3.a1/a2/b: both secret accessors are checked by
 # the same single branch below instead of one copy-pasted elif per accessor
 # -- a third one later needs one entry here, not a third branch. Task 1.4.a
@@ -106,6 +118,7 @@ _SECRET_ACCESSOR_ALLOW_LISTS: dict[str, tuple[str, ...]] = {
     "db_connection_encryption_key_str": ALLOWED_DB_CONNECTION_ENCRYPTION_KEY_CALLERS,
     "openai_api_key_str": ALLOWED_OPENAI_API_KEY_CALLERS,
     "anthropic_api_key_str": ALLOWED_ANTHROPIC_API_KEY_CALLERS,
+    "smtp_password_str": ALLOWED_SMTP_PASSWORD_CALLERS,
 }
 
 

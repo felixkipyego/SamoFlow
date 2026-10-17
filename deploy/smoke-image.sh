@@ -272,3 +272,65 @@ case "$chat_out" in
     *) fail "a real greeting chat turn did not return the guardrail reply: $chat_out" ;;
 esac
 echo "PASS: a real greeting turn through POST /chat returns the fixed guardrail reply, not an error"
+
+# (i) [SECURITY] L1 (out-of-band Phase 7 batch, 2026-10-17), Decision D
+# (D-pilot-placeholder-secrets-gate): under APP_ENV=production, the exact
+# .env.example placeholder values (the ones an operator who ran
+# `cp .env.example .env` and forgot to replace them would actually have)
+# must fail fast and loud -- then the SAME mode, same network, with
+# real-looking values, must start cleanly. Uses "api" mode specifically:
+# create_app() calls get_settings() synchronously before uvicorn ever
+# binds (app/main.py), so a Settings failure here means the container
+# exits non-zero almost immediately, before attempting to reach
+# test-db/test-qdrant at all -- no disposable stack needed for the
+# failure half of this check.
+set +e
+placeholder_out=$(docker run --rm \
+    -e APP_ENV=production \
+    -e DATABASE_URL=postgresql+psycopg://widgetplatform:change-me@postgres:5432/widgetplatform \
+    -e QDRANT_URL=http://qdrant:6333 \
+    -e QDRANT_API_KEY=change-me \
+    -e QDRANT_READ_ONLY_API_KEY=change-me \
+    -e JWT_SIGNING_KEY=change-me-change-me-change-me-change-me \
+    -e DB_CONNECTION_ENCRYPTION_KEY=change-me-change-me-change-me-change-me \
+    -e OPENAI_API_KEY=change-me \
+    -e API_HOST=0.0.0.0 -e API_PORT=8000 \
+    "$image" api 2>&1)
+rc=$?
+set -e
+[ "$rc" -ne 0 ] || fail "api mode started with .env.example's own placeholder values under APP_ENV=production (exited 0)"
+case "$placeholder_out" in
+    *QDRANT_API_KEY*) : ;;
+    *) fail "placeholder-rejection error did not name a variable: $placeholder_out" ;;
+esac
+echo "PASS: api mode with .env.example's placeholder values under APP_ENV=production exits non-zero, naming the variable"
+
+# The "starts cleanly" half deliberately does NOT reuse test-db/
+# test-qdrant: both disposable services are hardcoded, by design, to the
+# identical throwaway "change-me"/"test-qdrant-key"/"test-qdrant-readonly-
+# key" values this exact check (i) exists to reject -- using them here
+# would require either weakening the gate being tested or changing shared
+# test infrastructure many other make targets depend on, neither of which
+# is this check's job. Settings construction (api/worker/migrate's own
+# shared first step, before any network connection is attempted) is the
+# precise, correctly-scoped thing to verify clean here -- confirmed
+# separately, at check (d) above, that a real api process backed by
+# test-db/test-qdrant starts and serves traffic end to end; this check
+# only needs to prove THIS gate accepts realistic secrets, not re-prove
+# the whole stack a second time with different ones.
+set +e
+realistic_out=$(docker run --rm --entrypoint python3 \
+    -e APP_ENV=production \
+    -e DATABASE_URL=postgresql+psycopg://widgetplatform:rK9mLpQ2vXzNcHdWaT@postgres:5432/widgetplatform \
+    -e QDRANT_URL=http://qdrant:6333 \
+    -e QDRANT_API_KEY=rK9mLpQ2vXzNcHdWaTfYbGjUeSoIhAkR \
+    -e QDRANT_READ_ONLY_API_KEY=bN4oPqR7sTuVwXyZaB1cD2eF3gH4iJ5k \
+    -e JWT_SIGNING_KEY=rK9mLpQ2vXzNcHdWaTfYbGjUeSoIhAkR \
+    -e DB_CONNECTION_ENCRYPTION_KEY=bN4oPqR7sTuVwXyZaB1cD2eF3gH4iJ5k \
+    -e OPENAI_API_KEY=sk-live-rK9mLpQ2vXzNcHdWaTfYbGjUeSoIhAkR \
+    -e API_HOST=0.0.0.0 -e API_PORT=8000 \
+    "$image" -c "from app.config import get_settings; get_settings(); print('OK')" 2>&1)
+rc=$?
+set -e
+[ "$rc" -eq 0 ] && [ "$realistic_out" = "OK" ] || fail "Settings construction failed under APP_ENV=production with real-looking secrets: $realistic_out"
+echo "PASS: Settings construction succeeds under APP_ENV=production with real-looking secrets"

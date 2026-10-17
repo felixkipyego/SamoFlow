@@ -318,6 +318,30 @@ _LOCAL_QDRANT_RUN_HINT = (
 # logs, repr/str output or exception messages.
 TEST_PASSWORD = "sup3r-secret-pw"  # noqa: S105 (test fixture value, not a real secret)
 
+# [SECURITY] L1 (out-of-band Phase 7 batch, 2026-10-17): VALID_ENV's own
+# secret-class values are deliberately "test-"-prefixed (see its own
+# header comment) -- exactly one of the 4 known-weak prefixes app/
+# secrets_policy.py's new production startup gate now rejects. Any test
+# that combines APP_ENV=production with real Settings validation (not
+# Settings.model_construct(), which bypasses every validator including
+# this new one) must override these with realistic-LOOKING values instead
+# -- never a real secret, matching VALID_ENV's own "chosen only to be
+# valid, not to resemble anything real" precedent, just avoiding the 4
+# prefixes this gate checks for. Deliberately does NOT include
+# DATABASE_URL: every VALID_ENV variant's own password ("pw") is already
+# not weak-prefixed, so overriding it here would only risk silently
+# replacing a test's own deliberately-chosen host (e.g. test_main.py's
+# own TEST-NET-3 address, proving /health never contacts anything) for no
+# real benefit -- a test that specifically needs a weak DATABASE_URL
+# password builds that DSN inline, scoped to itself.
+PRODUCTION_REALISTIC_SECRET_OVERRIDES = {
+    "QDRANT_API_KEY": "zQ7mK2pR9xLaUeVbNcOd",  # noqa: S105 (realistic-looking, not a real secret)
+    "QDRANT_READ_ONLY_API_KEY": "aB3dE6fG9hJkLmNoPqRs",  # noqa: S105
+    "JWT_SIGNING_KEY": "zQ7mK2pR9xLaUeVbNcOdTfGhIjKlMnOp",  # noqa: S105
+    "DB_CONNECTION_ENCRYPTION_KEY": "aB3dE6fG9hJkLmNoPqRsTuVwXyZ01234",  # noqa: S105
+    "OPENAI_API_KEY": "aB3dE6fG9hJkLmNoPqRs",  # noqa: S105 (realistic-looking, not a real secret)
+}
+
 
 @pytest.fixture(autouse=True)
 def _isolated_env(monkeypatch):

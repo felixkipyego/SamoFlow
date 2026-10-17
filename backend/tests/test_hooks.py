@@ -175,11 +175,21 @@ def test_the_real_repository_marker_count_is_64():
     # literally anywhere in THIS comment, matching the established
     # convention immediately above in this same file -- this file is
     # itself scanned.)
+    # 64 -> 65 at the out-of-band Phase 7 [SECURITY] L1 batch (2026-10-17),
+    # real, not accidental: test_config_guard.py's own new ALLOWED_SMTP_
+    # PASSWORD_CALLERS entry carries the identical "adding a file here is
+    # a deliberate decision" allow-list comment every sibling entry in
+    # that same file already uses -- a genuinely new instance of an
+    # already-established marker (the scanner's own fourth trigger word),
+    # not a duplicate. Confirmed by grepping that one file directly before
+    # re-pinning this number: exactly one new line added, nothing else in
+    # this task's own changed files (app/config.py, app/secrets_policy.py,
+    # the new test files) carries any of the four trigger words.
     stdout = _run_hooks(REPO_ROOT)
     first_line = stdout.splitlines()[0]
     count = int(first_line.split()[0])
-    assert count == 64, (
-        f"expected 64 markers against the real repository, got {count} -- "
+    assert count == 65, (
+        f"expected 65 markers against the real repository, got {count} -- "
         f"either a real marker was added/removed, or the exclusion below "
         f"needs revisiting:\n{stdout}"
     )

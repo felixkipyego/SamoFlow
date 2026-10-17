@@ -48,7 +48,13 @@ from app.config import Settings, SettingsError, get_settings
 from app.main import create_app
 from app.plans import models as plans_models  # noqa: F401 (registers "plans" on Base.metadata)
 from app.tenancy import models as tenancy_models  # noqa: F401 (registers tenancy tables)
-from tests.conftest import fresh_import, http_client, require_test_database, set_valid_env
+from tests.conftest import (
+    PRODUCTION_REALISTIC_SECRET_OVERRIDES,
+    fresh_import,
+    http_client,
+    require_test_database,
+    set_valid_env,
+)
 
 # 203.0.113.0/24 is TEST-NET-3 (RFC 5737): reserved for documentation, never
 # routable. Used here to prove /health answers without contacting anything.
@@ -129,7 +135,18 @@ def test_get_settings_is_used_when_none_passed(monkeypatch):
 
 @pytest.mark.parametrize("path", ["/docs", "/redoc", "/openapi.json"])
 async def test_docs_disabled_in_production(monkeypatch, path):
-    set_valid_env(monkeypatch, VALID_ENV, APP_ENV="production")
+    # [SECURITY] L1 (out-of-band Phase 7 batch, 2026-10-17): VALID_ENV's
+    # own secret values are "test-"-prefixed, now rejected by app/
+    # secrets_policy.py's production startup gate -- this test is about
+    # docs-endpoint visibility, not secrets, so it overrides with
+    # realistic-looking (not weak-prefixed) values instead of tripping a
+    # gate unrelated to what it actually tests.
+    set_valid_env(
+        monkeypatch,
+        VALID_ENV,
+        APP_ENV="production",
+        **PRODUCTION_REALISTIC_SECRET_OVERRIDES,
+    )
     app = create_app()
     async with await http_client(app) as client:
         response = await client.get(path)
