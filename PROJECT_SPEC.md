@@ -7703,6 +7703,10 @@ Verified: widget lint clean; `npm test` 189/189; build within budget (loader 139
 
 Verified: `python -m pytest tests/test_claude_settings_guard.py -q` -- 3 passed (file parses as JSON; every named destructive-command family has a covering deny entry; every entry uses the `Bash(<prefix>:*)` wildcard form, not a bare or exact-match string).
 
+**PART B.1 (Dependabot: qdrant lockstep check, PR #3)**: PR #3 proposes `qdrant/qdrant` v1.19.1 -> v1.19.2. The Task 1.3.b lockstep rule (§6) requires reviewing `qdrant-client`'s pin in the same pass. Checked live against PyPI's simple index: no `qdrant-client` release matching `1.19.2` (or any `1.19.x`) exists. **Decision: hold both pinned at v1.19.1/`==1.19.1` -- no file changed.** Bumping only the server would create exactly the mismatched pair the lockstep rule exists to prevent. PR #3 is deliberately left un-superseded (it will keep reopening on Dependabot's now-monthly schedule, PART C, until a matching client release ships) -- not silenced with an `ignore:` rule, since there is a real future release to wait for, unlike the pre-existing `postgres` ignore rule which silences a dependabot-core updater bug. See `D-maint-qdrant-lockstep-hold`, docs/DECISIONS_REGISTER.md.
+
+Verified: `curl -s https://pypi.org/simple/qdrant-client/` -- newest listed release is `1.9.2`; no `1.19.x` entry. No code/config change in this part; no test run needed.
+
 ## 6. Project constraints
 
 - Out of scope for v1 (deferred): logged-in visitors, live human handoff, approved live database queries, tenant-supplied tool servers, actions with human approval, JavaScript-rendered crawling, a request challenge (e.g. Turnstile), the reranker (unless evals justify it), spreadsheet uploads, payment processing, multiple languages, custom widget CSS, 2FA/Google sign-in, stream resume (SPEC §19).
