@@ -79,6 +79,33 @@ async def create_tenant(session: AsyncSession, name: str, status: str) -> Tenant
     return tenant
 
 
+async def delete_tenant(session: AsyncSession, tenant_id: uuid.UUID) -> str | None:
+    # [SECURITY] ops/deploy/smoke-prod-stack.sh cleanup follow-up
+    # (advisor review, 2026-10-17): full, cascading deletion -- this
+    # module's own header comment already states every FK to
+    # tenants.id is ondelete="CASCADE" (a standing PROJECT_SPEC.md
+    # decision, matching docs/SPEC.md §13's "eventual cascading tenant
+    # deletion"), so one DELETE here removes every site_key/visitor/
+    # conversation/membership/source/document/db_connection/job/
+    # escalation/usage_event/email_log/verified_domain row for this
+    # tenant too, at the database level -- no application-side fan-out
+    # to get wrong or forget. `audit_log` is deliberately NOT tenant-
+    # scoped (app/ingest/models.py's own header comment) and is
+    # untouched, by design, matching its own append-only intent.
+    # Returns None (a no-op, not an error) when the tenant does not
+    # exist -- idempotent, so calling this twice (or on an already-
+    # cleaned-up tenant) never fails.
+    tenant = (
+        await session.execute(select(Tenant).where(Tenant.id == tenant_id))
+    ).scalar_one_or_none()
+    if tenant is None:
+        return None
+    name = tenant.name
+    await session.delete(tenant)
+    await session.flush()
+    return name
+
+
 def generate_site_key() -> str:
     """Step 6.1: the real `pk_live_...` generator this project's own §9
     marker (recorded at the Step 1.4 breakdown, 2026-09-28) has named

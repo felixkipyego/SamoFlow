@@ -289,10 +289,36 @@ catch-all -- the script's own output explains and cites exactly how,
 Caddy 2.10.2 source and docs); only Caddy publishes a host port.
 Seeds one throwaway, uniquely-named smoke-test tenant/site-key/
 dashboard-owner into the real database each run (via the same
-`admin`/`seed-owner` commands above) -- there is no CLI command to
-delete one, so these rows are left behind; harmless, and this is
-expected to run against a pristine database, before `seed-owner`
-creates the real pilot tenant above.
+`admin`/`seed-owner` commands above), with a real OS-CSPRNG password
+held only in a shell variable for the run's own duration -- never
+echoed, logged, written to disk, or passed as a command-line argument
+any other process on the host could read via `ps`.
+
+**This script cleans up after itself**, on every exit path (a clean
+finish, any failed check, Ctrl-C): its own `cleanup()`, wired to
+`trap ... EXIT`, deletes the owner user and the tenant (which cascades
+to the tenant's own site key and any chat data the `/chat` check
+created) via `admin delete-user`/`admin delete-tenant`. Confirmed live,
+twice: after a successful run AND after a deliberately-failed one, the
+SAME email/password is rejected at login (401) and the SAME site key
+is rejected at `/session` (403) -- the credential this run generated
+never outlives the run, success or failure.
+
+**The one case nothing here can catch: a SIGKILL** (or a lost SSH
+session, a host reboot mid-run) kills this script before its own trap
+ever fires, leaving a `smoke-test-*` tenant/owner behind. Recover with
+the one command built for exactly this:
+
+```
+docker compose --env-file .env -f deploy/docker-compose.yml -f deploy/docker-compose.prod.yml \
+  run --rm migrate admin cleanup-smoke-test-leftovers --confirm
+```
+
+Bulk, pattern-matched (`smoke-test-%`), idempotent (a real, successful
+no-op when there is nothing left to clean up), and safe to run at any
+time, including against a live production database with a real pilot
+tenant on it -- that tenant's own name/owner email is never
+`smoke-test-...`, so this can never touch it.
 
 **Locally** (this exact script, unchanged, run against a scratch stack
 instead of the real server -- useful before every real deploy, not

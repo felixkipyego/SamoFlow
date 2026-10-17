@@ -53,11 +53,21 @@
 # smoke-test tenant/site-key/dashboard-owner into the real database (via
 # the SAME `admin`/`seed-owner` CLI commands RUNBOOK already documents
 # for the real pilot tenant), never starts/stops/rebuilds it. Each run's
-# smoke-test rows are uniquely named (a Unix timestamp suffix) so repeat
-# runs never collide -- there is no CLI command to delete a tenant, so
-# these rows are left behind; harmless (no real tenant data, no real
-# visitor data), and expected to be run against a pristine database
-# before any real pilot tenant exists.
+# smoke-test rows are uniquely named (a Unix timestamp + this shell's
+# own pid) so repeat runs never collide.
+#
+# [SECURITY] cleanup follow-up (advisor review, 2026-10-17): an earlier
+# version of this script derived the smoke owner's own login PASSWORD
+# from that same timestamp, and never deleted anything it seeded -- on
+# a public repo, that is a real, working admin credential whose
+# derivation formula is public too, left sitting on the real production
+# server. Fixed: the password is now a real OS-CSPRNG value (see
+# random_secret() below), and this script's own `cleanup()` (wired to
+# `trap ... EXIT`, so it runs whether this script finishes, fails, or
+# is Ctrl-C'd) deletes the tenant, its site key (cascades from the
+# tenant delete) and the owner user on every exit path -- see this
+# file's own `cleanup()` for the one case (SIGKILL) nothing can catch,
+# and RUNBOOK §5 for the one-command manual recovery for that case.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -91,14 +101,6 @@ pass() {
 CURL_CA=""
 [ -z "$CACERT" ] || CURL_CA="--cacert $CACERT"
 
-COOKIE_JAR="$(mktemp)"
-TMP_HEADERS="$(mktemp)"
-TMP_BODY="$(mktemp)"
-cleanup() {
-    rm -f "$COOKIE_JAR" "$TMP_HEADERS" "$TMP_BODY"
-}
-trap cleanup EXIT
-
 # cd into REPO_ROOT, then use ONLY relative paths from here on (deploy/
 # smoke-image.sh's own established precedent) -- REPO_ROOT itself may
 # contain spaces (confirmed live: this exact repo's own checkout path
@@ -125,7 +127,53 @@ run_migrate() {
     $COMPOSE run --rm -T migrate "$@"
 }
 
-SUFFIX="$(date +%s)"
+COOKIE_JAR="$(mktemp)"
+TMP_HEADERS="$(mktemp)"
+TMP_BODY="$(mktemp)"
+
+# [SECURITY] cleanup follow-up (advisor review, 2026-10-17): runs on
+# EVERY exit path (a clean finish, any `fail` call above, and Ctrl-C --
+# `trap ... EXIT` fires for all three; only SIGKILL, which no trap can
+# ever catch by design, skips it -- see this script's own header
+# comment and RUNBOOK §5 for the one-command recovery for that case).
+# `tenant_id`/`OWNER_EMAIL` are read defensively (`${var:-}`) because
+# an interruption early enough (before seeding even starts) means
+# neither is assigned yet -- under this script's own `set -u`, a bare
+# `$tenant_id` would itself be a hard error in exactly the scenario
+# this trap exists to handle gracefully.
+#
+# delete-tenant cascades to the tenant's own site_keys row too (every
+# FK to tenants.id is ondelete="CASCADE", app/tenancy/repository.py's
+# own header comment) -- a separate revoke-site-key call would be
+# redundant, not a second layer of safety: there is no site_keys row
+# left for it to act on once the tenant delete commits either way.
+# Both admin commands are idempotent (a no-op, not an error, against
+# an id/email already gone) -- safe to call even when seeding itself
+# never got far enough to create them, and safe if this trap somehow
+# ran twice. `|| true`: a cleanup failure must never mask the real
+# exit code this trap is preserving, nor abort the OTHER cleanup step
+# still queued after it.
+cleanup() {
+    rc=$?
+    rm -f "$COOKIE_JAR" "$TMP_HEADERS" "$TMP_BODY"
+    echo "--- cleanup: removing the throwaway tenant/site-key/owner this run seeded ---"
+    if [ -n "${tenant_id:-}" ]; then
+        run_migrate admin delete-tenant --tenant-id "$tenant_id" --confirm || true
+    fi
+    if [ -n "${OWNER_EMAIL:-}" ]; then
+        run_migrate admin delete-user --email "$OWNER_EMAIL" --confirm || true
+    fi
+    exit "$rc"
+}
+trap cleanup EXIT
+
+# [SECURITY] cleanup follow-up (advisor review, 2026-10-17): SUFFIX is
+# an IDENTIFIER (tenant name, email local-part) -- recognisable on
+# purpose, never the secret -- so a plain timestamp is fine for it, and
+# $$ (this shell's own pid) is appended so two runs started within the
+# same second (the "two consecutive runs don't collide" proof this
+# follow-up adds) still get distinct names.
+SUFFIX="$(date +%s)-$$"
 TENANT_NAME="smoke-test-$SUFFIX"
 # "example.com" (not "example.invalid"): fastapi-users' own email-
 # validator library rejects ".invalid" outright ("a special-use or
@@ -134,7 +182,37 @@ TENANT_NAME="smoke-test-$SUFFIX"
 # documentation too, and the one of the two this library actually
 # accepts.
 OWNER_EMAIL="smoke-test-$SUFFIX@example.com"
-OWNER_PASSWORD="Sm0ke-Test-$SUFFIX-Ok"
+
+# [SECURITY] cleanup follow-up (advisor review, 2026-10-17): a REAL
+# issue this follow-up fixes -- this value used to be derived from
+# $(date +%s), a guessable, low-entropy "password" for a real, working
+# admin login this script would otherwise leave on the real production
+# server (this repo is public, so the derivation formula itself was
+# public too). Read straight from the OS CSPRNG instead, at least 32
+# random characters, held ONLY in this shell variable for the rest of
+# the run -- never echoed, never logged, never written to a file, and
+# never passed as a command-line argument to any subprocess (which
+# `ps` on a multi-user host could read): every use below pipes it
+# through a subprocess's own stdin via a shell BUILTIN `printf` (never
+# the external /usr/bin/printf) -- a builtin runs inside a forked copy
+# of THIS shell that never calls exec(), so even that fork's own argv,
+# if inspected via `ps` during the brief window it exists, still shows
+# this script's own original invocation line, never the password.
+# `openssl rand -base64 32` first (32 random BYTES, base64-encoded to
+# ~44 printable characters -- well over the 32-character floor, and
+# the base64 alphabet contains no `"`/`\`/control character that could
+# break the JSON bodies this value is embedded into below, so it needs
+# no escaping); `/dev/urandom` + `tr` as the fallback on a host with no
+# `openssl` on PATH.
+random_secret() {
+    if command -v openssl >/dev/null 2>&1; then
+        openssl rand -base64 32
+    else
+        head -c 48 /dev/urandom | tr -dc 'A-Za-z0-9' | head -c 40
+    fi
+}
+OWNER_PASSWORD="$(random_secret)"
+[ -n "$OWNER_PASSWORD" ] || fail "random_secret() produced an empty password"
 
 echo "--- seeding a throwaway tenant/site-key/dashboard-owner ($TENANT_NAME) ---"
 tenant_out="$(run_migrate admin create-tenant --name "$TENANT_NAME" 2>&1)" \
@@ -205,10 +283,16 @@ esac
 csrf_token="$(grep "__Host-csrf" "$COOKIE_JAR" | awk '{print $7}')"
 [ -n "$csrf_token" ] || fail "could not read the __Host-csrf cookie back from the jar"
 
-curl -s $CURL_CA --resolve "$DASHBOARD_HOST:443:$TARGET_IP" \
+# --data-binary @- (never -d "...$OWNER_PASSWORD...", a literal argv
+# element `ps` could read): the JSON body is written to curl's own
+# stdin by the `printf` BUILTIN above this pipe, which never execs a
+# new process and therefore never puts the password into any process's
+# argv at all.
+printf '{"email":"%s","password":"%s"}' "$OWNER_EMAIL" "$OWNER_PASSWORD" | curl -s $CURL_CA \
+    --resolve "$DASHBOARD_HOST:443:$TARGET_IP" \
     -b "$COOKIE_JAR" -c "$COOKIE_JAR" -D "$TMP_HEADERS" -o "$TMP_BODY" \
     -H "Content-Type: application/json" -H "X-CSRF-Token: $csrf_token" \
-    -d "{\"email\":\"$OWNER_EMAIL\",\"password\":\"$OWNER_PASSWORD\"}" \
+    --data-binary @- \
     "https://$DASHBOARD_HOST/api/v1/dashboard/auth/login"
 grep -q "200" "$TMP_HEADERS" || fail "dashboard login failed: $(cat "$TMP_HEADERS") / $(cat "$TMP_BODY")"
 session_cookie_line="$(grep "__Host-session" "$TMP_HEADERS" || true)"
