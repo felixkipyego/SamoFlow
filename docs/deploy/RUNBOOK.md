@@ -119,15 +119,42 @@ reasoning not restated here).
 ## 4. Environment secrets
 
 Copy `.env.example` to `.env` on the server (never commit `.env`) and
-fill in every value. The table below flags which ones **must never be a
-placeholder** in production -- Step 7.4's own go-live checklist
-(D-pilot-placeholder-secrets-gate) will eventually enforce this in code;
-until that gate exists, this is a MANUAL check. Confirmed live: today
-`Settings.jwt_signing_key`/`db_connection_encryption_key`'s own
-`min_length=32` constraint does NOT reject the committed
-`.env.example` placeholder value (`"change-me-change-me-change-me-
-change-me"` is 40 characters, well over 32) -- a length check is not a
-placeholder check, so this step is not optional.
+fill in every value. **[SECURITY] L1 (out-of-band Phase 7 batch,
+2026-10-17): this is no longer a manual check.** Felix chose to keep
+secrets in `.env` rather than move to Docker secrets
+(D-7decided-env-secrets-kept), on condition of two real, built, enforced
+mechanisms:
+
+1. **`get_settings()` itself now refuses to start** under
+   `APP_ENV=production` if any secret-class variable is missing, is one
+   of the known placeholder/test values (`change-me`, `test-...`,
+   `smoke-...`, `placeholder-...`), or is shorter than its own stated
+   minimum -- `backend/app/secrets_policy.py`, wired into `api`/
+   `worker`/`migrate` alike (they all construct `Settings` only through
+   `get_settings()`). This is a real, code-enforced gate now, not a
+   promise to eventually build one.
+2. **Run `./ops/deploy/preflight.sh` before every deploy** (first deploy
+   and every later one) -- it fails loud, before `docker compose up`
+   ever runs, if: `.env`'s own permissions are looser than `600`; `.env`
+   is not owned by the user running the script; `.env` is tracked by
+   git, or sits untracked-but-unignored in this checkout's own working
+   tree (a careless `git add .`/`git add -A` would commit it); or any
+   secret-class variable is missing/placeholder/weak, reusing the exact
+   same policy `get_settings()` enforces -- one source of truth, never a
+   second, independently-maintained copy of the same rules. It never
+   prints a secret value, only variable names.
+
+The table below flags which variables must never be a placeholder in
+production -- both mechanisms above now ENFORCE this for every
+secret-class variable automatically; the table stays as a human-
+readable reference for what each one is and where to generate a real
+value, not as the only thing standing between a placeholder and a real
+deployment. Confirmed live: `Settings.jwt_signing_key`/
+`db_connection_encryption_key`'s own `min_length=32` constraint does NOT
+by itself reject the committed `.env.example` placeholder value
+(`"change-me-change-me-change-me-change-me"` is 40 characters, well
+over 32) -- a length check alone is not a placeholder check, which is
+exactly why `secrets_policy.py` checks both, separately.
 
 | Variable | Must never be a placeholder in production? | Notes |
 |---|---|---|
@@ -179,6 +206,13 @@ rewriting is still worth it given the credential is already rotated.
 ```
 cd /opt && git clone <this repo> samoflow && cd samoflow
 # .env filled in per §4 above, placed at the repo root.
+
+# [SECURITY] L1, PART B (2026-10-17): run before every deploy, first and
+# every later one -- fails loud before anything below it runs if .env's
+# permissions/ownership/git-exposure are wrong, or any secret-class
+# variable is missing/placeholder/weak.
+chmod 600 .env
+./ops/deploy/preflight.sh
 
 # Pull/build the backend image, run migrations (alembic upgrade head,
 # then ensure_collection() and the checkpointer setup -- entrypoint.sh's

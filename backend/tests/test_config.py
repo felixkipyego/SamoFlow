@@ -372,6 +372,26 @@ def test_repr_and_str_never_leak_jwt_signing_keys(monkeypatch):
     assert previous not in str(settings)
 
 
+def test_repr_and_str_never_leak_anthropic_api_key_or_smtp_password(monkeypatch):
+    # [SECURITY] L1, PART B (out-of-band Phase 7 batch, 2026-10-17): the
+    # two secret-class fields with no prior repr/str coverage -- both
+    # optional, so the trivial "default None never leaks" case already
+    # held; this proves the real, configured case too.
+    distinctive_anthropic = "distinctive-anthropic-key-should-never-leak"
+    distinctive_smtp_password = "distinctive-smtp-pw-should-never-leak"  # noqa: S105
+    set_valid_env(
+        monkeypatch,
+        VALID_ENV,
+        ANTHROPIC_API_KEY=distinctive_anthropic,
+        SMTP_PASSWORD=distinctive_smtp_password,
+    )
+    settings = Settings()
+    assert distinctive_anthropic not in repr(settings)
+    assert distinctive_anthropic not in str(settings)
+    assert distinctive_smtp_password not in repr(settings)
+    assert distinctive_smtp_password not in str(settings)
+
+
 def test_settings_error_message_still_names_the_field(monkeypatch):
     set_valid_env(
         monkeypatch, VALID_ENV, DATABASE_URL=f"mysql://user:{TEST_PASSWORD}@localhost/db"

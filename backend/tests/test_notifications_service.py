@@ -199,3 +199,34 @@ async def test_send_email_returns_false_on_a_real_send_failure_not_raises(monkey
 
     assert result is False
     assert "SMTP send failed" in caplog.text
+
+
+# [SECURITY] L1, PART B (out-of-band Phase 7 batch, 2026-10-17): the real
+# adversarial case neither existing failure test above exercises --
+# `server.login(username, password)` itself raising, with a REAL
+# SMTP_PASSWORD configured, so the password genuinely IS a live local
+# variable in _send_email_sync's own stack frame at the moment logger.
+# exception() formats the traceback. Confirmed live, not assumed, that
+# Python's default traceback formatter (used by the stdlib `logging`
+# module) never includes local variable values -- only file/line/code-
+# text per frame -- so this must stay true, not merely happen to be true
+# today.
+async def test_send_email_login_failure_never_leaks_the_password(monkeypatch, caplog):
+    distinctive_password = "distinctive-smtp-password-should-never-leak-32c"  # noqa: S105
+    set_valid_env(
+        monkeypatch,
+        VALID_ENV,
+        SMTP_HOST="smtp.example.com",
+        SMTP_FROM_ADDRESS="alerts@example.com",
+        SMTP_USERNAME="alerts-bot",
+        SMTP_PASSWORD=distinctive_password,
+    )
+    get_settings.cache_clear()
+    monkeypatch.setattr(notifications_service, "SMTP", _FakeSMTP)
+    _FakeSMTP.raise_on = "login"
+
+    result = await send_email("tenant@example.com", "Quota alert", "100% used")
+
+    assert result is False
+    assert "SMTP send failed" in caplog.text
+    assert distinctive_password not in caplog.text

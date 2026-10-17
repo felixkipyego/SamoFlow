@@ -334,3 +334,16 @@ rc=$?
 set -e
 [ "$rc" -eq 0 ] && [ "$realistic_out" = "OK" ] || fail "Settings construction failed under APP_ENV=production with real-looking secrets: $realistic_out"
 echo "PASS: Settings construction succeeds under APP_ENV=production with real-looking secrets"
+
+# (j) [SECURITY] L1, PART B (2026-10-17): .env can never get into the
+# image -- backend/.dockerignore already excludes it (backend/tests/
+# test_ignore_files_guard.py's own static check), but this is the live
+# proof against the REAL built image's own filesystem, not just the
+# ignore-file text. `-xdev` stays inside the image's own single
+# filesystem (no bind mounts to traverse); 2>/dev/null discards the
+# expected "Permission denied" noise from scanning root-owned
+# directories as the image's own non-root uid 10001 -- that noise is not
+# a signal either way, only stdout (an actual match) would be.
+found=$(docker run --rm --entrypoint find "$image" / -xdev -iname ".env*" 2>/dev/null)
+[ -z "$found" ] || fail "found .env-named file(s) inside the built image: $found"
+echo "PASS: no .env-named file exists anywhere inside the built image"
