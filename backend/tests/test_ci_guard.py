@@ -139,7 +139,14 @@ def _generic_workflow_violations(text: str) -> list[str]:
     if "pull_request_target" in text:
         violations.append("workflow triggers on the target-repo-context event")
 
-    if "secrets." in text:
+    # "scan-secrets.sh" (ops/security/scan-secrets.sh, referenced by name
+    # starting at secret-scan.yml, PART D of the 2026-10-17 out-of-band
+    # maintenance batch) is a literal substring match for "secrets." even
+    # though it is a script filename, not a `${{ secrets.NAME }}` context
+    # reference -- stripped out before the check so the real, intended
+    # protection (no workflow ever references a repository secret) stays
+    # exact rather than widened or disabled.
+    if "secrets." in text.replace("scan-secrets.sh", ""):
         violations.append("workflow references a secret")
 
     for line in lines:
@@ -268,6 +275,22 @@ def test_every_workflow_file_passes_generic_checks():
     for path in _all_workflow_files():
         violations = _generic_workflow_violations("\n".join(read_lines(path)))
         assert not violations, f"{path} violations:\n" + "\n".join(violations)
+
+
+def test_generic_check_still_catches_a_real_secret_reference():
+    # The "scan-secrets.sh" carve-out (added for secret-scan.yml, PART D
+    # of the 2026-10-17 out-of-band maintenance batch) must narrow the
+    # check, not disable it: a genuine `${{ secrets.FOO }}` reference
+    # elsewhere in the same file must still be caught.
+    text = "run: echo ${{ secrets.FOO }}\n# calls ops/security/scan-secrets.sh too"
+    violations = _generic_workflow_violations(text)
+    assert any("references a secret" in v for v in violations)
+
+
+def test_generic_check_does_not_false_positive_on_the_script_name_alone():
+    text = "run: ./ops/security/scan-secrets.sh \"${{ github.sha }}\"\n"
+    violations = _generic_workflow_violations(text)
+    assert not any("references a secret" in v for v in violations), violations
 
 
 def test_ci_workflow():
