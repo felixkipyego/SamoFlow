@@ -16,6 +16,25 @@ class SessionRequest(BaseModel):
     visitor_secret: str | None = None
 
 
+class WidgetAppearanceResponse(BaseModel):
+    """[SECURITY] Step 7-follow-up, Part C: GET /api/v1/widget-
+    appearance's own response -- an explicit, closed allow-list of
+    exactly the fields the LAUNCHER itself ever renders (confirmed by
+    reading widget/loader/src/dom.js directly: a hardcoded "Chat" label,
+    no logo, no title -- only its own background/text color and its
+    left/right position are tenant-configurable at all). Deliberately
+    NOT reusing `_public_widget_config()`'s own six-key shape: that
+    response is for an authenticated chat SESSION (title/greeting/logo_
+    url/privacy_notice_url included); this one is public, unauthenticated,
+    heavily cached, and must never grow a field beyond what the launcher
+    itself can show, by construction of this class, not by convention.
+    """
+
+    primary: str
+    primary_text: str
+    position: str
+
+
 class SessionResponse(BaseModel):
     # VERIFIED at Step 5.1 Part C (2026-10-15, docs/DECISIONS_REGISTER.md's
     # "Backend contract gaps" / D-6.1-session-field-na): the widget track,

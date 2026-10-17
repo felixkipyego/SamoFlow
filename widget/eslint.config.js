@@ -20,6 +20,12 @@ export default [
         console: "readonly",
         CSSStyleSheet: "readonly",
         URL: "readonly",
+        // [SECURITY] Step 7-follow-up, Part C: appearance.js's own
+        // bounded-timeout fetch -- the loader's first network call ever.
+        fetch: "readonly",
+        AbortController: "readonly",
+        setTimeout: "readonly",
+        clearTimeout: "readonly",
       },
     },
   },
@@ -36,6 +42,8 @@ export default [
         fetch: "readonly",
         crypto: "readonly",
         TextDecoder: "readonly",
+        // Part D: chat-controller.js's own stop()/AbortController wiring.
+        AbortController: "readonly",
       },
     },
   },
@@ -49,6 +57,10 @@ export default [
         URL: "readonly",
         TextEncoder: "readonly",
         setTimeout: "readonly",
+        // Part D: stop()'s own unit test fakes a real fetch/
+        // ReadableStream abort-rejection, same idiom as loader/test/
+        // appearance.test.mjs's own hangingFetch.
+        DOMException: "readonly",
       },
     },
   },
@@ -61,6 +73,8 @@ export default [
         process: "readonly",
         console: "readonly",
         URL: "readonly",
+        // Part D: "trigger stoppable stream"'s own sleep() helper.
+        setTimeout: "readonly",
       },
     },
   },
@@ -76,6 +90,7 @@ export default [
         console: "readonly",
         setTimeout: "readonly",
         fetch: "readonly",
+        DOMException: "readonly",
       },
     },
   },

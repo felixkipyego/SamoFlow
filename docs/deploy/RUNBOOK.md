@@ -161,6 +161,19 @@ requirement, proven live in §6 below):
   single compromised location defeats the whole point of encrypting
   backups at all.
 
+**Full-history secret scan** (this repo is public): `./ops/security/scan-secrets.sh`
+runs a gitleaks full-history scan via its own official container image,
+pinned to an exact version and digest (never `:latest`, no new repo
+dependency -- nothing is installed, Docker pulls the image fresh each
+run). Already-reviewed false positives are suppressed via the committed
+`.gitleaksignore` (repo root), each entry carrying its own one-line
+reason. Run this as part of Step 7.2's own full security run, and
+whenever in doubt before a push -- it exits non-zero on anything not
+already in that file. If it ever finds a REAL credential: do NOT rewrite
+history (this is a shared, public repo); rotate the exposed credential
+immediately at its real provider, then follow up with whether history
+rewriting is still worth it given the credential is already rotated.
+
 ## 5. First deploy
 
 ```
@@ -210,6 +223,24 @@ docker compose --env-file .env -f deploy/docker-compose.yml -f deploy/docker-com
 Confirm: `curl -I https://api.softwareske.com/health` returns `200` with
 no `Server:` header (backend/smoke-image.sh already proves this at the
 image level); `https://app.softwareske.com` loads the dashboard login.
+
+**Never run more than one `api` process** (never `docker compose up
+--scale api=2`, never add `--workers` to entrypoint.sh's own uvicorn
+command, never a `deploy.replicas` entry on the `api` service) without
+FIRST moving `chat_active_streams`/`chat_stop_requests`
+(`backend/app/chat/routes.py`) -- and re-checking every other
+in-process mechanism this project documents the same way (the usage
+counters, the various rate limiters, `StatusCache`) -- to shared state
+(Postgres, keyed by vid/lease_token, no new service needed). A second
+process can never see the first process's own in-process state: a
+visitor's own `POST /chat/stop` landing on the WRONG process would
+silently do nothing, and a visitor could be double-counted or
+rate-limited inconsistently depending on which process happened to
+serve which request. `backend/tests/test_single_api_process_guard.py`
+fails the build the moment entrypoint.sh or either compose file tries
+to raise this above one process on its own, but an operator-issued
+`--scale` flag at the command line is invisible to that guard --
+reading this paragraph is the only thing that catches that case.
 
 ### Admin CLI commands (after the first deploy, as pilot tenants onboard)
 

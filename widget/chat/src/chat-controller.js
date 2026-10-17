@@ -78,6 +78,15 @@ export class ChatController {
     this._widgetConfig = null;
     this._conversationId = null;
     this.isStreaming = false;
+    // Part D (docs/SPEC.md §9's "Stop mid-stream"): the AbortController
+    // for the CURRENTLY open /chat request, if any -- stop() aborts it
+    // for immediate local responsiveness (never waits on the separate
+    // POST /chat/stop round trip below to stop rendering), and
+    // `_consumeStream()`'s/`_sendOnce()`'s own catch blocks check this
+    // exact controller's `.signal.aborted` to tell an intentional stop
+    // apart from a real dropped connection -- the two look identical at
+    // the raw fetch-rejection level otherwise.
+    this._currentAbortController = null;
     // docs/SPEC.md §10: "a retry reuses the same client_message_id, so
     // the message never appears twice" -- the one piece of state a
     // retry needs that a fresh send() does not: the exact text and id
@@ -195,6 +204,50 @@ export class ChatController {
       await this._sendOnce(messageText, clientMessageId, callbacks, { retriedAfterSessionRefresh: false });
     } finally {
       this.isStreaming = false;
+      this._currentAbortController = null;
+    }
+  }
+
+  // Part D (docs/SPEC.md §9's "Stop mid-stream"): the widget-side half
+  // of the explicit-stop mechanism -- see backend/app/chat/routes.py's
+  // `stop_chat_turn()` for the backend half, and this file's own
+  // constructor comment for why TWO things happen, not one.
+  //
+  // 1. Aborts the local AbortController immediately -- this is what
+  //    makes the input re-enable/refocus without waiting on a round
+  //    trip: it makes `_consumeStream()`'s own `reader.read()` reject
+  //    right away, which resolves `_sendOnce()` (and therefore `send()`/
+  //    `retry()`'s own `finally`) as soon as the current microtask
+  //    queue runs, not after any network latency.
+  // 2. Fires POST /api/v1/chat/stop -- the ONE thing that actually tells
+  //    the backend to cancel generation server-side (docs/SPEC.md §9's
+  //    own "the server must actually cancel generation" -- an aborted
+  //    fetch alone only stops THIS widget instance from reading the
+  //    response; it does nothing to the server's own in-progress model
+  //    call). Best-effort: a failed/lost POST here is never surfaced to
+  //    the visitor -- the local abort above has already given them the
+  //    responsive UI they asked for, and a lost stop request just means
+  //    the server-side generation runs to its own natural completion
+  //    instead, no worse than today's "dropped connection" case.
+  //
+  // A no-op if nothing is currently streaming (mirrors the backend's own
+  // identical idempotent-no-op design).
+  async stop() {
+    if (!this.isStreaming || this._currentAbortController === null) {
+      return;
+    }
+    this._currentAbortController.abort();
+    const token = this._sessionToken;
+    if (token === null) {
+      return;
+    }
+    try {
+      await this._fetch(`${this._baseUrl}/api/v1/chat/stop`, {
+        method: "POST",
+        headers: { authorization: `Bearer ${token}` },
+      });
+    } catch {
+      // Best-effort -- see this method's own comment above.
     }
   }
 
@@ -216,6 +269,7 @@ export class ChatController {
       await this._sendOnce(messageText, clientMessageId, callbacks, { retriedAfterSessionRefresh: false });
     } finally {
       this.isStreaming = false;
+      this._currentAbortController = null;
     }
   }
 
@@ -226,6 +280,13 @@ export class ChatController {
       callbacks.onError?.("Couldn't start a session. Please reload and try again.");
       return;
     }
+
+    // Part D: a fresh controller per attempt -- a retried-after-401
+    // recursive call below replaces this with its OWN fresh one, so
+    // stop() always aborts the attempt actually in flight, never a
+    // stale, already-finished one from an earlier 401.
+    const abortController = new AbortController();
+    this._currentAbortController = abortController;
 
     let response;
     try {
@@ -240,8 +301,17 @@ export class ChatController {
           conversation_id: this._conversationId,
           client_message_id: clientMessageId,
         }),
+        signal: abortController.signal,
       });
     } catch {
+      // Part D: a stop click landing before the response even arrives
+      // (the rarer of the two timings stop() can race) -- distinguished
+      // from a real dropped connection by this SAME controller's own
+      // `.aborted` flag, never by inspecting the caught error's shape.
+      if (abortController.signal.aborted) {
+        callbacks.onDone?.({ truncated: false, offerEscalation: false, stopped: true });
+        return;
+      }
       callbacks.onError?.("Connection lost. Please try again.");
       return;
     }
@@ -261,10 +331,10 @@ export class ChatController {
       return;
     }
 
-    await this._consumeStream(response, callbacks);
+    await this._consumeStream(response, callbacks, abortController);
   }
 
-  async _consumeStream(response, callbacks) {
+  async _consumeStream(response, callbacks, abortController) {
     const parser = new SSEParser();
     const decoder = new TextDecoder();
     const reader = response.body.getReader();
@@ -319,7 +389,18 @@ export class ChatController {
             if (typeof data.conversation_id === "string") {
               this._conversationId = data.conversation_id;
             }
-            callbacks.onDone?.({ truncated: false, offerEscalation: Boolean(data.offer_escalation) });
+            callbacks.onDone?.({
+              truncated: false,
+              offerEscalation: Boolean(data.offer_escalation),
+              // Part D: the server's own verdict -- arrives whenever the
+              // server's stream finishes normally BEFORE this widget's
+              // own local abort ever reaches it (the stop click landed
+              // late enough that the server's own `done` event won races
+              // the local abort). The other `stopped: true` sites in
+              // this file are for the OPPOSITE timing: the local abort
+              // winning first, so no `done` event ever arrives at all.
+              stopped: Boolean(data.stopped),
+            });
           } else if (frame.event === "error") {
             const message = SSE_ERROR_MESSAGES[data.code] ?? DEFAULT_SSE_ERROR_MESSAGE;
             callbacks.onError?.(message);
@@ -328,6 +409,13 @@ export class ChatController {
         }
       }
     } catch {
+      // Part D: the common timing -- stop() aborted while `reader.read()`
+      // was already pending, which is what makes it reject. Same
+      // `.aborted`-flag distinction as `_sendOnce()`'s own catch above.
+      if (abortController.signal.aborted) {
+        callbacks.onDone?.({ truncated: false, offerEscalation: false, stopped: true });
+        return;
+      }
       callbacks.onError?.("Connection lost. Please try again.");
       return;
     }

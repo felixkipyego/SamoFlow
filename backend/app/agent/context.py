@@ -135,3 +135,30 @@ def quota_exhausted_from_config(config: Mapping[str, Any]) -> bool:
     working unchanged.
     """
     return bool(config.get("configurable", {}).get("quota_exhausted", False))
+
+
+def stop_requested_from_config(config: Mapping[str, Any]) -> bool:
+    """[SECURITY] Part D (docs/SPEC.md §9's "Stop mid-stream"): the ONE way
+    `_answer_node` (app/agent/graph.py) may check whether a visitor has
+    asked this turn to stop. Unlike `quota_exhausted`/`support_text`
+    above, this is NOT a value decided once before the graph runs --
+    it's a LIVE signal that can change mid-turn (the visitor can click
+    Stop at any point while the answer streams), so `_build_thread_
+    config()` stores a zero-argument callable here, not a plain value;
+    this accessor calls it fresh on every check. `None` (no callable --
+    every pre-Part-D caller/test that builds a config without this key)
+    means "never stopped", matching `quota_exhausted_from_config()`'s
+    own absent-key default reasoning.
+
+    [SECURITY] A callable is never a `str`/`int`/`bool`/`float`, so
+    `langgraph.checkpoint.base.get_checkpoint_metadata()`'s own
+    isinstance filter (see `tenant_id_from_config()`'s and `support_
+    text_from_config()`'s header comments for the full finding) silently
+    skips it -- confirmed live, not assumed: it is never copied into the
+    checkpoint's own persisted metadata, so no wrapping dict is needed
+    here the way `support_text` requires one.
+    """
+    checker = config.get("configurable", {}).get("stop_requested")
+    if checker is None:
+        return False
+    return bool(checker())

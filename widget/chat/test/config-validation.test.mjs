@@ -66,3 +66,54 @@ test("never throws on a null or undefined config (bad input: None)", () => {
   assert.doesNotThrow(() => validateWidgetConfig(null));
   assert.doesNotThrow(() => validateWidgetConfig(undefined));
 });
+
+// --- PART A: verified_domains (2026-10-16/17) -------------------------------
+
+test("verified_domains: a real, well-formed list passes through, lowercased", () => {
+  const config = validateWidgetConfig({ verified_domains: ["Example.com", "docs.example.com"] });
+  assert.deepEqual(config.verifiedDomains, ["example.com", "docs.example.com"]);
+});
+
+test("verified_domains: missing entirely falls back to an empty array (bad input: empty)", () => {
+  const config = validateWidgetConfig({});
+  assert.deepEqual(config.verifiedDomains, []);
+});
+
+test("verified_domains: null/non-array value falls back to an empty array, never throws", () => {
+  assert.deepEqual(validateWidgetConfig({ verified_domains: null }).verifiedDomains, []);
+  assert.deepEqual(validateWidgetConfig({ verified_domains: "example.com" }).verifiedDomains, []);
+});
+
+test("verified_domains: a non-string entry is dropped, not stringified", () => {
+  const config = validateWidgetConfig({ verified_domains: ["example.com", 123, null, {}] });
+  assert.deepEqual(config.verifiedDomains, ["example.com"]);
+});
+
+test("verified_domains: an entry carrying a scheme, port, path, userinfo or wildcard is dropped outright, never silently repaired", () => {
+  const config = validateWidgetConfig({
+    verified_domains: [
+      "https://example.com",
+      "example.com:8443",
+      "example.com/path",
+      "a@example.com",
+      "*.example.com",
+    ],
+  });
+  assert.deepEqual(config.verifiedDomains, []);
+});
+
+test("verified_domains: a trailing dot is normalized away", () => {
+  const config = validateWidgetConfig({ verified_domains: ["example.com."] });
+  assert.deepEqual(config.verifiedDomains, ["example.com"]);
+});
+
+test("verified_domains: an IDN entry canonicalizes to its punycode form", () => {
+  const config = validateWidgetConfig({ verified_domains: ["café.example"] });
+  assert.deepEqual(config.verifiedDomains, ["xn--caf-dma.example"]);
+});
+
+test("verified_domains: more than 50 entries is capped, never unbounded", () => {
+  const many = Array.from({ length: 200 }, (_, i) => `d${i}.example`);
+  const config = validateWidgetConfig({ verified_domains: many });
+  assert.ok(config.verifiedDomains.length <= 50);
+});

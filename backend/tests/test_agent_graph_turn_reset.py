@@ -65,6 +65,7 @@ def test_reset_turn_state_node_returns_every_fields_fresh_default():
         "resolved_model": None,
         "prompt_tokens": None,
         "completion_tokens": None,
+        "answer_stopped": False,
     }
 
 

@@ -8,11 +8,27 @@
 // check) to drive the chat UI through one real, visible conversation
 // end to end under a real strict CSP.
 //
+// [SECURITY] Step 7-follow-up, Part B: this is now genuinely TWO
+// origins, not one -- a WIDGET_PORT server (the "tenant's own site":
+// static HTML/CSS/JS, the host page's own CSP) and a separate API_PORT
+// server (the "SamoFlow API": every /api/v1/* fake endpoint), each
+// started here but listening on different ports/origins. Before this,
+// both lived on ONE port, so every widget fetch() was same-origin and
+// the browser never enforced a real CORS preflight at all -- this is
+// the exact, confirmed-live root cause of why this whole suite kept
+// passing while real cross-origin CORS gaps shipped (the widget launcher
+// color/stuck-input bug fix's own register entry, D-conversations-
+// escalate-cors-bugfix). Splitting the ports is what makes a REAL
+// browser CORS check unavoidable in every test from here on.
+//
 // Sets a real strict Content-Security-Policy RESPONSE HEADER (not just
 // a <meta> tag, for full fidelity to a real tenant deployment) with no
 // 'unsafe-inline' and no 'unsafe-eval' anywhere -- the exact bar
-// docs/SPEC.md §11 requires the widget to work under. Stdlib only
-// (node:http) -- no new dependency for this test helper.
+// docs/SPEC.md §11 requires the widget to work under; `connect-src` now
+// explicitly names the separate API origin too, matching what a real
+// tenant's own CSP would have to declare to let the widget call a
+// cross-origin API at all. Stdlib only (node:http) -- no new dependency
+// for this test helper.
 import http from "node:http";
 import crypto from "node:crypto";
 import { readFile } from "node:fs/promises";
@@ -44,14 +60,89 @@ const _sseContract = JSON.parse(
   readFileSync(path.join(widgetRoot, "..", "docs", "chat_sse_contract.json"), "utf8"),
 );
 
+// [SECURITY] Step 7-follow-up, Part B: the same contract-sharing
+// pattern as the SSE one above, applied to CORS -- backend/app/auth/
+// cors.py's own WIDGET_ROUTES is the real mechanism; backend/tests/
+// test_widget_cors_contract.py asserts it matches this exact file; this
+// fixture's own corsHeadersFor()/preflightFor() below build their
+// answers FROM it, so this mock cannot silently advertise a method/
+// header the real backend does not, or vice versa.
+const _corsContract = JSON.parse(
+  readFileSync(path.join(widgetRoot, "..", "docs", "widget_cors_contract.json"), "utf8"),
+);
+const _corsRoutes = Object.entries(_corsContract)
+  .filter(([key]) => !key.startsWith("_"))
+  .map(([name, entry]) => ({ name, pattern: new RegExp(entry.path), ...entry }));
+
+function _matchCorsRoute(pathname) {
+  return _corsRoutes.find((route) => route.pattern.test(pathname)) ?? null;
+}
+
+const WIDGET_PORT = Number(process.env.PORT || 4173);
+const API_PORT = Number(process.env.API_PORT || 4174);
+const WIDGET_ORIGIN = `http://127.0.0.1:${WIDGET_PORT}`;
+const API_ORIGIN = `http://127.0.0.1:${API_PORT}`;
+
 const CSP = [
   "default-src 'none'",
   "script-src 'self'",
   "style-src 'self'",
-  "connect-src 'self'",
+  // The widget's own fetch() calls now go to a genuinely different
+  // origin (API_ORIGIN) -- a real tenant's own CSP would need to name
+  // it explicitly too; 'self' alone would NOT let this page's own
+  // script talk to a separate API origin.
+  `connect-src 'self' ${API_ORIGIN}`,
   "img-src 'self'",
   "base-uri 'none'",
 ].join("; ");
+
+// [SECURITY] Step 7-follow-up, Part B: the fake API's own CORS
+// mechanism -- mirrors app.auth.cors.WidgetCORSMiddleware's real rules
+// (backend/app/auth/cors.py), simplified for this fixture's own single
+// simulated tenant/site-key/origin: ANY request whose real Origin
+// header is NOT exactly WIDGET_ORIGIN is treated as disallowed (no
+// per-site-key allow-list lookup needed here, since this fixture only
+// ever represents one real site key, matching the real demo stack's own
+// single-tenant shape). Never a wildcard, never echoes a disallowed
+// origin, never sends Access-Control-Allow-Credentials (the widget
+// authenticates with an in-memory Bearer token only, same reasoning as
+// the real backend's own cors.py header).
+function _realOrigin(req) {
+  const raw = req.headers.origin;
+  return typeof raw === "string" && raw.length > 0 ? raw : null;
+}
+
+function _isAllowedOrigin(origin) {
+  return origin === WIDGET_ORIGIN;
+}
+
+function preflightFor(route, req, res) {
+  const origin = _realOrigin(req);
+  const headers = {
+    "Access-Control-Allow-Methods": route.methods,
+    "Access-Control-Allow-Headers": route.headers,
+    Vary: "Origin",
+  };
+  if (origin) {
+    headers["Access-Control-Allow-Origin"] = origin;
+  }
+  res.writeHead(200, headers);
+  res.end();
+}
+
+// Applied to EVERY fake-API response below (success or error) for a
+// route the contract recognises -- Vary: Origin always; Access-Control-
+// Allow-Origin only when the real Origin header is the one allowed
+// origin, matching "a disallowed origin gets no ACAO on any branch,
+// success or error."
+function corsHeadersFor(req) {
+  const origin = _realOrigin(req);
+  const headers = { Vary: "Origin" };
+  if (origin && _isAllowedOrigin(origin)) {
+    headers["Access-Control-Allow-Origin"] = origin;
+  }
+  return headers;
+}
 
 const MIME_TYPES = {
   ".html": "text/html; charset=utf-8",
@@ -144,7 +235,55 @@ const _lastMessageByConversation = new Map();
 // deliberately reuse the same token, which no real test does.
 const _sessionConversations = new Map();
 
+// Part D (docs/SPEC.md §9's "Stop mid-stream"): mirrors the real
+// backend's own `_get_stop_requests()` (backend/app/chat/routes.py) --
+// a per-visitor (here, per bearer token, this fixture's own stand-in
+// for a real vid) flag set by POST /api/v1/chat/stop and read by the
+// "trigger stoppable stream" branch below between each delayed token
+// write, so an e2e test can prove the SAME explicit-stop mechanics the
+// real backend implements, not merely that the widget's own
+// AbortController stops rendering locally.
+const _stopRequests = new Set();
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 async function handleFakeApi(req, res, pathname) {
+  // [SECURITY] Step 7-follow-up, Part B: every widget-facing path's own
+  // OPTIONS preflight, answered centrally -- mirrors app.auth.cors.
+  // WidgetCORSMiddleware's own "never reaches a real handler" shape.
+  // Checked before any of the specific routes below, for every method.
+  if (req.method === "OPTIONS") {
+    const route = _matchCorsRoute(pathname);
+    if (route) {
+      preflightFor(route, req, res);
+      return true;
+    }
+    return false;
+  }
+
+  // [SECURITY] Step 7-follow-up, Part C: GET /api/v1/widget-appearance
+  // -- the real endpoint's own `teal, left` test color/position, so the
+  // "a brand-new visitor sees the tenant color/position with no click"
+  // e2e test actually proves something (a fixture returning the
+  // loader's own default would never catch a regression here, the
+  // identical reasoning server.mjs's own `/session` fixture color
+  // already applies). Deliberately a plain, unconditional
+  // Access-Control-Allow-Origin: "*", matching the real backend's own
+  // one deliberate wildcard exception (app/auth/routes.py's own header
+  // has the full reasoning) -- never gated through `corsHeadersFor()`.
+  if (pathname === "/api/v1/widget-appearance" && req.method === "GET") {
+    res.writeHead(200, {
+      "Content-Type": "application/json",
+      "Content-Security-Policy": CSP,
+      "Cache-Control": "public, max-age=120",
+      "Access-Control-Allow-Origin": "*",
+    });
+    res.end(JSON.stringify({ primary: "#14b8a6", primary_text: "#ffffff", position: "left" }));
+    return true;
+  }
+
   if (pathname === "/api/v1/session" && req.method === "POST") {
     const sessionToken = crypto.randomUUID();
     const conversationId = crypto.randomUUID();
@@ -168,7 +307,11 @@ async function handleFakeApi(req, res, pathname) {
         privacy_notice_url: null,
       },
     });
-    res.writeHead(200, { "Content-Type": "application/json", "Content-Security-Policy": CSP });
+    res.writeHead(200, {
+      "Content-Type": "application/json",
+      "Content-Security-Policy": CSP,
+      ...corsHeadersFor(req),
+    });
     res.end(body);
     return true;
   }
@@ -180,8 +323,82 @@ async function handleFakeApi(req, res, pathname) {
 
     if (message === "fail once then succeed" && !_failedOnce.has(clientMessageId)) {
       _failedOnce.add(clientMessageId);
-      res.writeHead(503, { "Content-Type": "application/json", "Content-Security-Policy": CSP });
+      res.writeHead(503, {
+        "Content-Type": "application/json",
+        "Content-Security-Policy": CSP,
+        ...corsHeadersFor(req),
+      });
       res.end(JSON.stringify({ detail: "service temporarily unavailable, please retry" }));
+      return true;
+    }
+
+    // [SECURITY] Step 7-follow-up, Part B: real, named triggers for the
+    // two real pre-stream HTTP error statuses the task names (409
+    // busy, 429 rate-limited) -- deliberately NOT a page.route()
+    // interception (confirmed live, by a direct adversarial probe, that
+    // Playwright's route.fulfill() bypasses the browser's own CORS
+    // enforcement entirely, so a route-mocked response proves nothing
+    // about CORS either way). These go through this real server, on
+    // the real API_PORT origin, so the browser's own preflight/ACAO
+    // check genuinely applies.
+    if (message === "trigger 409 busy") {
+      res.writeHead(409, {
+        "Content-Type": "application/json",
+        "Content-Security-Policy": CSP,
+        ...corsHeadersFor(req),
+      });
+      res.end(JSON.stringify({ detail: "this conversation is busy, please retry" }));
+      return true;
+    }
+    if (message === "trigger 429 rate limited") {
+      res.writeHead(429, {
+        "Content-Type": "application/json",
+        "Content-Security-Policy": CSP,
+        "Retry-After": "7",
+        ...corsHeadersFor(req),
+      });
+      res.end(JSON.stringify({ detail: "too many requests", retry_after: 7 }));
+      return true;
+    }
+
+    // Part D (docs/SPEC.md §9's "Stop mid-stream"): a deliberately SLOW
+    // stream (tokens spaced 150ms apart, up to 20 of them -- ~3s total)
+    // so a real Playwright test has genuine time to click Stop while it
+    // is still running, and checks `_stopRequests` (set by POST
+    // /api/v1/chat/stop below) between every token write -- the live,
+    // two-request proof that the widget's Stop button actually reaches
+    // this fixture's own explicit stop endpoint, not merely that
+    // AbortController stops the widget's local rendering.
+    if (message === "trigger stoppable stream") {
+      const token = _bearerToken(req);
+      const stopCid =
+        _sessionConversations.get(token) || "fake-conversation-id";
+      _stopRequests.delete(token);
+      res.writeHead(200, {
+        "Content-Type": "text/event-stream",
+        "Content-Security-Policy": CSP,
+        ...corsHeadersFor(req),
+      });
+      let stopped = false;
+      for (let i = 0; i < 20; i += 1) {
+        res.write(sseFrame("token", { text: `slow token ${i} ` }));
+        await sleep(150);
+        if (_stopRequests.has(token)) {
+          stopped = true;
+          break;
+        }
+      }
+      _stopRequests.delete(token);
+      res.write(
+        sseFrame("done", {
+          message_id: "fake-message-id",
+          usage: null,
+          offer_escalation: false,
+          conversation_id: stopCid,
+          stopped,
+        }),
+      );
+      res.end();
       return true;
     }
 
@@ -193,7 +410,11 @@ async function handleFakeApi(req, res, pathname) {
     // first -- Step 6.2's own pre-authorised contract addition).
     const cid = _sessionConversations.get(_bearerToken(req)) || "fake-conversation-id";
 
-    res.writeHead(200, { "Content-Type": "text/event-stream", "Content-Security-Policy": CSP });
+    res.writeHead(200, {
+      "Content-Type": "text/event-stream",
+      "Content-Security-Policy": CSP,
+      ...corsHeadersFor(req),
+    });
 
     if (message === "what did I just tell you?") {
       // The deterministic "turn 2 depends on turn 1" proof: this only
@@ -202,6 +423,14 @@ async function handleFakeApi(req, res, pathname) {
       // "(nothing yet)" instead, failing the e2e test loudly.
       const remembered = _lastMessageByConversation.get(cid) ?? "(nothing yet)";
       res.write(sseFrame("token", { text: `You told me: "${remembered}"` }));
+    } else if (message === "trigger quota exhausted") {
+      // docs/SPEC.md §9/§11: quota-exhausted is NEVER a distinct HTTP
+      // error -- it is a normal 200 stream with a fixed fallback reply,
+      // decided server-side before the model is called, through the
+      // exact same `token`/`citations`/`done` sequence any other answer
+      // uses. This trigger documents that explicitly, rather than
+      // leaving it implied by the generic success-path test alone.
+      res.write(sseFrame("token", { text: "Our team will follow up by email." }));
     } else {
       res.write(sseFrame("token", { text: "Here is a " }));
       res.write(sseFrame("token", { text: "Here is a safe answer." }));
@@ -229,8 +458,24 @@ async function handleFakeApi(req, res, pathname) {
         usage: null,
         offer_escalation: true,
         conversation_id: cid,
+        stopped: false,
       }),
     );
+    res.end();
+    return true;
+  }
+
+  // Part D: mirrors the real backend's own POST /api/v1/chat/stop
+  // (backend/app/chat/routes.py's `stop_chat_turn()`) -- marks this
+  // bearer token's own in-flight "trigger stoppable stream" loop above
+  // as stopped, then responds 204 regardless (idempotent, matching the
+  // real endpoint's own no-op-if-nothing-running behaviour).
+  if (pathname === "/api/v1/chat/stop" && req.method === "POST") {
+    _stopRequests.add(_bearerToken(req));
+    res.writeHead(204, {
+      "Content-Security-Policy": CSP,
+      ...corsHeadersFor(req),
+    });
     res.end();
     return true;
   }
@@ -247,7 +492,11 @@ async function handleFakeApi(req, res, pathname) {
         },
       ],
     });
-    res.writeHead(200, { "Content-Type": "application/json", "Content-Security-Policy": CSP });
+    res.writeHead(200, {
+      "Content-Type": "application/json",
+      "Content-Security-Policy": CSP,
+      ...corsHeadersFor(req),
+    });
     res.end(body);
     return true;
   }
@@ -264,7 +513,11 @@ async function handleFakeApi(req, res, pathname) {
         { role: "assistant", text: "We're open 9-5. See [our hours page](https://example.com/hours) for details." },
       ],
     });
-    res.writeHead(200, { "Content-Type": "application/json", "Content-Security-Policy": CSP });
+    res.writeHead(200, {
+      "Content-Type": "application/json",
+      "Content-Security-Policy": CSP,
+      ...corsHeadersFor(req),
+    });
     res.end(body);
     return true;
   }
@@ -282,13 +535,21 @@ async function handleFakeApi(req, res, pathname) {
     const cid = escalateMatch[1];
     const contactFields = await readJsonBody(req);
     if (_escalatedConversations.has(cid)) {
-      res.writeHead(409, { "Content-Type": "application/json", "Content-Security-Policy": CSP });
+      res.writeHead(409, {
+        "Content-Type": "application/json",
+        "Content-Security-Policy": CSP,
+        ...corsHeadersFor(req),
+      });
       res.end(JSON.stringify({ detail: "an escalation is already open for this conversation" }));
       return true;
     }
     _escalatedConversations.add(cid);
     _lastEscalationContactFields = contactFields;
-    res.writeHead(200, { "Content-Type": "application/json", "Content-Security-Policy": CSP });
+    res.writeHead(200, {
+      "Content-Type": "application/json",
+      "Content-Security-Policy": CSP,
+      ...corsHeadersFor(req),
+    });
     res.end(JSON.stringify({ escalation_id: "fake-escalation-id", status: "new" }));
     return true;
   }
@@ -313,15 +574,15 @@ function resolveStaticTarget(urlPath) {
   return path.join(publicDir, relative);
 }
 
-const PORT = Number(process.env.PORT || 4173);
-
-const server = http.createServer(async (req, res) => {
+// [SECURITY] Step 7-follow-up, Part B: TWO separate http.Server
+// instances, TWO separate ports -- the widget page (static files only)
+// and the fake API (every /api/v1/* route only) are no longer the same
+// origin. A request that reaches the widget server for an /api/v1/*
+// path (or vice versa) is a real routing bug in this fixture, not
+// something either server falls back to serving -- confirmed structurally
+// by giving each server its OWN handler, with no shared fallthrough path.
+const widgetServer = http.createServer(async (req, res) => {
   const { pathname } = new URL(req.url, "http://localhost");
-
-  if (await handleFakeApi(req, res, pathname)) {
-    return;
-  }
-
   const target = resolveStaticTarget(pathname);
   try {
     const body = await readFile(target);
@@ -336,6 +597,18 @@ const server = http.createServer(async (req, res) => {
   }
 });
 
-server.listen(PORT, "127.0.0.1", () => {
-  console.log(`widget e2e fixture server listening on http://127.0.0.1:${PORT}`);
+const apiServer = http.createServer(async (req, res) => {
+  const { pathname } = new URL(req.url, "http://localhost");
+  if (await handleFakeApi(req, res, pathname)) {
+    return;
+  }
+  res.writeHead(404, { "Content-Type": "application/json" });
+  res.end(JSON.stringify({ detail: "not found" }));
+});
+
+widgetServer.listen(WIDGET_PORT, "127.0.0.1", () => {
+  console.log(`widget e2e fixture: widget page listening on ${WIDGET_ORIGIN}`);
+});
+apiServer.listen(API_PORT, "127.0.0.1", () => {
+  console.log(`widget e2e fixture: fake API listening on ${API_ORIGIN}`);
 });

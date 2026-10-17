@@ -6,9 +6,7 @@ import { test, expect } from "@playwright/test";
 
 async function openChat(page) {
   await page.goto("/chat-fixture.html");
-  await page.evaluate(() => {
-    document.getElementById("samoflow-widget-host").shadowRoot.querySelector("button").click();
-  });
+  await page.locator("#samoflow-widget-host").locator("css=button.samoflow-launcher").click();
   return page.locator("#samoflow-widget-host").locator("css=.sf-panel");
 }
 

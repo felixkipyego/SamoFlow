@@ -98,6 +98,21 @@ class Settings(BaseSettings):
     session_rate_limit_per_site_key_window_seconds: float = Field(default=60, gt=0)
     session_rate_limit_per_ip: int = Field(default=30, gt=0)
     session_rate_limit_per_ip_window_seconds: float = Field(default=60, gt=0)
+    # [SECURITY] Step 7-follow-up, Part C: GET /api/v1/widget-appearance
+    # (no visitor session, no conversation, no LLM call -- just the
+    # tenant's own public primary color/text color/position) is called
+    # on EVERY page view, not only on a chat open like /session is --
+    # higher limits than session's own, same (limit, window) shape,
+    # reasoned explicitly rather than reusing session's numbers blindly:
+    # a real, popular tenant site under genuine traffic could see many
+    # concurrent FIRST-time visitors each firing this once; the browser's
+    # own HTTP cache (Cache-Control/ETag, see the route itself) already
+    # absorbs almost all repeat load within the cache window, so this
+    # only needs to bound the genuinely-uncached case.
+    widget_appearance_rate_limit_per_site_key: int = Field(default=120, gt=0)
+    widget_appearance_rate_limit_per_site_key_window_seconds: float = Field(default=60, gt=0)
+    widget_appearance_rate_limit_per_ip: int = Field(default=60, gt=0)
+    widget_appearance_rate_limit_per_ip_window_seconds: float = Field(default=60, gt=0)
     # Task 2.1.a: the pgcrypto passphrase for db_connections.
     # encrypted_credentials (docs/SPEC.md §5.6: "Credentials are encrypted
     # at rest"). Required, same discipline as qdrant_api_key/
@@ -269,6 +284,20 @@ class Settings(BaseSettings):
     chat_rate_limit_per_visitor_window_seconds: float = Field(default=60, gt=0)
     chat_rate_limit_per_ip: int = Field(default=30, gt=0)
     chat_rate_limit_per_ip_window_seconds: float = Field(default=60, gt=0)
+    # [SECURITY] batch follow-up (2026-10-16): POST /chat/stop had NO
+    # rate limiting at all -- a real, confirmed gap (every other
+    # authenticated widget endpoint has one). Same shape as the chat
+    # limits above, a separate, independent `RateLimiter` instance with
+    # its own disjoint key space -- a visitor hammering /chat/stop must
+    # never consume their own /chat quota, and vice versa. Deliberately
+    # a HIGHER per-visitor limit than /chat itself (a visitor clicking
+    # Stop is never a billable AI call the way a chat turn is, so there
+    # is no cost-containment reason to cap it as tightly -- this bound
+    # exists purely against abuse/DoS of the endpoint itself).
+    chat_stop_rate_limit_per_visitor: int = Field(default=20, gt=0)
+    chat_stop_rate_limit_per_visitor_window_seconds: float = Field(default=60, gt=0)
+    chat_stop_rate_limit_per_ip: int = Field(default=60, gt=0)
+    chat_stop_rate_limit_per_ip_window_seconds: float = Field(default=60, gt=0)
     # Step 4.4: docs/SPEC.md §7's own named limit, word for word -- "3
     # escalations per rolling hour per visitor (a hard rejection with
     # 429 and Retry-After at the limit)". The window is a real "rolling

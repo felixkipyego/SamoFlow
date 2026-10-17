@@ -55,6 +55,7 @@ from fastapi import FastAPI
 from app.admin.routes import router as admin_router
 from app.agent.checkpointer import close_checkpointer_pool, get_checkpointer, open_checkpointer_pool
 from app.agent.graph import build_graph
+from app.auth.cors import WidgetCORSMiddleware
 from app.auth.routes import router as auth_router
 from app.chat.routes import router as chat_router
 from app.config import Settings, get_settings
@@ -301,6 +302,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         lifespan=_lifespan,
     )
     app.state.settings = settings
+    # [SECURITY] Step 7-follow-up: the ONE real CORS mechanism for every
+    # visitor-facing (widget) endpoint -- see app/auth/cors.py's own
+    # header for the full design. Added before any router, matching
+    # Starlette's own documented middleware-ordering rule (added-last
+    # runs outermost/first on the way in); it is a no-op for every
+    # dashboard/admin/health path (D-6.1-cors-same-origin: that surface
+    # stays CORS-free by design).
+    app.add_middleware(WidgetCORSMiddleware)
     app.include_router(health_router)
     app.include_router(auth_router)
     app.include_router(chat_router)

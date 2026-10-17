@@ -1,0 +1,33 @@
+{
+  "_comment": "[SECURITY] The single committed source of truth for every visitor-facing route's own CORS shape (method/headers a preflight may advertise) -- backend/app/auth/cors.py's own WIDGET_ROUTES is the real mechanism; backend/tests/test_widget_cors_contract.py asserts it matches this file exactly; widget/test/e2e/server.mjs's own fake API builds its preflight/ACAO logic FROM this same file, so the e2e mock cannot silently drift from the real backend's own CORS shape -- the same pattern docs/chat_sse_contract.json already established for SSE event fields, applied here to the CORS mechanism Part A built.",
+  "session": {
+    "path": "^/api/v1/session$",
+    "methods": "POST, OPTIONS",
+    "headers": "Content-Type"
+  },
+  "chat": {
+    "path": "^/api/v1/chat$",
+    "methods": "POST, OPTIONS",
+    "headers": "Content-Type, Authorization"
+  },
+  "chat_stop": {
+    "path": "^/api/v1/chat/stop$",
+    "methods": "POST, OPTIONS",
+    "headers": "Authorization"
+  },
+  "list_conversations": {
+    "path": "^/api/v1/conversations$",
+    "methods": "GET, OPTIONS",
+    "headers": "Authorization"
+  },
+  "conversation_messages": {
+    "path": "^/api/v1/conversations/[^/]+/messages$",
+    "methods": "GET, OPTIONS",
+    "headers": "Authorization"
+  },
+  "escalate": {
+    "path": "^/api/v1/conversations/[^/]+/escalate$",
+    "methods": "POST, OPTIONS",
+    "headers": "Content-Type, Authorization"
+  }
+}

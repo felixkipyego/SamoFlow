@@ -156,7 +156,7 @@ async def test_answer_prompt_for_a_joined_followup_contains_the_prepared_query(m
         "retrieved_chunks": [_chunk("doc-a", "Expedited shipping is $9.99.")],
     }
 
-    await graph_module._answer_node(state)
+    await graph_module._answer_node(state, {})
 
     assert captured == [joined]
     assert captured[0] != "How much does that cost?"
@@ -176,7 +176,7 @@ async def test_answer_prompt_for_a_first_turn_contains_the_raw_message(monkeypat
         "retrieved_chunks": [_chunk("doc-a", "Expedited shipping is $9.99.")],
     }
 
-    await graph_module._answer_node(state)
+    await graph_module._answer_node(state, {})
 
     assert captured == [raw]
 
@@ -203,7 +203,7 @@ async def test_prepared_query_still_never_reaches_token_events_or_persisted_answ
         "retrieved_chunks": [_chunk("doc-a", "Alpha.")],
     }
 
-    result = await graph_module._answer_node(state)
+    result = await graph_module._answer_node(state, {})
 
     assert marker not in result["messages"][0].content
     assert all(marker not in (event.get("text") or "") for event in writer_events)
@@ -234,7 +234,7 @@ async def test_a_completed_answer_captures_the_resolved_model_and_token_counts(m
         "retrieved_chunks": [_chunk("doc-a", "Alpha.")],
     }
 
-    result = await graph_module._answer_node(state)
+    result = await graph_module._answer_node(state, {})
 
     assert result["resolved_model"] == "gpt-6-luna"
     assert result["prompt_tokens"] == 42
@@ -265,7 +265,7 @@ async def test_a_can_answer_false_turn_never_reports_a_resolved_model_or_tokens(
         "retrieved_chunks": [_chunk("doc-a", "Alpha.")],
     }
 
-    result = await graph_module._answer_node(state)
+    result = await graph_module._answer_node(state, {})
 
     assert result == {"can_answer": False}
 
@@ -278,6 +278,164 @@ def _patched(monkeypatch, fake_model):
     monkeypatch.setattr(graph_module, "get_chat_model", lambda: fake_model)
     monkeypatch.setattr(graph_module, "get_stream_writer", lambda: writer_events.append)
     return writer_events
+
+
+# --- Part D (docs/SPEC.md §9's "Stop mid-stream") ---------------------------
+#
+# The REST-level proof (a real stop landing through the real HTTP
+# wiring) lives in test_chat_routes.py, right next to the dropped-
+# connection test it is the deliberate opposite of. These are the fast,
+# DB-free unit tests of `_answer_node`'s own stop-check logic in
+# isolation: exactly which loop iteration honours a stop, and that the
+# underlying model stream is genuinely closed early, not merely stopped
+# being read.
+
+
+def _counting_stop_after(n: int):
+    """A `stop_requested` callable that reports True starting from its
+    Nth call onward -- lets a test pin EXACTLY which emitted delta a
+    stop takes effect on, deterministically, with no real timing.
+    """
+    calls = {"count": 0}
+
+    def _checker() -> bool:
+        calls["count"] += 1
+        return calls["count"] >= n
+
+    return _checker
+
+
+async def test_stop_requested_after_several_deltas_breaks_with_a_strict_partial_answer(
+    monkeypatch,
+):
+    full_answer = "This is a longer answer with several separate words in it."
+    chunks = build_fake_answer_arg_chunks(
+        can_answer=True, used_chunk_ids=["c1"], answer=full_answer
+    )
+    events = _patched(monkeypatch, FakeAnswerToolChatModel(arg_chunks=chunks))
+    state = {
+        "messages": [HumanMessage(content="q")],
+        "prepared_query": "q",
+        "retrieved_chunks": [_chunk("doc-a", full_answer)],
+    }
+    # Stops on the 3rd delta that actually grows the visible answer --
+    # comfortably after `can_answer` has resolved and real text has
+    # started streaming, comfortably before the full answer completes.
+    config = {"configurable": {"stop_requested": _counting_stop_after(3)}}
+
+    result = await graph_module._answer_node(state, config)
+
+    assert result["can_answer"] is True
+    assert result["answer_stopped"] is True
+    persisted = result["messages"][0].content
+    assert persisted != ""
+    assert persisted != full_answer
+    assert full_answer.startswith(persisted)  # a genuine prefix, never garbled
+    # The writer's own emitted text matches exactly what was persisted --
+    # "what was streamed" and "what's saved" stay the same value even on
+    # a stopped turn (this node's own docstring's existing guarantee,
+    # unaffected by Part D).
+    assert "".join(e["text"] for e in events) == persisted
+
+
+async def test_stop_requested_from_the_very_first_delta_still_keeps_that_one_delta(
+    monkeypatch,
+):
+    # A stop requested from the START -- confirmed to NOT be honoured
+    # before the first real delta exists (see _answer_node's own
+    # docstring, Part D paragraph): there is no partial answer to keep
+    # before any text has streamed, so the FIRST delta is always let
+    # through regardless of how early `stop_requested` already reports
+    # True.
+    full_answer = "Several separate words here too."
+    chunks = build_fake_answer_arg_chunks(
+        can_answer=True, used_chunk_ids=["c1"], answer=full_answer
+    )
+    events = _patched(monkeypatch, FakeAnswerToolChatModel(arg_chunks=chunks))
+    state = {
+        "messages": [HumanMessage(content="q")],
+        "prepared_query": "q",
+        "retrieved_chunks": [_chunk("doc-a", full_answer)],
+    }
+    config = {"configurable": {"stop_requested": lambda: True}}
+
+    result = await graph_module._answer_node(state, config)
+
+    assert result["can_answer"] is True
+    assert result["answer_stopped"] is True
+    persisted = result["messages"][0].content
+    assert persisted != ""
+    assert persisted != full_answer
+    assert full_answer.startswith(persisted)
+    assert len(events) == 1  # exactly one delta -- the very first, never more
+
+
+async def test_a_config_with_no_stop_requested_key_never_stops_early(monkeypatch):
+    # Every existing caller/test that predates Part D builds a config
+    # without this key at all (the same backward-compatible default
+    # `quota_exhausted_from_config()`/`support_text_from_config()`
+    # already establish) -- confirmed here that the full answer still
+    # streams to completion in that case, not merely assumed from the
+    # accessor's own default.
+    full_answer = "A complete answer that must never be cut short."
+    chunks = build_fake_answer_arg_chunks(
+        can_answer=True, used_chunk_ids=["c1"], answer=full_answer
+    )
+    _patched(monkeypatch, FakeAnswerToolChatModel(arg_chunks=chunks))
+    state = {
+        "messages": [HumanMessage(content="q")],
+        "prepared_query": "q",
+        "retrieved_chunks": [_chunk("doc-a", full_answer)],
+    }
+
+    result = await graph_module._answer_node(state, {})
+
+    assert result["can_answer"] is True
+    assert result["answer_stopped"] is False
+    assert result["messages"][0].content == full_answer
+
+
+async def test_a_stopped_turn_actually_closes_the_underlying_model_stream(monkeypatch):
+    # [SECURITY] The real proof behind "the server must actually cancel
+    # generation" (docs/SPEC.md §9): breaking out of a bare `async for`
+    # does NOT itself call `.aclose()` on the underlying async generator
+    # (confirmed live, not assumed -- see `_answer_node`'s own docstring,
+    # Part D paragraph) -- this would leave the model provider's own
+    # HTTP stream open and still generating/billing after a stop. This
+    # fake model's own `finally` block is the live, non-vacuous proof
+    # that `contextlib.aclosing()` really does reach it: removing
+    # `aclosing()` from `_answer_node` (confirmed by temporarily doing so
+    # while developing this test) makes this assertion fail, since a
+    # bare `async for` leaves the generator merely abandoned, never
+    # closed, until garbage collection -- which this test does not wait
+    # for.
+    closed = {"value": False}
+    full_answer = "An answer long enough to stop partway through for real."
+    chunks = build_fake_answer_arg_chunks(
+        can_answer=True, used_chunk_ids=["c1"], answer=full_answer
+    )
+
+    class _TrackingClosureModel(FakeAnswerToolChatModel):
+        async def _astream(self, messages, stop=None, run_manager=None, **kwargs):
+            upstream = super()._astream(messages, stop=stop, run_manager=run_manager, **kwargs)
+            try:
+                async for chunk in upstream:
+                    yield chunk
+            finally:
+                closed["value"] = True
+
+    _patched(monkeypatch, _TrackingClosureModel(arg_chunks=chunks))
+    state = {
+        "messages": [HumanMessage(content="q")],
+        "prepared_query": "q",
+        "retrieved_chunks": [_chunk("doc-a", full_answer)],
+    }
+    config = {"configurable": {"stop_requested": _counting_stop_after(2)}}
+
+    result = await graph_module._answer_node(state, config)
+
+    assert result["answer_stopped"] is True
+    assert closed["value"] is True
 
 
 def _patch_retrieve_with_fixed_chunks(monkeypatch, chunks: list[dict]) -> None:
@@ -320,7 +478,7 @@ async def test_zero_text_emitted_before_can_answer_is_known_true(monkeypatch):
         "prepared_query": 'What color is the sky?',
         "retrieved_chunks": [_chunk("doc-a", "The sky is blue.")],
     }
-    result = await graph_module._answer_node(state)
+    result = await graph_module._answer_node(state, {})
 
     assert result["can_answer"] is True
     assert result["messages"][0].content == "The sky is blue."
@@ -340,7 +498,7 @@ async def test_can_answer_false_emits_zero_deltas(monkeypatch):
         "retrieved_chunks": [],
     }
 
-    result = await graph_module._answer_node(state)
+    result = await graph_module._answer_node(state, {})
 
     # Task 3.4.e: _reset_turn_state_node now owns cited_chunk_labels/
     # citations' own fresh-turn defaults -- _answer_node's own can_answer
@@ -396,7 +554,7 @@ async def test_append_only_violation_fails_loudly(monkeypatch):
     }
 
     with pytest.raises(graph_module.AnswerStreamNotAppendOnlyError):
-        await graph_module._answer_node(state)
+        await graph_module._answer_node(state, {})
 
 
 async def test_failure_before_any_emission_returns_the_dependency_failure_state(monkeypatch):
@@ -419,7 +577,7 @@ async def test_failure_before_any_emission_returns_the_dependency_failure_state(
         "retrieved_chunks": [],
     }
 
-    result = await graph_module._answer_node(state)
+    result = await graph_module._answer_node(state, {})
 
     assert result == {"can_answer": False, "dependency_failed": True}
 
@@ -444,7 +602,7 @@ async def test_failure_after_emission_began_raises_the_named_mid_stream_error(mo
     }
 
     with pytest.raises(graph_module.AnswerStreamFailedMidStreamError):
-        await graph_module._answer_node(state)
+        await graph_module._answer_node(state, {})
     assert len(events) >= 1
 
 
@@ -522,7 +680,7 @@ async def test_model_emitting_used_chunk_ids_before_answer_is_still_handled_corr
         "retrieved_chunks": [_chunk("doc-a", "Our hours are 9-5.")],
     }
 
-    result = await graph_module._answer_node(state)
+    result = await graph_module._answer_node(state, {})
 
     assert result["can_answer"] is True
     assert "".join(e["text"] for e in events) == "Our hours are 9-5."
@@ -555,7 +713,7 @@ async def test_duplicate_used_chunk_ids_key_resolves_to_the_last_occurrence(monk
         ],
     }
 
-    result = await graph_module._answer_node(state)
+    result = await graph_module._answer_node(state, {})
 
     assert result["cited_chunk_labels"] == ["c2"]
     assert result["citations"] == [
@@ -583,7 +741,7 @@ async def test_used_chunk_ids_truncated_at_stream_end_drops_safely_not_crashes(m
         "retrieved_chunks": [_chunk("doc-a", "Hi there")],
     }
 
-    result = await graph_module._answer_node(state)
+    result = await graph_module._answer_node(state, {})
 
     assert "".join(e["text"] for e in events) == "Hi there"
     assert result["messages"][0].content == "Hi there"
@@ -616,7 +774,7 @@ async def test_chunk_id_looking_text_inside_the_answer_prose_is_never_treated_as
         ],
     }
 
-    result = await graph_module._answer_node(state)
+    result = await graph_module._answer_node(state, {})
 
     assert "".join(e["text"] for e in events) == "I recommend checking c1 and c2 in the guide."
     # Only "c1" is a real used_chunk_ids entry -- "c2" mentioned in prose
@@ -692,7 +850,7 @@ async def test_injected_client_id_and_tenant_id_in_the_tool_call_has_no_effect(m
         "retrieved_chunks": [_chunk("doc-a", "The Pro plan costs $24.99/month.")],
     }
 
-    result = await graph_module._answer_node(state)
+    result = await graph_module._answer_node(state, {})
 
     # Same citations, same shape of persisted state a call WITHOUT the
     # injected keys would produce.
@@ -714,6 +872,7 @@ async def test_injected_client_id_and_tenant_id_in_the_tool_call_has_no_effect(m
         "resolved_model",
         "prompt_tokens",
         "completion_tokens",
+        "answer_stopped",
     }
     assert str(other_tenant_id) not in repr(result)
 

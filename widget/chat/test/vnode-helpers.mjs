@@ -6,8 +6,8 @@
 import { renderMarkdown } from "../src/render.js";
 import { parseMarkdown } from "../src/markdown.js";
 
-export function renderText(text, allowedUrls = new Set()) {
-  return renderMarkdown(parseMarkdown(text), allowedUrls);
+export function renderText(text, allowedUrls = new Set(), verifiedDomains = new Set()) {
+  return renderMarkdown(parseMarkdown(text), allowedUrls, verifiedDomains);
 }
 
 function _walk(node, visit) {
@@ -30,7 +30,12 @@ export function collectAnchors(tree) {
   const anchors = [];
   _walk(tree, (node) => {
     if (node.type === "a") {
-      anchors.push({ href: node.props.href, text: _flattenText(node.props.children) });
+      anchors.push({
+        href: node.props.href,
+        text: _flattenText(node.props.children),
+        rel: node.props.rel,
+        target: node.props.target,
+      });
     }
   });
   return anchors;

@@ -51,6 +51,20 @@ EXTRA_EXAMPLE_KEYS: tuple[str, ...] = (
     # Step 6.2: the install-snippet screen's own platform-wide base URL --
     # optional (defaults to None), declared empty like ANTHROPIC_API_KEY.
     "PUBLIC_API_BASE_URL",
+    # [SECURITY] Step 7-follow-up, Part C: GET /api/v1/widget-appearance's
+    # own rate limits -- the identical "optional Settings field, has a
+    # default, declared non-empty with its real default" shape as the
+    # SESSION_RATE_LIMIT_* entries above.
+    "WIDGET_APPEARANCE_RATE_LIMIT_PER_SITE_KEY",
+    "WIDGET_APPEARANCE_RATE_LIMIT_PER_SITE_KEY_WINDOW_SECONDS",
+    "WIDGET_APPEARANCE_RATE_LIMIT_PER_IP",
+    "WIDGET_APPEARANCE_RATE_LIMIT_PER_IP_WINDOW_SECONDS",
+    # [SECURITY] batch follow-up (2026-10-16): POST /chat/stop's own new
+    # rate limits -- same shape as the two blocks above.
+    "CHAT_STOP_RATE_LIMIT_PER_VISITOR",
+    "CHAT_STOP_RATE_LIMIT_PER_VISITOR_WINDOW_SECONDS",
+    "CHAT_STOP_RATE_LIMIT_PER_IP",
+    "CHAT_STOP_RATE_LIMIT_PER_IP_WINDOW_SECONDS",
 )
 
 # Step 7.3 prep (ops track): genuinely new deploy/ops-layer configuration

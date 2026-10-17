@@ -8,9 +8,7 @@ import AxeBuilder from "@axe-core/playwright";
 
 async function openChat(page) {
   await page.goto("/chat-fixture.html");
-  await page.evaluate(() => {
-    document.getElementById("samoflow-widget-host").shadowRoot.querySelector("button").click();
-  });
+  await page.locator("#samoflow-widget-host").locator("css=button.samoflow-launcher").click();
   return page.locator("#samoflow-widget-host").locator("css=.sf-panel");
 }
 
@@ -23,6 +21,19 @@ test("an automated accessibility scan of the open panel finds no serious or crit
 
 test("the launcher and the send button are both keyboard-reachable and keyboard-operable", async ({ page }) => {
   await page.goto("/chat-fixture.html");
+
+  // The launcher mounts asynchronously (loader/src/dom.js's own
+  // stylesheet-load wait, loader/src/widget.js's own mount()) -- wait
+  // for it to actually exist before racing it with a fixed two-Tab
+  // sequence below. Same ordering discipline test/e2e/widget.spec.mjs
+  // and chat.spec.mjs already use (auto-retrying locator assertions)
+  // for this identical async gap; this test used a one-shot
+  // page.evaluate() snapshot instead, which is exactly what made it an
+  // intermittent, load-dependent flake rather than a deterministic
+  // check.
+  await expect(
+    page.locator("#samoflow-widget-host").locator("css=button.samoflow-launcher"),
+  ).toBeVisible();
 
   // Tab from a blank page must reach the launcher (it pierces the
   // shadow boundary the same way any other focusable element does).

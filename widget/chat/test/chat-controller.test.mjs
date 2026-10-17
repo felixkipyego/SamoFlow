@@ -62,7 +62,7 @@ test("a normal turn streams tokens, citations, then done", async () => {
 
   assert.deepEqual(events[0], ["token", "Hello"]);
   assert.equal(events[1][0], "citations");
-  assert.deepEqual(events[2], ["done", { truncated: false, offerEscalation: false }]);
+  assert.deepEqual(events[2], ["done", { truncated: false, offerEscalation: false, stopped: false }]);
   assert.equal(controller.isStreaming, false);
 });
 
@@ -244,6 +244,93 @@ test("a dropped connection (stream ends with no 'done' event) surfaces the calm 
 
   assert.deepEqual(tokens, ["partial answer"]);
   assert.equal(errors.length, 1);
+});
+
+// Part D (docs/SPEC.md §9's "Stop mid-stream"): a fake reader that
+// resolves its FIRST read() with one real token, then HANGS on the
+// second -- until the fetch's own AbortSignal fires, at which point it
+// rejects exactly like a real fetch()/ReadableStream does. Mirrors
+// loader/test/appearance.test.mjs's own "hangingFetch" idiom (Part C),
+// applied here to the chat stream's reader instead of a plain fetch.
+test("stop() aborts the local stream immediately and tells the backend to cancel generation", async () => {
+  let chatSignal;
+  const stopCalls = [];
+  const encoder = new TextEncoder();
+  let readCount = 0;
+  const reader = {
+    async read() {
+      readCount += 1;
+      if (readCount === 1) {
+        return { done: false, value: encoder.encode(_sseFrame("token", { text: "partial" })) };
+      }
+      return new Promise((_resolve, reject) => {
+        chatSignal.addEventListener("abort", () =>
+          reject(new DOMException("aborted", "AbortError")),
+        );
+      });
+    },
+    async cancel() {},
+  };
+
+  const fetchImpl = async (url, init) => {
+    if (isSession(url)) {
+      return _sessionResponse();
+    }
+    if (isChat(url)) {
+      chatSignal = init.signal;
+      return {
+        ok: true,
+        status: 200,
+        headers: { get: () => null },
+        body: { getReader: () => reader },
+      };
+    }
+    if (url.endsWith("/api/v1/chat/stop")) {
+      stopCalls.push(init);
+      return { ok: true, status: 204, headers: { get: () => null } };
+    }
+    throw new Error(`no handler matched: ${url}`);
+  };
+
+  const controller = new ChatController("https://api.example.com", "sk_live", { fetchImpl });
+
+  const tokens = [];
+  let doneInfo = null;
+  const errors = [];
+  const sendPromise = controller.send("hi", {
+    onToken: (t) => tokens.push(t),
+    onDone: (info) => {
+      doneInfo = info;
+    },
+    onError: (m) => errors.push(m),
+  });
+
+  // Let the first token arrive and the second read() start hanging.
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.deepEqual(tokens, ["partial"]);
+  assert.equal(controller.isStreaming, true);
+
+  await controller.stop();
+  await sendPromise;
+
+  assert.equal(controller.isStreaming, false);
+  // Never the generic "Connection lost" error -- an intentional stop is
+  // distinguished from a real dropped connection (chat-controller.js's
+  // own `abortController.signal.aborted` check).
+  assert.deepEqual(errors, []);
+  assert.deepEqual(doneInfo, { truncated: false, offerEscalation: false, stopped: true });
+  assert.equal(stopCalls.length, 1);
+  assert.equal(stopCalls[0].method, "POST");
+  assert.equal(stopCalls[0].headers.authorization, "Bearer tok-1");
+});
+
+test("stop() with nothing streaming is a silent no-op -- no fetch at all", async () => {
+  const fetchImpl = _makeFetch([[isSession, () => _sessionResponse()]]);
+  const controller = new ChatController("https://api.example.com", "sk_live", { fetchImpl });
+
+  await controller.stop();
+
+  assert.equal(fetchImpl.calls.length, 0);
 });
 
 test("a network-level fetch failure (offline) surfaces the calm connection-lost message", async () => {
