@@ -7707,6 +7707,10 @@ Verified: `python -m pytest tests/test_claude_settings_guard.py -q` -- 3 passed 
 
 Verified: `curl -s https://pypi.org/simple/qdrant-client/` -- newest listed release is `1.9.2`; no `1.19.x` entry. No code/config change in this part; no test run needed.
 
+**PART B.2 (Dependabot: actions/setup-node 5.0.0 -> 7.1.0, PR #2)**: bumped in `widget.yml` and `security.yml`'s `npm-audit` job (both still on the old `a0853c24...` v5.0.0 SHA); `dashboard.yml` already pinned the same new SHA from an earlier step, so this makes all four workflow files consistent -- `ci.yml` has no Node step (backend-only). SHA `949feb2413d6458794dcd2491c4babbbce0c15c1` confirmed live against the real `actions/setup-node` GitHub releases API as the exact commit tagged `v7.1.0`. Checked the real release notes for every intermediate major (v5.0.0, v6.0.0, v7.0.0, v7.1.0) for anything touching `node-version-file` or caching, since both are used here (`node-version-file: widget/.nvmrc`/`dashboard/.nvmrc`, `cache: npm`, `cache-dependency-path`): v5's and v6's own "Breaking Changes" sections are both about AUTOMATIC `packageManager`-field cache detection (v6 narrows it to npm only) -- irrelevant, since every step here already sets `cache: npm` explicitly rather than relying on auto-detection; v7.0.0's "Migrate to ESM" is an internal change with no documented input/output effect; v7.1.0 only adds absolute-path support to `node-version-file` (additive) and a manifest-fetch retry. No breaking change affects either input this repo uses. See `D-maint-setup-node-7.1.0`, docs/DECISIONS_REGISTER.md.
+
+Verified: `backend/tests/test_ci_guard.py` (generic workflow checks, cover every `.github/workflows/*.yml` file including the pinned-SHA check) -- 3 passed.
+
 ## 6. Project constraints
 
 - Out of scope for v1 (deferred): logged-in visitors, live human handoff, approved live database queries, tenant-supplied tool servers, actions with human approval, JavaScript-rendered crawling, a request challenge (e.g. Turnstile), the reranker (unless evals justify it), spreadsheet uploads, payment processing, multiple languages, custom widget CSS, 2FA/Google sign-in, stream resume (SPEC §19).
