@@ -41,6 +41,33 @@
   left: 20px;
 }
 
+/* Out-of-band maintenance batch (2026-10-17), PART E: hidden until
+ * loader/src/widget.js's own reveal() removes this class (appearance
+ * resolved, or its short timeout elapsed) -- `visibility: hidden`, not
+ * `display: none`, is what makes the launcher neither focusable nor
+ * announced to assistive tech while pending, with no separate
+ * `tabindex`/`aria-hidden` bookkeeping needed, while every other box-
+ * model property (`:host`'s own `position: fixed` placement) stays
+ * exactly as it will be the instant it IS revealed -- no layout shift
+ * on reveal, only a visibility change. No transition on this rule,
+ * deliberately: an instant, one-shot toggle has nothing for
+ * prefers-reduced-motion to need to disable.
+ *
+ * A DESCENDANT selector targeting `.samoflow-launcher` directly, not
+ * `visibility: hidden` set on `:host(.sf-pending)` alone: confirmed
+ * live that the latter does NOT work here -- `.samoflow-launcher`'s
+ * own `all: initial` resets its OWN `visibility` back to the initial
+ * `visible` value, which wins over whatever would otherwise have
+ * inherited down from the host, since `all: initial` sets the
+ * property explicitly rather than leaving it to inherit. This rule's
+ * higher specificity (`:host(.sf-pending) .samoflow-launcher`, two
+ * compound selectors) over `.samoflow-launcher`'s own single-class
+ * rule is what lets an explicit `visibility: hidden` here win instead
+ * of relying on inheritance at all. */
+:host(.sf-pending) .samoflow-launcher {
+  visibility: hidden;
+}
+
 .samoflow-launcher {
   all: initial;
   display: inline-flex;
