@@ -1,12 +1,24 @@
 #!/bin/bash
-# ops/security/scan-secrets.sh -- [SECURITY] full-history secret scan via
-# gitleaks' own official container image, pinned to an exact version AND
-# digest (never :latest) -- adds no new repo dependency: nothing is
-# installed, Docker pulls and runs the image fresh each time. Built for
-# PART B of the 2026-10-17 [SECURITY] batch; intended for ad hoc use and
-# for Step 7.2's own full security run to re-run as-is.
+# ops/security/scan-secrets.sh -- [SECURITY] secret scan via gitleaks' own
+# official container image, pinned to an exact version AND digest (never
+# :latest) -- adds no new repo dependency: nothing is installed, Docker
+# pulls and runs the image fresh each time. Built for PART B of the
+# 2026-10-17 [SECURITY] batch; intended for ad hoc use and for Step 7.2's
+# own full security run to re-run as-is.
 #
-#   ./ops/security/scan-secrets.sh
+#   ./ops/security/scan-secrets.sh                    # full history (default)
+#   ./ops/security/scan-secrets.sh "<base-sha>..<head-sha>"   # one git log range only
+#
+# The optional first argument, added at the out-of-band maintenance batch
+# (2026-10-17, PART D), is passed straight to gitleaks' own `--log-opts`:
+# any `git log` revision range. Added so the new PR-triggered
+# .github/workflows/secret-scan.yml job can scan just a PR's own new
+# commits -- re-scanning this repo's full, already-reviewed history (300+
+# commits and growing) on every single PR would be slow and pointless, and
+# reusing this exact script (same pinned image, same .gitleaksignore) keeps
+# one source of truth instead of a second, duplicated gitleaks invocation.
+# With no argument, behavior is byte-identical to before this change: a
+# full-history scan from HEAD.
 #
 # Already-reviewed false positives are suppressed via the committed
 # .gitleaksignore (repo root) -- each entry there carries its own
@@ -19,6 +31,7 @@
 # JSON report it writes, must never carry a real secret value in the
 # clear, even if a real one is ever found.
 set -euo pipefail
+LOG_OPTS="${1:-}"
 cd "$(dirname "${BASH_SOURCE[0]}")/../.."
 REPO_ROOT="$(pwd)"
 
@@ -64,18 +77,31 @@ esac
 REPORT_DIR="$(mktemp -d)"
 trap 'rm -rf "$REPORT_DIR"' EXIT
 
-commit_count="$(git rev-list --count HEAD)"
-echo "Scanning full git history ($commit_count commits on HEAD's own ancestry) via $GITLEAKS_IMAGE ..."
+GITLEAKS_ARGS=(
+    detect
+    --source="$REPO_ROOT"
+    --redact
+    --report-format json
+    --report-path /out/gitleaks-report.json
+    -i "$REPO_ROOT/.gitleaksignore"
+)
+
+if [ -n "$LOG_OPTS" ]; then
+    GITLEAKS_ARGS+=(--log-opts="$LOG_OPTS")
+    echo "Scanning git log range '$LOG_OPTS' only via $GITLEAKS_IMAGE ..."
+else
+    commit_count="$(git rev-list --count HEAD)"
+    echo "Scanning full git history ($commit_count commits on HEAD's own ancestry) via $GITLEAKS_IMAGE ..."
+fi
 
 docker run --rm \
     -v "$MOUNT_ROOT:$MOUNT_ROOT" \
     -v "$REPORT_DIR:/out" \
     "$GITLEAKS_IMAGE" \
-    detect \
-    --source="$REPO_ROOT" \
-    --redact \
-    --report-format json \
-    --report-path /out/gitleaks-report.json \
-    -i "$REPO_ROOT/.gitleaksignore"
+    "${GITLEAKS_ARGS[@]}"
 
-echo "Clean: no un-allowlisted secrets found across $commit_count commits."
+if [ -n "$LOG_OPTS" ]; then
+    echo "Clean: no un-allowlisted secrets found in range '$LOG_OPTS'."
+else
+    echo "Clean: no un-allowlisted secrets found across $commit_count commits."
+fi

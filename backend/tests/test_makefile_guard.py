@@ -66,6 +66,13 @@ def _compose_line():
     return None
 
 
+def _actionlint_image_line():
+    for line in read_lines(_MAKEFILE):
+        if line.startswith("ACTIONLINT_IMAGE"):
+            return line
+    return None
+
+
 def test_all_expected_targets_are_declared():
     recipes = _targets_and_recipes(read_lines(_MAKEFILE))
     missing = _EXPECTED_TARGETS - recipes.keys()
@@ -121,6 +128,30 @@ def test_no_recipe_line_swallows_errors_with_or_true():
             assert "|| true" not in recipe_line, (
                 f"target {target!r} has a recipe line containing '|| true': {recipe_line!r}"
             )
+
+
+def test_lint_target_runs_actionlint_pinned_by_digest():
+    # Out-of-band maintenance batch (2026-10-17): a real CI failure
+    # (secret-scan.yml's own GitHub Actions expression using arithmetic,
+    # which does not exist in that language) was only caught by a real
+    # CI run, with no local check able to catch it first. actionlint's
+    # own official container, pinned by digest (never :latest, same
+    # discipline as GITLEAKS_IMAGE in ops/security/scan-secrets.sh),
+    # closes that gap -- this guards it stays wired into `make lint` and
+    # stays pinned, so a future edit cannot silently drop or unpin it.
+    recipes = _targets_and_recipes(read_lines(_MAKEFILE))
+    lint_text = " ".join(recipes.get("lint", []))
+    assert "$(ACTIONLINT_IMAGE)" in lint_text, (
+        f"'lint' target no longer runs actionlint against .github/workflows/: {lint_text!r}"
+    )
+
+    image_line = _actionlint_image_line()
+    assert image_line is not None, "Makefile has no ACTIONLINT_IMAGE variable definition"
+    assert "rhysd/actionlint" in image_line, f"unexpected image: {image_line!r}"
+    assert "@sha256:" in image_line, f"actionlint image is not pinned by digest: {image_line!r}"
+    assert ":latest" not in image_line, (
+        f"actionlint image uses the floating ':latest' tag: {image_line!r}"
+    )
 
 
 def test_down_never_removes_volumes_but_down_volumes_does():

@@ -10,7 +10,18 @@ name: Dashboard CI
 on:
   push:
     branches: [main]
-  pull_request: {}
+    # Documentation-only changes skip this workflow's own test+e2e jobs
+    # (CI-minutes reduction ahead of the repo going private, out-of-band
+    # maintenance batch PART C, 2026-10-17). Unlike ci.yml, no RUNBOOK
+    # carve-out is needed here: no test this workflow runs reads a .md
+    # file under docs/** or a repo-root *.md file as a real guard.
+    paths-ignore:
+      - "docs/**"
+      - "*.md"
+  pull_request:
+    paths-ignore:
+      - "docs/**"
+      - "*.md"
 
 concurrency:
   group: dashboard-ci-${{ github.ref }}

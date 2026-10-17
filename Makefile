@@ -35,6 +35,20 @@ COMPOSE = docker compose --env-file .env -f deploy/docker-compose.yml
 # constraint graph is unsatisfiable for an unreachable Python version.
 UV_COMPILE = uv pip compile backend/pyproject.toml --universal --python-version 3.12 --overrides backend/requirements-overrides.txt --generate-hashes --no-header
 
+# Out-of-band maintenance batch (2026-10-17): actionlint's own official
+# container, pinned to an exact version AND digest (never :latest, same
+# discipline as ops/security/scan-secrets.sh's own GITLEAKS_IMAGE) --
+# confirmed live via `docker pull`/`docker inspect --format
+# '{{index .RepoDigests 0}}'` before this was written, not copied from
+# memory. Added after a real CI failure this exact tool would have
+# caught locally: secret-scan.yml's own `fetch-depth:
+# ${{ github.event.pull_request.commits + 1 }}` used GitHub Actions
+# expression arithmetic, which does not exist -- a parse error that
+# invalidated the whole workflow file, only caught by a real CI run.
+# No new repo dependency: nothing installed, docker pulls and runs the
+# image fresh each time, mirroring scan-secrets.sh's own convention.
+ACTIONLINT_IMAGE = rhysd/actionlint:1.7.12@sha256:b1934ee5f1c509618f2508e6eb47ee0d3520686341fec936f3b79331f9315667
+
 .DEFAULT_GOAL := help
 
 .PHONY: help env up down down-volumes migrate test test-db test-db-down test-qdrant test-qdrant-down test-all lint evals eval eval-answers eval-calibrate install lock lock-upgrade lock-check audit hooks openapi dashboard-install dashboard-lint dashboard-test dashboard-build dashboard-audit dashboard-e2e
@@ -148,6 +162,7 @@ test-all: test-db test-qdrant
 
 lint:
 	ruff check backend evals hooks.py
+	docker run --rm -v "$$(pwd):/repo" -w /repo $(ACTIONLINT_IMAGE) -color
 
 evals:
 	python evals/run.py

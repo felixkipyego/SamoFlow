@@ -24,16 +24,35 @@
 #    regex that never resolves YAML aliases, so it silently fails
 #    (`RuntimeError: Expected content to change!`) rather than editing the
 #    anchor. Covered by the same manual routine referenced above.
+#
+# Out-of-band maintenance batch (2026-10-17), PART C, CI-minutes reduction
+# ahead of the repo going private: schedule moved weekly -> monthly on
+# every ecosystem below (fewer scheduled scans; a real vulnerability still
+# gets its own PR immediately via Dependabot's security-updates platform
+# default, which runs independently of this schedule). Every group below
+# also gained `update-types: ["minor", "patch"]`, so a major version never
+# silently rides along inside a group's bundled PR -- found the hard way
+# at PART B.3 of this same batch (D-maint-dashboard-npm-bump): the prior
+# unscoped "*" grouping bundled 6 safe minor/patch bumps together with 2
+# breaking majors (typescript, the eslint/eslint-plugin-react-hooks trio)
+# into ONE PR, so the whole PR failed CI and none of the safe bumps could
+# be told apart from the breaking ones without manually re-testing each.
+# A major now always arrives as its own separate, ungrouped PR -- still
+# proposed, still reviewed, just never hidden inside a bundle that could
+# make 6 safe bumps look unsafe (or 2 unsafe ones look safe).
 version: 2
 updates:
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:
-      interval: "weekly"
+      interval: "monthly"
     groups:
       github-actions:
         patterns:
           - "*"
+        update-types:
+          - "minor"
+          - "patch"
     open-pull-requests-limit: 5
 
   # Step 6.1: dashboard/'s own npm dependencies -- committed, hash-free
@@ -42,21 +61,27 @@ updates:
   - package-ecosystem: "npm"
     directory: "/dashboard"
     schedule:
-      interval: "weekly"
+      interval: "monthly"
     groups:
       dashboard-npm:
         patterns:
           - "*"
+        update-types:
+          - "minor"
+          - "patch"
     open-pull-requests-limit: 5
 
   - package-ecosystem: "docker-compose"
     directory: "/deploy"
     schedule:
-      interval: "weekly"
+      interval: "monthly"
     groups:
       docker-compose:
         patterns:
           - "*"
+        update-types:
+          - "minor"
+          - "patch"
     open-pull-requests-limit: 5
     # TEMPORARY, not a decision to stop tracking Postgres updates: silences
     # the known Dependabot YAML-anchor/alias file-updater bug documented in
@@ -78,9 +103,12 @@ updates:
   - package-ecosystem: "npm"
     directory: "/widget"
     schedule:
-      interval: "weekly"
+      interval: "monthly"
     groups:
       widget-npm:
         patterns:
           - "*"
+        update-types:
+          - "minor"
+          - "patch"
     open-pull-requests-limit: 5

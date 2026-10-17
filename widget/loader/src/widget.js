@@ -25,7 +25,22 @@ import { fetchAppearance } from "./appearance.js";
 // callback (e.g. DOMContentLoaded) fires, it has already reverted to null.
 const loaderScriptEl = document.currentScript;
 
-async function mount() {
+// Out-of-band maintenance batch (2026-10-17), PART E: the launcher must
+// show ONCE, already in its final look -- not the default color/position
+// painted first and then switched once GET /api/v1/widget-appearance
+// resolves (a color flash on every visitor; a jump across the screen for
+// a left-positioned tenant). 800ms, not the appearance fetch's own more
+// patient 2000ms abort budget: the appearance endpoint is tiny, same-
+// infra, cacheable (max-age=120) and already proven in production at a
+// sub-second p95 (D-7follow-widget-appearance-endpoint) -- 800ms is
+// generous slack above that real p95 while still keeping the worst case
+// (a genuinely unreachable API) well under a 1-second-feels-instant
+// rule of thumb for a visitor's very first paint of anything on the
+// page. Below the task's own ~800ms ceiling, not at it, so there is
+// headroom without needing to re-justify the number later.
+const APPEARANCE_REVEAL_TIMEOUT_MS = 800;
+
+function mount() {
   if (!loaderScriptEl) {
     console.error(
       "[SamoFlow] widget.js could not find its own <script> tag " +
@@ -43,6 +58,17 @@ async function mount() {
 
   const host = document.createElement("div");
   host.id = "samoflow-widget-host";
+
+  // Out-of-band maintenance batch (2026-10-17), PART E: held hidden
+  // (widget.css's own `:host(.sf-pending) { visibility: hidden }`) until
+  // `reveal()` below removes this class -- `visibility: hidden` (not
+  // `display: none`) is what makes the launcher neither focusable nor
+  // announced to assistive tech while pending (a hidden-but-laid-out
+  // element is pulled out of both the tab order and the accessibility
+  // tree by the UA itself, no extra `tabindex`/`aria-hidden` bookkeeping
+  // needed), while keeping `all: initial`'s own box model untouched for
+  // the moment it IS revealed.
+  host.classList.add("sf-pending");
 
   // Open, not closed (deliberate choice -- see docs/progress/widget.md):
   // nothing secret ever lives in this shadow tree (the session token is
@@ -69,36 +95,48 @@ async function mount() {
     });
   });
 
-  // [SECURITY] Step 7-follow-up, Part C, fixed 2026-10-17: the launcher's
+  // [SECURITY] Step 7-follow-up, Part C (2026-10-17), REVISED at the
+  // out-of-band maintenance batch PART E (2026-10-17): the launcher's
   // own real brand color/position, on EVERY page view -- including a
-  // visitor's very first-ever one, not only a returning visitor (the gap
-  // the retired color-cache.js/position-cache.js localStorage mechanism
-  // could only ever close for a returning visitor). Runs CONCURRENTLY
-  // with host/shadowRoot/launcher creation above, never blocking it --
-  // the original shape awaited this BEFORE creating the host at all,
-  // which meant the launcher did not exist in the DOM until this fetch
-  // resolved on every single page load, silently contradicting this
-  // same code's own stated goal ("a slow/unreachable API cannot
-  // meaningfully delay first paint", appearance.js) -- the launcher's
-  // first paint was delayed by the FULL round trip, every time, not
-  // only when the API was slow or down. Found via a genuine CI-only
-  // Playwright flake (test/e2e/accessibility.spec.mjs's keyboard-nav
-  // test), reproduced locally only inside a real ubuntu-24.04 container
-  // under load, never on a fast, unloaded native Chromium. On any
-  // failure, `appearance` is still null and both widget.css's own
-  // hardcoded defaults (color) and the plain `sf-position-left` class
-  // omission (position, defaulting right) apply unchanged, exactly like
-  // a cache miss used to -- now simply the launcher's OWN first frame
-  // too, rather than something that only ever showed up on a slow
-  // network.
-  const appearance = await fetchAppearance(config.baseUrl, config.siteKey);
-  if (appearance) {
-    host.style.setProperty("--sf-primary", appearance.primary);
-    host.style.setProperty("--sf-primary-text", appearance.primaryText);
-    if (appearance.position === "left") {
-      host.classList.add("sf-position-left");
+  // visitor's very first-ever one, not only a returning visitor. The CI
+  // fix that made host/shadowRoot/launcher creation synchronous (this
+  // same file, `D-ci-fix-appearance-fetch-blocks-mount`) was correct on
+  // its own terms, but left a NEW, real defect: the launcher now always
+  // painted the DEFAULT color/position first and only switched once this
+  // fetch resolved -- a color flash for every visitor, and a jump across
+  // the screen for a left-positioned tenant. Fixed by revealing exactly
+  // ONCE, with whichever of (a) a resolved `appearance` or (b) the
+  // `APPEARANCE_REVEAL_TIMEOUT_MS` timeout happens first -- never a
+  // paint-then-switch. `reveal()` sets every CSSOM property (the two
+  // custom properties, the position class) and removes `sf-pending` in
+  // the SAME synchronous call, so the browser's next paint is the first
+  // and only one, already in its final look.
+  let revealed = false;
+  function reveal(appearance) {
+    if (revealed) {
+      // A late response arriving after the timeout already fired --
+      // ignored outright, not merely "the DOM happens not to change
+      // further": nothing below this guard ever runs for it.
+      return;
     }
+    revealed = true;
+    if (appearance) {
+      host.style.setProperty("--sf-primary", appearance.primary);
+      host.style.setProperty("--sf-primary-text", appearance.primaryText);
+      if (appearance.position === "left") {
+        host.classList.add("sf-position-left");
+      }
+    }
+    // No reveal transition: an instant, one-shot visibility toggle has
+    // nothing for prefers-reduced-motion to disable in the first place
+    // -- the simplest design that satisfies it, not an animation this
+    // task would then have to gate behind a media-query check.
+    host.classList.remove("sf-pending");
   }
+
+  fetchAppearance(config.baseUrl, config.siteKey, {
+    timeoutMs: APPEARANCE_REVEAL_TIMEOUT_MS,
+  }).then(reveal);
 }
 
 if (document.readyState === "loading") {

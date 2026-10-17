@@ -274,13 +274,49 @@ async function handleFakeApi(req, res, pathname) {
   // one deliberate wildcard exception (app/auth/routes.py's own header
   // has the full reasoning) -- never gated through `corsHeadersFor()`.
   if (pathname === "/api/v1/widget-appearance" && req.method === "GET") {
-    res.writeHead(200, {
+    const { searchParams } = new URL(req.url, "http://localhost");
+    const siteKey = searchParams.get("site_key");
+    const body = JSON.stringify({ primary: "#14b8a6", primary_text: "#ffffff", position: "left" });
+    const headers = {
       "Content-Type": "application/json",
       "Content-Security-Policy": CSP,
       "Cache-Control": "public, max-age=120",
       "Access-Control-Allow-Origin": "*",
-    });
-    res.end(JSON.stringify({ primary: "#14b8a6", primary_text: "#ffffff", position: "left" }));
+    };
+
+    // Out-of-band maintenance batch (2026-10-17), PART E: three
+    // site-key-triggered response shapes, keyed off dedicated fixture
+    // pages (test/e2e/public/launcher-reveal-*.html), so
+    // launcher-reveal.spec.mjs can prove the reveal-once behavior
+    // against each one without any OTHER test's own fixed-fast-response
+    // expectations (chat.spec.mjs, widget.spec.mjs) ever changing.
+    if (siteKey === "sk_test_e2e_delayed") {
+      // Resolves WITHIN loader/src/widget.js's own 800ms reveal budget
+      // (300ms) -- proves the reveal-once path for a real, non-trivial
+      // network delay, not only the instant-response default.
+      setTimeout(() => {
+        res.writeHead(200, headers);
+        res.end(body);
+      }, 300);
+      return true;
+    }
+    if (siteKey === "sk_test_e2e_hang") {
+      // Never responds at all -- proves the 800ms timeout itself
+      // reveals with defaults, not a response of any shape.
+      return true;
+    }
+    if (siteKey === "sk_test_e2e_late") {
+      // Resolves AFTER the 800ms reveal budget (1200ms) -- proves a
+      // late response changes nothing once already revealed.
+      setTimeout(() => {
+        res.writeHead(200, headers);
+        res.end(body);
+      }, 1200);
+      return true;
+    }
+
+    res.writeHead(200, headers);
+    res.end(body);
     return true;
   }
 
