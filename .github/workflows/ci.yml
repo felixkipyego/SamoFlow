@@ -11,7 +11,26 @@ name: CI
 on:
   push:
     branches: [main]
-  pull_request: {}
+    # Documentation-only changes skip this job's own test+image jobs
+    # (CI-minutes reduction ahead of the repo going private). docs/deploy/
+    # RUNBOOK.md is excluded from the ignore: backend/tests/
+    # test_single_api_process_guard.py reads it as a real guard (asserts it
+    # still warns an operator against running more than one api replica),
+    # and that test only runs here, via this job's own `make test-all` --
+    # a RUNBOOK-only change must still trigger it. No other guard test
+    # reads a repo-root `*.md` file or anything else under docs/** as a
+    # real check (confirmed by grepping backend/tests for `.read_text()`/
+    # `open(` calls against those paths) -- see PROJECT_SPEC.md for the
+    # full reasoning and the trigger-logic table.
+    paths-ignore:
+      - "docs/**"
+      - "*.md"
+      - "!docs/deploy/RUNBOOK.md"
+  pull_request:
+    paths-ignore:
+      - "docs/**"
+      - "*.md"
+      - "!docs/deploy/RUNBOOK.md"
 
 concurrency:
   group: ci-${{ github.ref }}
