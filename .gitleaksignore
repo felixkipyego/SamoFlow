@@ -112,3 +112,44 @@ ecc6628c14b366bfb0187cc7a844c80ba01b94f2:deploy/smoke-image.sh:generic-api-key:3
 6ea6ebaac2450d5b76fab8140411d10b185949d9:backend/tests/test_main.py:generic-api-key:171
 6ea6ebaac2450d5b76fab8140411d10b185949d9:backend/tests/test_main.py:generic-api-key:172
 6ea6ebaac2450d5b76fab8140411d10b185949d9:backend/tests/test_main.py:generic-api-key:173
+
+# backend/tests/test_host_binding.py (commit 1ca1251, "Fix dashboard-
+# hostname TrustedHostMiddleware outage..."): the SAME 5 realistic-
+# looking-but-not-weak-prefixed fixture values as conftest.py's own
+# PRODUCTION_REALISTIC_SECRET_OVERRIDES, repeated inline 6 times across
+# this file's own direct-unit-test functions (each one constructs a
+# fresh Settings() under APP_ENV=production without importing the
+# shared dict, so the gate's own required-in-production fields are
+# always present) -- never a real credential, confirmed by reading the
+# file directly (every value only ever flows into an in-process
+# Settings() construction under test).
+1ca1251a835fc9c58a4b45d438109276ed7640df:backend/tests/test_host_binding.py:generic-api-key:70
+1ca1251a835fc9c58a4b45d438109276ed7640df:backend/tests/test_host_binding.py:generic-api-key:71
+1ca1251a835fc9c58a4b45d438109276ed7640df:backend/tests/test_host_binding.py:generic-api-key:72
+1ca1251a835fc9c58a4b45d438109276ed7640df:backend/tests/test_host_binding.py:generic-api-key:73
+1ca1251a835fc9c58a4b45d438109276ed7640df:backend/tests/test_host_binding.py:generic-api-key:74
+1ca1251a835fc9c58a4b45d438109276ed7640df:backend/tests/test_host_binding.py:generic-api-key:85
+1ca1251a835fc9c58a4b45d438109276ed7640df:backend/tests/test_host_binding.py:generic-api-key:86
+1ca1251a835fc9c58a4b45d438109276ed7640df:backend/tests/test_host_binding.py:generic-api-key:87
+1ca1251a835fc9c58a4b45d438109276ed7640df:backend/tests/test_host_binding.py:generic-api-key:88
+1ca1251a835fc9c58a4b45d438109276ed7640df:backend/tests/test_host_binding.py:generic-api-key:89
+1ca1251a835fc9c58a4b45d438109276ed7640df:backend/tests/test_host_binding.py:generic-api-key:100
+1ca1251a835fc9c58a4b45d438109276ed7640df:backend/tests/test_host_binding.py:generic-api-key:101
+1ca1251a835fc9c58a4b45d438109276ed7640df:backend/tests/test_host_binding.py:generic-api-key:102
+1ca1251a835fc9c58a4b45d438109276ed7640df:backend/tests/test_host_binding.py:generic-api-key:103
+1ca1251a835fc9c58a4b45d438109276ed7640df:backend/tests/test_host_binding.py:generic-api-key:104
+1ca1251a835fc9c58a4b45d438109276ed7640df:backend/tests/test_host_binding.py:generic-api-key:118
+1ca1251a835fc9c58a4b45d438109276ed7640df:backend/tests/test_host_binding.py:generic-api-key:119
+1ca1251a835fc9c58a4b45d438109276ed7640df:backend/tests/test_host_binding.py:generic-api-key:120
+1ca1251a835fc9c58a4b45d438109276ed7640df:backend/tests/test_host_binding.py:generic-api-key:121
+1ca1251a835fc9c58a4b45d438109276ed7640df:backend/tests/test_host_binding.py:generic-api-key:122
+1ca1251a835fc9c58a4b45d438109276ed7640df:backend/tests/test_host_binding.py:generic-api-key:136
+1ca1251a835fc9c58a4b45d438109276ed7640df:backend/tests/test_host_binding.py:generic-api-key:137
+1ca1251a835fc9c58a4b45d438109276ed7640df:backend/tests/test_host_binding.py:generic-api-key:138
+1ca1251a835fc9c58a4b45d438109276ed7640df:backend/tests/test_host_binding.py:generic-api-key:139
+1ca1251a835fc9c58a4b45d438109276ed7640df:backend/tests/test_host_binding.py:generic-api-key:140
+1ca1251a835fc9c58a4b45d438109276ed7640df:backend/tests/test_host_binding.py:generic-api-key:162
+1ca1251a835fc9c58a4b45d438109276ed7640df:backend/tests/test_host_binding.py:generic-api-key:163
+1ca1251a835fc9c58a4b45d438109276ed7640df:backend/tests/test_host_binding.py:generic-api-key:164
+1ca1251a835fc9c58a4b45d438109276ed7640df:backend/tests/test_host_binding.py:generic-api-key:165
+1ca1251a835fc9c58a4b45d438109276ed7640df:backend/tests/test_host_binding.py:generic-api-key:166
