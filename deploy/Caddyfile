@@ -66,30 +66,71 @@
 #     header) so this stays correct even if a future CDN is added in
 #     front of Caddy with its own `trusted_proxies`.
 #
-# Host validation: every site block below is its own exact hostname, and
-# there is no catch-all/wildcard site -- Caddy's own HTTP server only
-# ever matches a request to a site whose address it was given; anything
-# else gets no site block, which Caddy answers itself (not proxied to any
-# backend), already satisfying "only the configured hostnames are
-# accepted" at this layer. app/main.py's TrustedHostMiddleware (api
-# service, production only) is the SECOND, defence-in-depth layer, for
-# any request that reaches that container directly.
+# Host validation: every site block below is its own exact hostname.
+# Unlike an earlier version of this file, that is NOT the whole story --
+# a request matching none of the 3 is caught by the explicit `http://
+# { abort }` catch-all near the end of this file (added by the SAME
+# advisor-review follow-up named below, after finding live that Caddy's
+# own un-matched-route default on an unmanaged host is a bare `200 OK`,
+# not a rejection). app/main.py's TrustedHostMiddleware (api service,
+# production only) is the SECOND, defence-in-depth layer, for any
+# request that reaches that container directly -- and it allows BOTH
+# api_hostname and dashboard_hostname (never just one): a real
+# production-breaking bug, found by advisor review and confirmed live
+# (2026-10-17), was api_hostname alone there, which 400'd every
+# dashboard SPA `/api/*` call -- Caddy's own reverse_proxy passes the
+# dashboard site's OWN Host header through unchanged on every one of
+# them (see the dashboard site block's own request_body/handle lines
+# below), never api_hostname's. A THIRD, narrower layer binds specific
+# ROUTE FAMILIES to the correct hostname (app/host_binding.py,
+# app/main.py's own `include_router(..., dependencies=[...])` calls) --
+# dashboard/admin routes accepted only on dashboard_hostname,
+# widget-public routes only on api_hostname -- so a request that
+# reaches the api container directly cannot use EITHER allowed hostname
+# for ANY route, only the one Caddy itself would actually have routed
+# it under.
 {
 	email {$CADDY_ACME_EMAIL}
 }
 
 # Shared by every site block below -- one definition, no duplication
 # (rule 9) across the dashboard/api/widget sites. frame-ancestors 'none'
-# is common to all three; the dashboard's own stricter, full CSP
-# (matching its e2e test, dashboard/e2e/csp-server.mjs) is set separately
-# in that site block, replacing (not adding to) this snippet's bare CSP.
+# is common to all three -- EXCEPT Content-Security-Policy, which is
+# deliberately NOT set here (each site block below sets its own CSP
+# directly instead; api/widget both still end up with the identical
+# bare "frame-ancestors 'none'" value this snippet used to carry).
+#
+# [SECURITY] ops/deploy/smoke-prod-stack.sh follow-up (2026-10-17): a
+# REAL, previously-undetected bug, found live while building that
+# script's own CSP check -- putting Content-Security-Policy in this
+# snippet, with the dashboard site block ALSO setting its own, stricter
+# CSP "to replace it", does NOT actually replace it. Confirmed via
+# `caddy adapt`: Caddy compiles the snippet's own `header {...}` block
+# (which runs before the dashboard's `handle /api/*`/`handle /assets/*`/
+# `handle {}` blocks in the route chain) as `"deferred": true` -- applied
+# as the LAST step before the response is sent, specifically so a
+# response-generating handler further down the chain (reverse_proxy,
+# file_server) cannot accidentally clobber it. The dashboard's own later,
+# non-deferred `header Content-Security-Policy "..."` directive applies
+# EARLIER and was the one being overwritten, backwards from this file's
+# own prior comment's assumption ("Caddy's header directive overwrites a
+# same-named header set earlier in the same site block" -- true for two
+# ORDINARY, non-deferred directives, but not once one of them is
+# deferred). The real, live symptom: every dashboard response carried
+# the BARE "frame-ancestors 'none'" policy, never the strict one --
+# `dashboard/e2e/csp-server.mjs` (Step 6.1's own Playwright CSP test)
+# never caught this because it is a standalone Node static-file server
+# that sets the strict CSP directly in JavaScript, and never exercises
+# this real Caddyfile at all. Fixed the only fully reliable way: no two
+# directives ever compete for the same header name in the same site
+# block -- each site sets Content-Security-Policy exactly once, with
+# its own final value, nothing to defer against.
 (security_headers) {
 	header {
 		Strict-Transport-Security "max-age=31536000; includeSubDomains"
 		X-Content-Type-Options "nosniff"
 		Referrer-Policy "strict-origin-when-cross-origin"
 		Permissions-Policy "geolocation=(), microphone=(), camera=(), payment=(), usb=()"
-		Content-Security-Policy "frame-ancestors 'none'"
 		# Caddy's own identifying header, same "don't advertise the stack"
 		# discipline backend/smoke-image.sh already checks for the api
 		# service's own /health response.
@@ -108,10 +149,9 @@
 	import security_headers
 	# Full strict CSP, byte-for-byte the same policy dashboard/e2e/
 	# csp-server.mjs already proves the dashboard runs under (Step 6.1's
-	# own live Playwright test) -- REPLACES the security_headers snippet's
-	# bare frame-ancestors-only CSP above, not merged with it (Caddy's
-	# header directive overwrites a same-named header set earlier in the
-	# same site block).
+	# own live Playwright test) -- the ONLY Content-Security-Policy
+	# directive in this site block (see security_headers's own updated
+	# header comment above for why that snippet no longer sets one).
 	header Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; font-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'"
 
 	request_body {
@@ -149,6 +189,11 @@
 # app/, not Caddy's job.
 {$API_HOSTNAME} {
 	import security_headers
+	# No HTML is ever served from this origin (JSON/SSE only) -- the bare
+	# frame-ancestors policy security_headers used to carry is still the
+	# right one, just set directly now (see that snippet's own updated
+	# header comment for why).
+	header Content-Security-Policy "frame-ancestors 'none'"
 
 	request_body {
 		max_size {$UPLOAD_MAX_SIZE_BYTES:20971520}
@@ -194,6 +239,9 @@
 # deploy time (docs/deploy/RUNBOOK.md), never nested.
 {$WIDGET_HOSTNAME} {
 	import security_headers
+	# Same reasoning as the api site block above -- static JS/CSS only,
+	# the bare frame-ancestors policy, set directly.
+	header Content-Security-Policy "frame-ancestors 'none'"
 
 	root * /srv/widget
 	# Moderate, short-lived caching, not a long immutable one: unlike the

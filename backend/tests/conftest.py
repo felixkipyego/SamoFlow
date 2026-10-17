@@ -358,6 +358,13 @@ PRODUCTION_REALISTIC_SECRET_OVERRIDES = {
     # that specifically exercises Host validation (test_main.py) uses
     # its own distinct hostname instead of this shared dict.
     "API_HOSTNAME": "test",
+    # [SECURITY] L1 PART C follow-up (advisor review, 2026-10-17):
+    # DASHBOARD_HOSTNAME became required in production the same moment
+    # API_HOSTNAME did (Settings._require_dashboard_hostname_in_
+    # production) -- same "test" value as API_HOSTNAME above is fine
+    # here: nothing in this shared dict's own callers sends a dashboard-
+    # family request, so there is no real host to distinguish.
+    "DASHBOARD_HOSTNAME": "test",
 }
 
 

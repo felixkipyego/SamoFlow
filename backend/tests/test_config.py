@@ -663,6 +663,51 @@ def test_api_hostname_accepts_a_real_value_in_production(monkeypatch):
     assert settings.api_hostname == "test"
 
 
+# --- [SECURITY] L1 PART C follow-up (advisor review, 2026-10-17):
+# dashboard_hostname -- the real production-breaking bug this follow-up
+# fixes (the dashboard SPA's own same-origin /api/* calls arrive at the
+# api service with Host = this value, not API_HOSTNAME's) --
+
+
+def test_dashboard_hostname_unset_is_fine_outside_production(monkeypatch):
+    for app_env in ("development", "test"):
+        set_valid_env(monkeypatch, VALID_ENV, APP_ENV=app_env)
+        settings = Settings()
+        assert settings.dashboard_hostname is None
+
+
+def test_dashboard_hostname_required_in_production(monkeypatch):
+    set_valid_env(
+        monkeypatch,
+        VALID_ENV,
+        APP_ENV="production",
+        **{
+            k: v
+            for k, v in PRODUCTION_REALISTIC_SECRET_OVERRIDES.items()
+            if k != "DASHBOARD_HOSTNAME"
+        },
+    )
+    with pytest.raises(ValidationError, match="DASHBOARD_HOSTNAME"):
+        Settings()
+
+
+def test_dashboard_hostname_empty_string_means_unset(monkeypatch):
+    set_valid_env(monkeypatch, VALID_ENV, DASHBOARD_HOSTNAME="")
+    settings = Settings()
+    assert settings.dashboard_hostname is None
+
+
+def test_dashboard_hostname_accepts_a_real_value_in_production(monkeypatch):
+    set_valid_env(
+        monkeypatch,
+        VALID_ENV,
+        APP_ENV="production",
+        **PRODUCTION_REALISTIC_SECRET_OVERRIDES,
+    )
+    settings = Settings()
+    assert settings.dashboard_hostname == "test"
+
+
 def test_trusted_proxy_hostname_defaults_to_caddy(monkeypatch):
     set_valid_env(monkeypatch, VALID_ENV)
     settings = Settings()

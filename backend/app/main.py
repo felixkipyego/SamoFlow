@@ -50,7 +50,7 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from importlib.metadata import version
 
-from fastapi import FastAPI
+from fastapi import Depends, FastAPI
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from app.admin.routes import router as admin_router
@@ -67,6 +67,7 @@ from app.dashboard.tenant_routes import router as dashboard_tenant_router
 from app.db import _session_factory, get_engine
 from app.handoff.routes import router as handoff_router
 from app.health import router as health_router
+from app.host_binding import require_api_host, require_dashboard_host
 from app.plans.usage import sync_usage_counters
 from app.qdrant import get_qdrant_client
 from app.telemetry.service import init_tracing, instrument_fastapi_app, shutdown_tracing
@@ -323,33 +324,54 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # Host: testserver (Starlette's own TestClient default) or similar,
     # and there is no real public hostname to validate against until a
     # real Caddy deployment exists in front of this process anyway.
-    # "127.0.0.1" (not a wildcard, not api_hostname's own value) is the
-    # ONE other allowed value: deploy/docker-compose.yml's own api
-    # healthcheck curls http://127.0.0.1:8000/ready from inside the SAME
-    # container, over loopback -- Settings._require_api_hostname_in_
-    # production (app/config.py) already guarantees api_hostname is set
-    # whenever this branch runs, so there is always a real value to pass
-    # here. TrustedHostMiddleware's own rejection response ("Invalid host
-    # header", HTTP 400) names no allowed host, so a disallowed Host
-    # cannot be used to enumerate which hostnames this deployment serves.
+    # BOTH real hostnames are allowed here, not just api_hostname: an
+    # advisor review found, and this task confirmed live, that deploy/
+    # Caddyfile's own {$DASHBOARD_HOSTNAME} site proxies `/api/*` to this
+    # same api service, and Caddy's reverse_proxy passes the ORIGINAL
+    # Host header through unchanged by default -- every dashboard SPA
+    # API call (login, CSRF, sources, settings, all of it) therefore
+    # arrives here with Host = the DASHBOARD hostname, never the api
+    # one. api_hostname ALONE 400'd every one of those calls in
+    # production. "127.0.0.1" is the THIRD allowed value: deploy/
+    # docker-compose.yml's own api healthcheck curls http://127.0.0.1:
+    # 8000/ready from inside the SAME container, over loopback --
+    # Settings._require_api_hostname_in_production/_require_dashboard_
+    # hostname_in_production (app/config.py) already guarantee both
+    # hostnames are set whenever this branch runs, so there is always a
+    # real value to pass here. TrustedHostMiddleware's own rejection
+    # response ("Invalid host header", HTTP 400) names no allowed host,
+    # so a disallowed Host cannot be used to enumerate which hostnames
+    # this deployment serves. WHICH of the two hostnames a given route is
+    # actually reachable under is a separate, narrower rule --
+    # app/host_binding.py's require_dashboard_host()/require_api_host(),
+    # applied per-router below -- this middleware only establishes "is
+    # this request's Host one this deployment recognises at all."
     if settings.app_env == "production":
-        if settings.api_hostname is None:
-            # Unreachable in practice -- Settings._require_api_hostname_in_
-            # production (app/config.py) already guarantees this -- but a
-            # real raise (not `assert`, which `python -O` strips) in case
-            # that guarantee is ever weakened without this call site
-            # noticing.
-            raise SettingsError("API_HOSTNAME must be set in production.")
+        if settings.api_hostname is None or settings.dashboard_hostname is None:
+            # Unreachable in practice -- the two model_validators named
+            # above already guarantee this -- but a real raise (not
+            # `assert`, which `python -O` strips) in case that guarantee
+            # is ever weakened without this call site noticing.
+            raise SettingsError(
+                "API_HOSTNAME and DASHBOARD_HOSTNAME must both be set in production."
+            )
         app.add_middleware(
-            TrustedHostMiddleware, allowed_hosts=[settings.api_hostname, "127.0.0.1"]
+            TrustedHostMiddleware,
+            allowed_hosts=[settings.api_hostname, settings.dashboard_hostname, "127.0.0.1"],
         )
     app.include_router(health_router)
-    app.include_router(auth_router)
-    app.include_router(chat_router)
-    app.include_router(handoff_router)
-    app.include_router(dashboard_router)
-    app.include_router(dashboard_tenant_router)
-    app.include_router(dashboard_source_router)
-    app.include_router(dashboard_escalation_router)
-    app.include_router(admin_router)
+    app.include_router(auth_router, dependencies=[Depends(require_api_host)])
+    app.include_router(chat_router, dependencies=[Depends(require_api_host)])
+    app.include_router(handoff_router, dependencies=[Depends(require_api_host)])
+    app.include_router(dashboard_router, dependencies=[Depends(require_dashboard_host)])
+    app.include_router(
+        dashboard_tenant_router, dependencies=[Depends(require_dashboard_host)]
+    )
+    app.include_router(
+        dashboard_source_router, dependencies=[Depends(require_dashboard_host)]
+    )
+    app.include_router(
+        dashboard_escalation_router, dependencies=[Depends(require_dashboard_host)]
+    )
+    app.include_router(admin_router, dependencies=[Depends(require_dashboard_host)])
     return app

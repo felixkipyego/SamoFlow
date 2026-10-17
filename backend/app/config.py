@@ -856,6 +856,24 @@ class Settings(BaseSettings):
     # validate against) -- required in production, see
     # _require_api_hostname_in_production below.
     api_hostname: str | None = Field(default=None)
+    # [SECURITY] L1 PART C follow-up (advisor review, 2026-10-17): a real
+    # production-breaking bug in the original PART C commit -- the
+    # dashboard SPA's own same-origin `/api/*` calls (deploy/Caddyfile's
+    # {$DASHBOARD_HOSTNAME} site, `handle /api/* { reverse_proxy
+    # api:8000 }`) arrive at the api service with Host = the DASHBOARD
+    # hostname, never the api one (Caddy's reverse_proxy passes the
+    # original Host header through unchanged by default -- confirmed
+    # against Caddy 2.10.2's own docs when PART C was first built, but
+    # the conclusion was never applied to the dashboard's own site
+    # block). `api_hostname` alone in TrustedHostMiddleware's allow-list
+    # therefore 400'd every dashboard API call in production -- login,
+    # CSRF, sources, settings, all of it. Confirmed live before this fix
+    # existed (this task's own report). Same `API_HOSTNAME` env var
+    # treatment as `api_hostname` above: read from the SAME value
+    # deploy/Caddyfile already uses for `{$DASHBOARD_HOSTNAME}`, one
+    # source of truth, required in production (see
+    # _require_dashboard_hostname_in_production below).
+    dashboard_hostname: str | None = Field(default=None)
     # [SECURITY] L1 PART C (#7): the ONE trust boundary for the forwarded-
     # client-IP headers app/client_ip.py reads -- a request's own stated
     # client IP is honoured only when the immediate TCP peer resolves (by DNS,
@@ -875,6 +893,13 @@ class Settings(BaseSettings):
     def _empty_api_hostname_means_unset(cls, value: object) -> object:
         # Same established convention as public_api_base_url's own
         # before-validator above.
+        if value == "":
+            return None
+        return value
+
+    @field_validator("dashboard_hostname", mode="before")
+    @classmethod
+    def _empty_dashboard_hostname_means_unset(cls, value: object) -> object:
         if value == "":
             return None
         return value
@@ -1090,6 +1115,22 @@ class Settings(BaseSettings):
             raise ValueError(
                 "API_HOSTNAME must be set in production (deploy/Caddyfile already "
                 "requires it; app/main.py's TrustedHostMiddleware needs it too)."
+            )
+        return self
+
+    # [SECURITY] L1 PART C follow-up (advisor review, 2026-10-17): same
+    # fail-loud discipline as api_hostname above -- an unset value here
+    # would leave TrustedHostMiddleware with no way to allow the
+    # dashboard's own same-origin /api/* calls, the exact production
+    # outage this follow-up fixes.
+    @model_validator(mode="after")
+    def _require_dashboard_hostname_in_production(self) -> "Settings":
+        if self.app_env == "production" and self.dashboard_hostname is None:
+            raise ValueError(
+                "DASHBOARD_HOSTNAME must be set in production (deploy/Caddyfile "
+                "already requires it; app/main.py's TrustedHostMiddleware needs "
+                "it too, since Caddy forwards the dashboard's own Host header "
+                "unchanged on every /api/* call)."
             )
         return self
 

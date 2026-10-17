@@ -155,14 +155,14 @@ async def test_docs_disabled_in_production(monkeypatch, path):
 
 # [SECURITY] L1 PART C (#7) (out-of-band Phase 7 batch, 2026-10-17): Host
 # validation, app layer. deploy/Caddyfile's own per-hostname site blocks
-# already reject anything else at the proxy (no catch-all site exists
-# there) -- this is the SECOND, defence-in-depth layer, for any request
-# that reaches the api service directly. Production only (see app/
-# main.py's own comment for why); a distinct API_HOSTNAME is used here
-# instead of PRODUCTION_REALISTIC_SECRET_OVERRIDES's own "test" value
-# (chosen there only so EXISTING http_client() tests keep sending
-# Host: test unmodified) so every assertion below names the real
-# configured value explicitly.
+# plus its catch-all (`http:// { abort }`) already reject anything else
+# at the proxy -- this is the SECOND, defence-in-depth layer, for any
+# request that reaches the api service directly. Production only (see
+# app/main.py's own comment for why); distinct API_HOSTNAME/DASHBOARD_
+# HOSTNAME values are used here instead of PRODUCTION_REALISTIC_SECRET_
+# OVERRIDES's own "test" value for both (chosen there only so EXISTING
+# http_client() tests keep sending Host: test unmodified) so every
+# assertion below names the real configured values explicitly.
 _HOST_VALIDATION_ENV = {
     **VALID_ENV,
     "APP_ENV": "production",
@@ -172,6 +172,7 @@ _HOST_VALIDATION_ENV = {
     "DB_CONNECTION_ENCRYPTION_KEY": "aB3dE6fG9hJkLmNoPqRsTuVwXyZ01234",  # noqa: S105
     "OPENAI_API_KEY": "aB3dE6fG9hJkLmNoPqRs",  # noqa: S105 (realistic-looking, not a real secret)
     "API_HOSTNAME": "api.example.test",
+    "DASHBOARD_HOSTNAME": "dashboard.example.test",
 }
 
 

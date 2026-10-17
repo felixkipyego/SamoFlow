@@ -258,6 +258,58 @@ Confirm: `curl -I https://api.softwareske.com/health` returns `200` with
 no `Server:` header (backend/smoke-image.sh already proves this at the
 image level); `https://app.softwareske.com` loads the dashboard login.
 
+**Then run `ops/deploy/smoke-prod-stack.sh`** -- the real, end-to-end
+proof that this specific first deploy actually works, not just that the
+process started. Found and fixed the real reason this step exists: an
+advisor code review caught a production-breaking bug (every dashboard
+SPA `/api/*` call 400'd -- `app/main.py`'s `TrustedHostMiddleware` only
+allowed `API_HOSTNAME`, but Caddy's own dashboard site forwards the
+DASHBOARD host header on every one of those calls) that NOTHING had
+ever caught, because nothing had exercised a real dashboard login
+through the real Caddy, in `APP_ENV=production`, end to end, before.
+This script is that exercise, every time:
+
+```
+ops/deploy/smoke-prod-stack.sh app.softwareske.com api.softwareske.com \
+  widget.softwareske.com <this server's real public IP>
+```
+
+Checks, against the REAL running stack: the dashboard SPA loads with
+its strict CSP; a full login (CSRF fetch, login, an authenticated
+`/api` call, logout) with `__Host-session`/`__Host-csrf` carrying
+exactly the cookie attributes designed (`Secure`/`HttpOnly`/
+`SameSite=Strict` on the session cookie, `Secure`/`SameSite=Strict`
+but NOT `HttpOnly` on the CSRF one); the widget's static assets load;
+a real widget `/session` and a real, genuinely-streamed (not buffered)
+`/chat` turn; `Host: evil.com`/an IP literal/a missing Host are all
+rejected, over both `http` and `https`; every configured hostname's
+plain `http://` redirects to `https://` (and that Caddy's own
+automatic-HTTPS redirect is never swallowed by the Host-validation
+catch-all -- the script's own output explains and cites exactly how,
+Caddy 2.10.2 source and docs); only Caddy publishes a host port.
+Seeds one throwaway, uniquely-named smoke-test tenant/site-key/
+dashboard-owner into the real database each run (via the same
+`admin`/`seed-owner` commands above) -- there is no CLI command to
+delete one, so these rows are left behind; harmless, and this is
+expected to run against a pristine database, before `seed-owner`
+creates the real pilot tenant above.
+
+**Locally** (this exact script, unchanged, run against a scratch stack
+instead of the real server -- useful before every real deploy, not
+only once): bring the stack up with a Caddyfile that differs from the
+real `deploy/Caddyfile` ONLY by adding `local_certs` to its global
+options block (Caddy's own internal CA -- instant issuance, no real
+ACME, no real DNS needed), mounted via a throwaway Compose override
+(never edit the real file for this); extract that CA
+(`docker cp <caddy container>:/data/caddy/pki/authorities/local/
+root.crt .`) and pass it as the script's own 5th argument so curl
+verifies the real TLS handshake against a CA it is told to trust --
+**never** `curl -k`, which would also silently accept the WRONG
+certificate. `SMOKE_ENV_FILE`/`SMOKE_PROJECT`/`SMOKE_EXTRA_COMPOSE_ARGS`
+(read from the environment, see the script's own header comment) point
+it at that scratch stack instead of the real tracked `.env`/compose
+files -- leave all three unset for the real run above.
+
 **Never run more than one `api` process** (never `docker compose up
 --scale api=2`, never add `--workers` to entrypoint.sh's own uvicorn
 command, never a `deploy.replicas` entry on the `api` service) without

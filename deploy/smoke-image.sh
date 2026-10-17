@@ -330,6 +330,7 @@ realistic_out=$(docker run --rm --entrypoint python3 \
     -e OPENAI_API_KEY=sk-live-rK9mLpQ2vXzNcHdWaTfYbGjUeSoIhAkR \
     -e API_HOST=0.0.0.0 -e API_PORT=8000 \
     -e API_HOSTNAME=api.smoke-test.local \
+    -e DASHBOARD_HOSTNAME=dashboard.smoke-test.local \
     "$image" -c "from app.config import get_settings; get_settings(); print('OK')" 2>&1)
 rc=$?
 set -e

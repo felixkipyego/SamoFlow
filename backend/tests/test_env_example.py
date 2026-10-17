@@ -76,6 +76,14 @@ EXTRA_EXAMPLE_KEYS: tuple[str, ...] = (
     # LIMIT_* entries' own established shape).
     "API_HOSTNAME",
     "TRUSTED_PROXY_HOSTNAME",
+    # [SECURITY] L1 PART C follow-up (advisor review, 2026-10-17):
+    # DASHBOARD_HOSTNAME is now ALSO a real (optional) Settings field,
+    # the SAME shape as API_HOSTNAME's own move above -- moves here from
+    # OPS_ONLY_EXAMPLE_KEYS below for the identical reason (a real
+    # production-breaking bug: the dashboard SPA's own /api/* calls
+    # arrive at the api service with Host = this value, and app/main.py's
+    # TrustedHostMiddleware needed to know it).
+    "DASHBOARD_HOSTNAME",
 )
 
 # Step 7.3 prep (ops track): genuinely new deploy/ops-layer configuration
@@ -88,7 +96,6 @@ EXTRA_EXAMPLE_KEYS: tuple[str, ...] = (
 # "this duplicates a Settings field under a new name" mistake. See
 # docs/deploy/RUNBOOK.md for what each one configures.
 OPS_ONLY_EXAMPLE_KEYS: tuple[str, ...] = (
-    "DASHBOARD_HOSTNAME",
     "WIDGET_HOSTNAME",
     "CADDY_ACME_EMAIL",
     "DASHBOARD_DIST_DIR",
