@@ -99,3 +99,16 @@ ecc6628c14b366bfb0187cc7a844c80ba01b94f2:deploy/smoke-image.sh:generic-api-key:3
 ecc6628c14b366bfb0187cc7a844c80ba01b94f2:deploy/smoke-image.sh:generic-api-key:328
 ecc6628c14b366bfb0187cc7a844c80ba01b94f2:deploy/smoke-image.sh:generic-api-key:329
 ecc6628c14b366bfb0187cc7a844c80ba01b94f2:deploy/smoke-image.sh:generic-api-key:330
+
+# backend/tests/test_main.py's _HOST_VALIDATION_ENV (commit 6ea6eba, "Add
+# trusted visitor IP derivation and Host validation (#7)..."): the SAME
+# realistic-looking-but-not-weak-prefixed fixture values as conftest.py's
+# PRODUCTION_REALISTIC_SECRET_OVERRIDES above, duplicated here because
+# this dict needs its own distinct API_HOSTNAME alongside them -- never a
+# real credential, confirmed by reading the file directly (only ever
+# flows into an in-process Settings() construction under test).
+6ea6ebaac2450d5b76fab8140411d10b185949d9:backend/tests/test_main.py:generic-api-key:169
+6ea6ebaac2450d5b76fab8140411d10b185949d9:backend/tests/test_main.py:generic-api-key:170
+6ea6ebaac2450d5b76fab8140411d10b185949d9:backend/tests/test_main.py:generic-api-key:171
+6ea6ebaac2450d5b76fab8140411d10b185949d9:backend/tests/test_main.py:generic-api-key:172
+6ea6ebaac2450d5b76fab8140411d10b185949d9:backend/tests/test_main.py:generic-api-key:173
