@@ -17,6 +17,9 @@ Applies to every task.
 - Rebase again immediately before pushing.
 - If a rebase conflicts in PROJECT_SPEC.md or DECISIONS_REGISTER.md, keep both sides' content — never drop the other side's lines.
 
+## Guard rails
+- `.claude/settings.json`'s `permissions.deny` list blocks whole-tree-destructive commands (git reset --hard, git clean -f variants, git push --force variants, git checkout -- ./git restore ., git branch -D, docker system/volume prune, catastrophic rm -rf forms) at the tool layer, not just by instruction — see that file and `backend/tests/test_claude_settings_guard.py`.
+
 ## Commit hygiene
 Applies to every task that produces more than one commit.
 - Every commit must pass the tests on its own: `git checkout <commit>` followed by the relevant test run must never fail for a reason that commit's own diff introduced.
