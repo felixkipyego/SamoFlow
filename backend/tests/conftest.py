@@ -287,6 +287,11 @@ def minimal_subprocess_env() -> dict[str, str]:
 VALID_ENV = {
     "APP_ENV": "development",
     "DATABASE_URL": "postgresql+psycopg://user:pw@localhost:5432/widgetplatform",
+    # [SECURITY] L2 (Phase 7 role split, 2026-10-18): the OWNER/MIGRATOR
+    # role's own DSN -- a required Settings field now, same "chosen only
+    # to be valid" treatment as DATABASE_URL above, a different username
+    # so a test that accidentally mixes the two up is easy to spot.
+    "DATABASE_URL_MIGRATE": "postgresql+psycopg://owner:pw@localhost:5432/widgetplatform",
     "QDRANT_URL": "http://localhost:6333",
     "QDRANT_API_KEY": "test-qdrant-key",  # noqa: S105 (test fixture value, not a real secret)
     "QDRANT_READ_ONLY_API_KEY": "test-qdrant-readonly-key",  # noqa: S105 (test fixture value, not a real secret)
@@ -302,12 +307,19 @@ VALID_ENV = {
 # TEST_DATABASE_ALLOWED_HOSTS, never hard-coded here.
 _DEFAULT_ALLOWED_TEST_HOSTS = frozenset({"localhost", "127.0.0.1"})
 
+# [SECURITY] L2 (Phase 7 role split, 2026-10-18): `make test-db` (not a
+# bare `docker compose up`) is the real local command now -- it also runs
+# the one-time provisioning step (app/db_provisioning.py) that creates
+# widgetplatform_owner/widgetplatform_app against test-db, which TEST_
+# DATABASE_URL/TEST_DATABASE_URL_APP below need to already exist.
 _LOCAL_DOCKER_RUN_HINT = (
-    "TEST_DATABASE_URL is not set. Start the local test database with:\n"
-    "  docker compose --env-file .env -f deploy/docker-compose.yml "
-    "--profile test up -d test-db\n"
-    "then set TEST_DATABASE_URL=postgresql+psycopg://widgetplatform:"
-    "change-me@127.0.0.1:55432/widgetplatform_test"
+    "TEST_DATABASE_URL/TEST_DATABASE_URL_APP are not set. Start the local "
+    "test database with:\n  make test-db\n"
+    "then set:\n"
+    "  TEST_DATABASE_URL=postgresql+psycopg://widgetplatform_owner:"
+    "change-me-owner@127.0.0.1:55432/widgetplatform_test\n"
+    "  TEST_DATABASE_URL_APP=postgresql+psycopg://widgetplatform_app:"
+    "change-me-app@127.0.0.1:55432/widgetplatform_test"
 )
 
 _LOCAL_QDRANT_RUN_HINT = (
@@ -407,32 +419,22 @@ def _require_env_var(var_name: str, ci_fail_message: str, skip_hint: str) -> str
     return value
 
 
-def require_test_database() -> str:
-    # Guards destructive integration-test setup (DROP SCHEMA, etc.) so it can
-    # never run against a real database:
-    #   - unset locally (CI != "true"): skip, with the docker command to
-    #     start a local test database;
-    #   - unset in CI (CI == "true"): fail, since CI must run this test, not
-    #     silently skip it;
+def _validate_test_database_url(var_name: str, url: str) -> str:
+    # Shared by require_test_database() and require_test_database_app()
+    # below (duplication check, L2 Phase 7 role split, 2026-10-18): the
+    # exact same three checks, parameterized only by which env var's name
+    # appears in the failure messages.
     #   - set but not a "..._test"-named postgresql+psycopg database: fail
     #     (never skip) — a malformed URL must not be treated as "no database
     #     configured";
     #   - set, correctly named, but on a host that isn't localhost/127.0.0.1
     #     or explicitly opted in via TEST_DATABASE_ALLOWED_HOSTS: fail — the
     #     "_test" name alone doesn't prove the host is safe to drop schemas on.
-    url = _require_env_var(
-        "TEST_DATABASE_URL",
-        "TEST_DATABASE_URL is not set and CI=true: this test must "
-        "fail, not skip, when CI is expected to provide a test "
-        "database. Check the CI workflow's Postgres service and env.",
-        _LOCAL_DOCKER_RUN_HINT,
-    )
-
     parts = urlsplit(url)
     database_name = parts.path.lstrip("/")
     if parts.scheme != POSTGRES_SCHEME or not database_name.endswith("_test"):
         pytest.fail(
-            "TEST_DATABASE_URL must use the "
+            f"{var_name} must use the "
             f"'{POSTGRES_SCHEME}' scheme and name a database ending in "
             "'_test' (this test drops and recreates its public schema, so "
             "it must never be able to point at a real database)."
@@ -441,13 +443,52 @@ def require_test_database() -> str:
     allowed_hosts = _allowed_test_hosts()
     if (parts.hostname or "") not in allowed_hosts:
         pytest.fail(
-            f"TEST_DATABASE_URL's host {parts.hostname!r} is not allowed. "
+            f"{var_name}'s host {parts.hostname!r} is not allowed. "
             "Only 'localhost' and '127.0.0.1' are allowed by default; to "
             "allow another host (e.g. a CI Postgres service container's "
             "name), list it in TEST_DATABASE_ALLOWED_HOSTS "
             "(comma-separated)."
         )
     return url
+
+
+def require_test_database() -> str:
+    # Guards destructive integration-test setup (DROP SCHEMA, etc.) so it can
+    # never run against a real database:
+    #   - unset locally (CI != "true"): skip, with the docker command to
+    #     start a local test database;
+    #   - unset in CI (CI == "true"): fail, since CI must run this test, not
+    #     silently skip it;
+    #   - see _validate_test_database_url() above for the rest.
+    #
+    # [SECURITY] L2 (Phase 7 role split, 2026-10-18): this is the
+    # OWNER/MIGRATOR role's own test connection -- genuine schema DDL
+    # (DROP SCHEMA, alembic upgrade head, the checkpointer's setup())
+    # needs this, not the APP role require_test_database_app() returns.
+    url = _require_env_var(
+        "TEST_DATABASE_URL",
+        "TEST_DATABASE_URL is not set and CI=true: this test must "
+        "fail, not skip, when CI is expected to provide a test "
+        "database. Check the CI workflow's Postgres service and env.",
+        _LOCAL_DOCKER_RUN_HINT,
+    )
+    return _validate_test_database_url("TEST_DATABASE_URL", url)
+
+
+def require_test_database_app() -> str:
+    # [SECURITY] L2 (Phase 7 role split, 2026-10-18): the APP role's own
+    # test connection -- least privilege, no DDL. Application code under
+    # test (get_engine(), open_checkpointer_pool()) must connect this way,
+    # mirroring the real stack's own api/worker runtime connections, so a
+    # missing grant fails a test locally instead of only in production.
+    url = _require_env_var(
+        "TEST_DATABASE_URL_APP",
+        "TEST_DATABASE_URL_APP is not set and CI=true: this test must "
+        "fail, not skip, when CI is expected to provide a test "
+        "database. Check the CI workflow's Postgres service and env.",
+        _LOCAL_DOCKER_RUN_HINT,
+    )
+    return _validate_test_database_url("TEST_DATABASE_URL_APP", url)
 
 
 async def reset_checkpoint_env(monkeypatch, **extra_overrides) -> str:
@@ -476,9 +517,26 @@ async def reset_checkpoint_env(monkeypatch, **extra_overrides) -> str:
     # failure against the fake default port) before adding this parameter.
     # Every existing caller passes none, so this is purely additive -- no
     # existing caller's behavior changes.
-    url = require_test_database()
-    set_valid_env(monkeypatch, VALID_ENV, DATABASE_URL=url, **extra_overrides)
-    conninfo = checkpointer.checkpointer_conninfo()
+    # [SECURITY] L2 (Phase 7 role split, 2026-10-18): DATABASE_URL (what
+    # open_checkpointer_pool() connects with, via database_url_str()) is
+    # now the APP role, least privilege, matching the real api process;
+    # DATABASE_URL_MIGRATE (database_url_migrate_str(), what
+    # run_checkpointer_setup() connects with) is the OWNER role, which
+    # actually has CREATE on the schema. The conninfo this function
+    # returns stays the OWNER one -- every existing caller uses it for
+    # genuine DDL (a manual AsyncPostgresSaver(conn).setup() call, or a
+    # raw SELECT against checkpoint_migrations), never for the
+    # application-level pool.
+    owner_url = require_test_database()
+    app_url = require_test_database_app()
+    set_valid_env(
+        monkeypatch,
+        VALID_ENV,
+        DATABASE_URL=app_url,
+        DATABASE_URL_MIGRATE=owner_url,
+        **extra_overrides,
+    )
+    conninfo = checkpointer.checkpointer_conninfo(owner_url)
     async with await psycopg.AsyncConnection.connect(conninfo, autocommit=True) as conn:
         await conn.execute(
             "DROP TABLE IF EXISTS checkpoint_writes, checkpoint_blobs, "
@@ -894,12 +952,23 @@ async def reset_test_database(monkeypatch) -> AsyncIterator[str]:
     # real-database schema, with DATABASE_URL pointed at it -- and yields
     # the database_url a caller might still need; each test file's own
     # fixture depends on this one and adds its own seed rows.
-    database_url = require_test_database()
-    set_valid_env(monkeypatch, VALID_ENV, DATABASE_URL=database_url)
+    # [SECURITY] L2 (Phase 7 role split, 2026-10-18): schema setup (DDL)
+    # runs as the OWNER role; DATABASE_URL (what application code under
+    # test actually connects with, via get_engine()) is pointed at the
+    # APP role instead -- so every test using this fixture genuinely
+    # exercises least privilege, the same way the real api/worker
+    # processes do. Tables created below (create_all, as OWNER) inherit
+    # the APP role's grants automatically via ALTER DEFAULT PRIVILEGES
+    # (ops/deploy/provision_db_roles.py), which test-db's own provisioning
+    # step (Makefile's test-db target) has already set up before this
+    # fixture ever runs.
+    owner_url = require_test_database()
+    app_url = require_test_database_app()
+    set_valid_env(monkeypatch, VALID_ENV, DATABASE_URL=app_url, DATABASE_URL_MIGRATE=owner_url)
     db.get_engine.cache_clear()
     db._session_factory.cache_clear()
 
-    sync_engine = sa.create_engine(database_url, poolclass=sa.pool.NullPool)
+    sync_engine = sa.create_engine(owner_url, poolclass=sa.pool.NullPool)
     with sync_engine.begin() as connection:
         # Task 2.1.a: db_connections.encrypted_credentials needs pgcrypto's
         # pgp_sym_encrypt/pgp_sym_decrypt. Extensions are database-level,
@@ -916,7 +985,13 @@ async def reset_test_database(monkeypatch) -> AsyncIterator[str]:
     db.Base.metadata.create_all(sync_engine)
     sync_engine.dispose()
 
-    yield database_url
+    # Yields the APP url, not the OWNER one: every existing caller uses
+    # this to build a subprocess env (seed_cli, worker) or a second
+    # set_valid_env() override, matching DATABASE_URL's own real-runtime
+    # meaning (see this fixture's own header comment above) -- a caller
+    # that genuinely needs schema-DDL access uses require_test_database()
+    # directly, same as this fixture does.
+    yield app_url
 
     await db.get_engine().dispose()
     db.get_engine.cache_clear()

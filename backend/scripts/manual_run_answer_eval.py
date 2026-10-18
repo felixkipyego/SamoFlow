@@ -415,7 +415,7 @@ async def run_sweep() -> None:
         await checkpointer.open_checkpointer_pool()
         cp = checkpointer.get_checkpointer()
         try:
-            conninfo = checkpointer.checkpointer_conninfo()
+            conninfo = checkpointer.checkpointer_conninfo(settings.database_url_str())
             async with await psycopg.AsyncConnection.connect(conninfo, autocommit=True) as conn:
                 for tenant_id_str in tracked_tenants:
                     cursor = await conn.execute(

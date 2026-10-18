@@ -61,6 +61,12 @@ from tests.conftest import (
 VALID_ENV = {
     "APP_ENV": "development",
     "DATABASE_URL": "postgresql+psycopg://user:pw@203.0.113.1:5432/widgetplatform",
+    # [SECURITY] L2 (Phase 7 role split, 2026-10-18): a required Settings
+    # field now, same TEST-NET-3 "chosen only to be valid" treatment as
+    # DATABASE_URL above -- app/main.py never calls database_url_migrate_
+    # str() itself (only alembic/env.py and app/agent/checkpointer.py do),
+    # so this is never actually dialed.
+    "DATABASE_URL_MIGRATE": "postgresql+psycopg://owner:pw@203.0.113.1:5432/widgetplatform",
     "QDRANT_URL": "http://203.0.113.1:6333",
     "QDRANT_API_KEY": "test-qdrant-key",  # noqa: S105 (test fixture value, not a real secret)
     "QDRANT_READ_ONLY_API_KEY": "test-qdrant-readonly-key",  # noqa: S105 (test fixture value, not a real secret)

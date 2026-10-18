@@ -31,12 +31,14 @@ import traceback
 import uuid
 from pathlib import Path
 
+import psycopg
 import pytest
 import sqlalchemy as sa
 from sqlalchemy.exc import SQLAlchemyError
 
 from app import db
 from app.config import get_settings
+from app.db_provisioning import APP_ROLE, OWNER_ROLE, grant_app_role_privileges
 from app.plans import models as plans_models  # noqa: F401 (registers "plans" on Base.metadata)
 from app.tenancy.models import Tenant
 from tests.conftest import (
@@ -50,14 +52,21 @@ from tests.conftest import (
     db_session,
     minimal_subprocess_env,
     require_test_database,
+    require_test_database_app,
 )
 
 BACKEND_DIR = Path(__file__).resolve().parent.parent
 
 # Harmless values for the Settings fields alembic/env.py does not use
 # (get_settings() still requires all of them to be present).
+# [SECURITY] L2 (Phase 7 role split, 2026-10-18): DATABASE_URL (the APP
+# role) is now one of these -- alembic/env.py reads DATABASE_URL_MIGRATE
+# instead (see _alembic_subprocess_env() below), so DATABASE_URL itself is
+# just a harmless placeholder Settings still requires present.
 _HARMLESS_ENV = {
     "APP_ENV": "test",
+    "DATABASE_URL": "postgresql+psycopg://harmless:harmless@203.0.113.1:5432/harmless",
+    "DATABASE_URL_MIGRATE": "postgresql+psycopg://harmless:harmless@203.0.113.1:5432/harmless",
     "QDRANT_URL": "http://203.0.113.1:6333",
     "QDRANT_API_KEY": "harmless-test-key",  # noqa: S105 (test fixture value, not a real secret)
     "QDRANT_READ_ONLY_API_KEY": "harmless-readonly-test-key",  # noqa: S105 (test fixture value, not a real secret)
@@ -70,13 +79,15 @@ _HARMLESS_ENV = {
 
 
 def _alembic_subprocess_env(database_url):
-    # Explicit and minimal: only the Settings variables (DATABASE_URL set to
-    # the test URL, harmless values for the rest) plus PATH and HOME
+    # Explicit and minimal: only the Settings variables (DATABASE_URL_
+    # MIGRATE set to the test URL -- [SECURITY] L2, Phase 7 role split,
+    # 2026-10-18: alembic/env.py now reads database_url_migrate_str(), the
+    # OWNER role -- harmless values for the rest) plus PATH and HOME
     # inherited from the parent. Nothing else from the parent's environment
     # reaches the subprocess, so a stray PGPASSWORD/PGHOST/PGUSER (or
     # anything else) in the caller's shell can never affect the connection
     # alembic/env.py makes.
-    env = {**_HARMLESS_ENV, "DATABASE_URL": database_url}
+    env = {**_HARMLESS_ENV, "DATABASE_URL_MIGRATE": database_url}
     env.update(minimal_subprocess_env())
     return env
 
@@ -148,7 +159,10 @@ def test_require_test_database_unset_and_not_ci_skips_with_docker_hint(monkeypat
     monkeypatch.delenv("CI", raising=False)
     with pytest.raises(pytest.skip.Exception) as exc_info:
         require_test_database()
-    assert "docker compose" in str(exc_info.value)
+    # [SECURITY] L2 (Phase 7 role split, 2026-10-18): the hint now points
+    # at `make test-db` (not a bare `docker compose up`), since starting
+    # test-db also requires running the one-time role provisioning step.
+    assert "make test-db" in str(exc_info.value)
 
 
 def test_require_test_database_unset_and_ci_true_fails(monkeypatch):
@@ -240,6 +254,7 @@ def test_alembic_subprocess_env_has_exactly_the_eleven_settings_variables_plus_p
     expected_keys = {
         "APP_ENV",
         "DATABASE_URL",
+        "DATABASE_URL_MIGRATE",
         "QDRANT_URL",
         "QDRANT_API_KEY",
         "QDRANT_READ_ONLY_API_KEY",
@@ -268,6 +283,29 @@ def _reset_public_schema(engine):
         # chaining it, so pytest never has a reason to render those frames.
         raise RuntimeError(
             f"could not reset the public schema on "
+            f"{engine.url.host!r}/{engine.url.database!r}: {type(exc).__name__}"
+        ) from None
+
+    # [SECURITY] L2 (Phase 7 role split, 2026-10-18): ALTER DEFAULT
+    # PRIVILEGES is keyed by the schema's own OID, not its name (see
+    # grant_app_role_privileges()'s own docstring) -- the fresh CREATE
+    # SCHEMA public above orphans whatever test-db's own one-time
+    # provisioning already set up, so every test in this file that goes
+    # on to run real migrations needs the APP role's grants re-applied
+    # here, against the new schema, every single time.
+    try:
+        conninfo = engine.url.render_as_string(hide_password=False).replace(
+            "postgresql+psycopg://", "postgresql://", 1
+        )
+        with psycopg.connect(conninfo, autocommit=True) as conn:
+            grant_app_role_privileges(conn, OWNER_ROLE, APP_ROLE)
+    except psycopg.Error as exc:
+        # Same leak-avoidance discipline as the DROP/CREATE SCHEMA block
+        # above -- "from None" drops the chain (and the raw conninfo local
+        # inside this except's own frame) rather than letting a captured
+        # traceback render it.
+        raise RuntimeError(
+            f"could not re-apply APP role grants on "
             f"{engine.url.host!r}/{engine.url.database!r}: {type(exc).__name__}"
         ) from None
 
@@ -1048,26 +1086,31 @@ def test_verified_domains_partial_index_rejects_active_duplicate_frees_on_revoke
     assert [tuple(row) for row in rows] == [("revoked", "token-a"), ("pending", "token-b2")]
 
 
-def test_audit_log_update_delete_currently_succeeds_because_widgetplatform_is_a_superuser(
+def test_audit_log_update_delete_and_truncate_are_denied_for_the_app_role(
     _test_engine,
 ):
-    # Task 2.2.b: this is NOT a bug report -- it is the permanent, honest
-    # proof that the migration's own REVOKE UPDATE, DELETE ON audit_log is
-    # currently INERT, documented exactly as such in that migration's own
-    # comment and in PROJECT_SPEC.md's dated correction to the Step 2.2
-    # breakdown's decision (a). "widgetplatform" (DATABASE_URL's user) is
-    # a full Postgres superuser (confirmed live via `\du`/pg_roles before
-    # this migration was written) -- superusers bypass EVERY permission
-    # check, including a REVOKE naming them explicitly, by definition; no
-    # SQL-level trick changes that. This test exists so the suite itself
-    # encodes the honest current state, rather than silently never
-    # verifying something known not to work: it will start FAILING, loudly
-    # and correctly, the moment Phase 7's role split (PROJECT_SPEC.md,
-    # owned at 1.1.i) lands and api/worker connect as a non-superuser role
-    # instead -- at which point it must be rewritten to assert the
-    # opposite (a real PermissionError/insufficient-privilege rejection),
-    # not deleted outright, matching that marker's own instruction to
-    # re-verify this live rather than assume it now works.
+    # [SECURITY] L2 (Phase 7 role split, 2026-10-18): this REPLACES
+    # test_audit_log_update_delete_currently_succeeds_because_
+    # widgetplatform_is_a_superuser (Task 2.2.b), which documented that
+    # the migration's own REVOKE UPDATE, DELETE ON audit_log FROM
+    # widgetplatform was INERT -- "widgetplatform" (DATABASE_URL's old,
+    # single shared user) was a full Postgres superuser, and superusers
+    # bypass every permission check, REVOKE or not (D-2.2-superuser,
+    # docs/DECISIONS_REGISTER.md). That marker's own instruction ("it
+    # must be rewritten to assert the opposite... once Phase 7's role
+    # split lands") is this test.
+    #
+    # The APP role (app/db_provisioning.py's APP_ROLE) is genuinely NOT a
+    # superuser, so this is real enforcement now, not a catalog entry
+    # nobody checks: a dedicated migration (backend/alembic/versions/
+    # 26f5747ef216_revoke_audit_log_mutation_from_app_role.py) REVOKEs
+    # UPDATE, DELETE, TRUNCATE on audit_log from APP_ROLE specifically --
+    # grant_app_role_privileges()'s own ALTER DEFAULT PRIVILEGES grants
+    # APP full DML on every table by default, audit_log included, the
+    # moment it is created, so without that migration this test's own
+    # denial assertions below would FAIL (confirmed live while building
+    # this test, before that migration existed -- the exact "show it
+    # failing first" proof this task's own instructions required).
     engine = _test_engine
     _reset_public_schema(engine)
     migrated = _run_alembic("upgrade", "head", engine=engine)
@@ -1088,22 +1131,47 @@ def test_audit_log_update_delete_currently_succeeds_because_widgetplatform_is_a_
             for row in connection.execute(
                 sa.text(
                     "SELECT privilege_type FROM information_schema.table_privileges "
-                    "WHERE table_name = 'audit_log' AND grantee = 'widgetplatform'"
-                )
+                    "WHERE table_name = 'audit_log' AND grantee = :app_role"
+                ),
+                {"app_role": APP_ROLE},
             )
         }
-    # The REVOKE did register at the privilege-catalog level (UPDATE/DELETE
-    # are genuinely absent from this role's own grants on this table) --
-    # it is the superuser bypass, not a no-op REVOKE statement, that lets
-    # the writes below through regardless.
+    # SELECT/INSERT stay granted (the dashboard reads the audit trail,
+    # and every write path inserts into it) -- only mutation/erasure are
+    # denied.
+    assert "SELECT" in granted_privileges
+    assert "INSERT" in granted_privileges
     assert "UPDATE" not in granted_privileges
     assert "DELETE" not in granted_privileges
+    assert "TRUNCATE" not in granted_privileges
+
+    app_engine = sa.create_engine(require_test_database_app(), poolclass=sa.pool.NullPool)
+    try:
+        with app_engine.connect() as connection:
+            with pytest.raises(SQLAlchemyError, match="(?i)permission denied"):
+                connection.execute(
+                    sa.text(
+                        "UPDATE audit_log SET action = 'tampered' "
+                        "WHERE action = 'revoke_domain'"
+                    )
+                )
+            connection.rollback()
+
+            with pytest.raises(SQLAlchemyError, match="(?i)permission denied"):
+                connection.execute(sa.text("DELETE FROM audit_log WHERE action = 'revoke_domain'"))
+            connection.rollback()
+
+            with pytest.raises(SQLAlchemyError, match="(?i)permission denied"):
+                connection.execute(sa.text("TRUNCATE audit_log"))
+            connection.rollback()
+    finally:
+        app_engine.dispose()
 
     with engine.connect() as connection:
-        connection.execute(
-            sa.text("UPDATE audit_log SET action = 'tampered' WHERE action = 'revoke_domain'")
-        )
-        connection.execute(sa.text("DELETE FROM audit_log WHERE action = 'tampered'"))
-        connection.commit()
+        # The real OWNER role, reading back through a FRESH connection
+        # (never the app_engine above, which never committed anything):
+        # the row this test inserted at the very top is still there,
+        # untouched -- every denial above was a genuine rejection, not a
+        # silently-swallowed no-op.
         (remaining,) = connection.execute(sa.text("SELECT count(*) FROM audit_log")).one()
-    assert remaining == 0
+    assert remaining == 1

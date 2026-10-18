@@ -76,17 +76,25 @@ CHECKPOINTER_POOL_MAX_SIZE = 10
 _checkpointer_pool: AsyncConnectionPool | None = None
 
 
-def checkpointer_conninfo() -> str:
-    """Settings.database_url is validated (app/config.py's own
-    _require_postgres_psycopg_scheme) to always carry the SQLAlchemy
-    dialect-prefixed scheme, `postgresql+psycopg://` -- but psycopg's own
-    conninfo parser rejects that outright (confirmed live at Task 3.2.a:
-    `psycopg.conninfo.conninfo_to_dict("postgresql+psycopg://...")` raises
-    "missing \"=\" after ..."). This is the one place that conversion
-    happens, reused by both the pool and the migrate-time setup() call,
-    rather than duplicated at each call site.
+def checkpointer_conninfo(url: str) -> str:
+    """Settings.database_url/database_url_migrate are both validated
+    (app/config.py's own _require_postgres_psycopg_scheme) to always carry
+    the SQLAlchemy dialect-prefixed scheme, `postgresql+psycopg://` -- but
+    psycopg's own conninfo parser rejects that outright (confirmed live at
+    Task 3.2.a: `psycopg.conninfo.conninfo_to_dict("postgresql+psycopg://...")`
+    raises "missing \"=\" after ..."). This is the one place that
+    conversion happens, reused by both the pool and the migrate-time
+    setup() call, rather than duplicated at each call site.
+
+    [SECURITY] L2 (Phase 7 role split, 2026-10-18): takes an explicit `url`
+    rather than reading get_settings() itself -- this function is shared by
+    two callers that must use two DIFFERENT roles: the live api-process pool
+    (open_checkpointer_pool(), APP role, least privilege) and the
+    migrate-time setup() DDL call (run_checkpointer_setup(), OWNER role,
+    which actually has CREATE on the schema). Reading get_settings()
+    internally would make it impossible for one function to serve both
+    without a mode flag.
     """
-    url = get_settings().database_url_str()
     parts = urlsplit(url)
     if parts.scheme != POSTGRES_SCHEME:
         # Guaranteed not to happen by Settings' own validator -- a defensive
@@ -112,8 +120,11 @@ async def open_checkpointer_pool() -> None:
     lazy-until-first-real-use behavior get_engine() already has.
     """
     global _checkpointer_pool
+    # [SECURITY] L2 (Phase 7 role split, 2026-10-18): the live api-process
+    # pool runs as the APP role (least privilege) -- never the OWNER role
+    # run_checkpointer_setup() below uses.
     pool = AsyncConnectionPool(
-        checkpointer_conninfo(),
+        checkpointer_conninfo(get_settings().database_url_str()),
         kwargs=CHECKPOINTER_CONNECTION_KWARGS,
         max_size=CHECKPOINTER_POOL_MAX_SIZE,
         open=False,
@@ -167,8 +178,13 @@ async def run_checkpointer_setup() -> None:
     the real, live-queried count at the duplication check after
     3.2.b/c/d, finding A.5; see PROJECT_SPEC.md's own matching correction.)
     """
+    # [SECURITY] L2 (Phase 7 role split, 2026-10-18): genuine DDL (creates
+    # checkpoints/checkpoint_blobs/checkpoint_writes/checkpoint_migrations)
+    # -- runs as the OWNER role, which actually has CREATE on the schema;
+    # the APP role (open_checkpointer_pool() above) does not.
     async with await AsyncConnection.connect(
-        checkpointer_conninfo(), **CHECKPOINTER_CONNECTION_KWARGS
+        checkpointer_conninfo(get_settings().database_url_migrate_str()),
+        **CHECKPOINTER_CONNECTION_KWARGS,
     ) as conn:
         await AsyncPostgresSaver(conn).setup()
     logger.info("checkpointer setup: checkpoint tables are up to date")

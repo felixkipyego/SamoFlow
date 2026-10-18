@@ -37,8 +37,11 @@ def run_migrations_online() -> None:
     # (that call breaks on "%" characters in the URL and would also copy the
     # secret into the Config object, e.g. for a later config.get_main_option
     # call or exception message).
+    # [SECURITY] L2 (Phase 7 role split, 2026-10-18): the OWNER/MIGRATOR
+    # role's own DSN -- every migration is real DDL, and the APP role
+    # database_url_str() now returns has no CREATE on the schema at all.
     try:
-        url = get_settings().database_url_str()
+        url = get_settings().database_url_migrate_str()
     except SettingsError as exc:
         # Same behaviour as app/worker.py's main(): a clean one-line message,
         # no traceback, so a misconfigured environment never prints one.
