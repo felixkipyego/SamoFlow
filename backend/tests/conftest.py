@@ -318,6 +318,55 @@ _LOCAL_QDRANT_RUN_HINT = (
 # logs, repr/str output or exception messages.
 TEST_PASSWORD = "sup3r-secret-pw"  # noqa: S105 (test fixture value, not a real secret)
 
+# [SECURITY] L1 (out-of-band Phase 7 batch, 2026-10-17): VALID_ENV's own
+# secret-class values are deliberately "test-"-prefixed (see its own
+# header comment) -- exactly one of the 4 known-weak prefixes app/
+# secrets_policy.py's new production startup gate now rejects. Any test
+# that combines APP_ENV=production with real Settings validation (not
+# Settings.model_construct(), which bypasses every validator including
+# this new one) must override these with realistic-LOOKING values instead
+# -- never a real secret, matching VALID_ENV's own "chosen only to be
+# valid, not to resemble anything real" precedent, just avoiding the 4
+# prefixes this gate checks for. Deliberately does NOT include
+# DATABASE_URL: every VALID_ENV variant's own password ("pw") is already
+# not weak-prefixed, so overriding it here would only risk silently
+# replacing a test's own deliberately-chosen host (e.g. test_main.py's
+# own TEST-NET-3 address, proving /health never contacts anything) for no
+# real benefit -- a test that specifically needs a weak DATABASE_URL
+# password builds that DSN inline, scoped to itself.
+#
+# [SECURITY] L1 PART C (2026-10-17): also carries API_HOSTNAME -- not a
+# secret-class value, but the SAME shape ("VALID_ENV has none; production
+# genuinely requires one") as every entry above, via a DIFFERENT
+# validator (_require_api_hostname_in_production, app/config.py). Every
+# site below already combines this dict with APP_ENV=production, so one
+# dict covering "everything production additionally needs beyond
+# VALID_ENV" is simpler than two dicts every caller would have to
+# remember to spread together (rule 11).
+PRODUCTION_REALISTIC_SECRET_OVERRIDES = {
+    "QDRANT_API_KEY": "zQ7mK2pR9xLaUeVbNcOd",  # noqa: S105 (realistic-looking, not a real secret)
+    "QDRANT_READ_ONLY_API_KEY": "aB3dE6fG9hJkLmNoPqRs",  # noqa: S105
+    "JWT_SIGNING_KEY": "zQ7mK2pR9xLaUeVbNcOdTfGhIjKlMnOp",  # noqa: S105
+    "DB_CONNECTION_ENCRYPTION_KEY": "aB3dE6fG9hJkLmNoPqRsTuVwXyZ01234",  # noqa: S105
+    "OPENAI_API_KEY": "aB3dE6fG9hJkLmNoPqRs",  # noqa: S105 (realistic-looking, not a real secret)
+    # "test", not a prettier placeholder like "api.example.test": every
+    # existing production-mode test that also sends a real request
+    # (http_client() above, AsyncClient(base_url="http://test")) sends
+    # Host: test, and app/main.py's TrustedHostMiddleware (production
+    # only) would otherwise 400 every one of those pre-existing tests
+    # the moment this dict's own APP_ENV=production took effect. A test
+    # that specifically exercises Host validation (test_main.py) uses
+    # its own distinct hostname instead of this shared dict.
+    "API_HOSTNAME": "test",
+    # [SECURITY] L1 PART C follow-up (advisor review, 2026-10-17):
+    # DASHBOARD_HOSTNAME became required in production the same moment
+    # API_HOSTNAME did (Settings._require_dashboard_hostname_in_
+    # production) -- same "test" value as API_HOSTNAME above is fine
+    # here: nothing in this shared dict's own callers sends a dashboard-
+    # family request, so there is no real host to distinguish.
+    "DASHBOARD_HOSTNAME": "test",
+}
+
 
 @pytest.fixture(autouse=True)
 def _isolated_env(monkeypatch):

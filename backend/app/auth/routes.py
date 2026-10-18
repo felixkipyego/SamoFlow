@@ -60,6 +60,8 @@ from app.auth.origin import origin_is_allowed
 from app.auth.schemas import SessionRequest, SessionResponse, WidgetAppearanceResponse
 from app.auth.secrets import generate_visitor_secret, hash_visitor_secret
 from app.auth.tokens import encode_session_token
+from app.client_ip import get_client_ip
+from app.config import get_settings
 from app.db import get_db_session
 from app.ingest.repository import IngestRepository
 from app.ratelimit import RateLimiter
@@ -189,10 +191,9 @@ async def create_session(
 ) -> Response:
     # Rate limiting first, before anything else in this handler (see this
     # module's own header comment for the full reasoning and the exact key
-    # formats). request.client can be None per the ASGI spec (rare in
-    # practice behind a real server, but not impossible) -- "unknown"
-    # groups any such request under one shared bucket rather than crashing.
-    ip = request.client.host if request.client else "unknown"
+    # formats). get_client_ip() handles the "no request.client" case
+    # itself, grouping it under "unknown" rather than crashing.
+    ip = get_client_ip(request, get_settings())
 
     per_ip_limiter = _get_per_ip_limiter(request)
     if not per_ip_limiter.check(ip):
@@ -354,7 +355,7 @@ async def get_widget_appearance(
     request: Request,
     session: AsyncSession = Depends(get_db_session),  # noqa: B008
 ) -> Response:
-    ip = request.client.host if request.client else "unknown"
+    ip = get_client_ip(request, get_settings())
 
     per_ip_limiter = _get_appearance_per_ip_limiter(request)
     if not per_ip_limiter.check(ip):

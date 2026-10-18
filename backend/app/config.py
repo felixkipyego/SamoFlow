@@ -27,6 +27,8 @@ from urllib.parse import urlsplit
 from pydantic import Field, SecretStr, ValidationError, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from app.secrets_policy import SECRET_CLASS_SETTINGS, check_raw_secret_values
+
 # SQLAlchemy 2.0 maps a plain "postgresql://" DSN to the psycopg2 driver,
 # which this project does not install (Step 1.1.a installs psycopg[binary],
 # i.e. psycopg 3). This scheme selects the psycopg (v3) driver instead.
@@ -842,6 +844,66 @@ class Settings(BaseSettings):
             raise ValueError("PUBLIC_API_BASE_URL must be an https:// URL with a hostname")
         return value
 
+    # [SECURITY] L1 PART C (#7) (out-of-band Phase 7 batch, 2026-10-17):
+    # the api service's OWN public hostname (deploy/Caddyfile's
+    # {$API_HOSTNAME} -- read here from the SAME env var, not a second
+    # copy, so the two can never drift apart). app/main.py's own
+    # TrustedHostMiddleware (production only) rejects any request whose
+    # Host header is not this value or "127.0.0.1" (the api service's
+    # own healthcheck, deploy/docker-compose.yml, which curls itself
+    # over loopback and therefore never carries this public hostname).
+    # Unset in development/test (no Caddy, no public hostname to
+    # validate against) -- required in production, see
+    # _require_api_hostname_in_production below.
+    api_hostname: str | None = Field(default=None)
+    # [SECURITY] L1 PART C follow-up (advisor review, 2026-10-17): a real
+    # production-breaking bug in the original PART C commit -- the
+    # dashboard SPA's own same-origin `/api/*` calls (deploy/Caddyfile's
+    # {$DASHBOARD_HOSTNAME} site, `handle /api/* { reverse_proxy
+    # api:8000 }`) arrive at the api service with Host = the DASHBOARD
+    # hostname, never the api one (Caddy's reverse_proxy passes the
+    # original Host header through unchanged by default -- confirmed
+    # against Caddy 2.10.2's own docs when PART C was first built, but
+    # the conclusion was never applied to the dashboard's own site
+    # block). `api_hostname` alone in TrustedHostMiddleware's allow-list
+    # therefore 400'd every dashboard API call in production -- login,
+    # CSRF, sources, settings, all of it. Confirmed live before this fix
+    # existed (this task's own report). Same `API_HOSTNAME` env var
+    # treatment as `api_hostname` above: read from the SAME value
+    # deploy/Caddyfile already uses for `{$DASHBOARD_HOSTNAME}`, one
+    # source of truth, required in production (see
+    # _require_dashboard_hostname_in_production below).
+    dashboard_hostname: str | None = Field(default=None)
+    # [SECURITY] L1 PART C (#7): the ONE trust boundary for the forwarded-
+    # client-IP headers app/client_ip.py reads -- a request's own stated
+    # client IP is honoured only when the immediate TCP peer resolves (by DNS,
+    # not a hardcoded CIDR -- deploy/docker-compose.yml assigns no
+    # static subnet) to this hostname, Caddy's own service name on the
+    # compose network. "caddy" is a safe default (matches deploy/
+    # Caddyfile's own service name); an operator who runs without Caddy
+    # in front (or a Caddy under a different service name) can repoint
+    # this. An unresolvable hostname (the default "caddy" in
+    # development/test, where no such service exists at all) already
+    # degrades safely to "nothing is trusted, use the raw socket peer",
+    # so this field needs no separate explicit disable value.
+    trusted_proxy_hostname: str = Field(default="caddy")
+
+    @field_validator("api_hostname", mode="before")
+    @classmethod
+    def _empty_api_hostname_means_unset(cls, value: object) -> object:
+        # Same established convention as public_api_base_url's own
+        # before-validator above.
+        if value == "":
+            return None
+        return value
+
+    @field_validator("dashboard_hostname", mode="before")
+    @classmethod
+    def _empty_dashboard_hostname_means_unset(cls, value: object) -> object:
+        if value == "":
+            return None
+        return value
+
     @field_validator("database_url")
     @classmethod
     def _require_postgres_psycopg_scheme(cls, value: SecretStr) -> SecretStr:
@@ -1002,6 +1064,74 @@ class Settings(BaseSettings):
             == self.jwt_signing_key.get_secret_value()
         ):
             raise ValueError("JWT_SIGNING_KEY_PREVIOUS must differ from JWT_SIGNING_KEY.")
+        return self
+
+    # [SECURITY] L1 (out-of-band Phase 7 batch, 2026-10-17), Decision D
+    # (D-pilot-placeholder-secrets-gate): under APP_ENV=production, every
+    # secret-class setting (app/secrets_policy.py's own SECRET_CLASS_
+    # SETTINGS, found by introspecting this class's own SecretStr-typed
+    # fields -- see backend/tests/test_secrets_policy_guard.py) must not be
+    # a known placeholder/test value, and must meet its own stated minimum
+    # length where one exists. "Missing or empty" is already covered,
+    # unconditionally, by each required field's own existing field_
+    # validator above (an empty SecretStr is rejected in every environment,
+    # not just production) -- this validator's own job is the part that is
+    # legitimate in development/test but must fail loudly in production:
+    # a real "change-me"/"test-..."/"smoke-..."/"placeholder-..." value
+    # that WOULD otherwise start up successfully. api, worker and migrate
+    # all go through this identical check: every one of them constructs
+    # Settings only via get_settings() (app/config.py's own test_config_
+    # guard.py enforces this), so this one model_validator covers all three
+    # processes with no separate wiring at each entrypoint.
+    @model_validator(mode="after")
+    def _reject_weak_secrets_in_production(self) -> "Settings":
+        if self.app_env != "production":
+            return self
+        raw_values: dict[str, str | None] = {}
+        for setting in SECRET_CLASS_SETTINGS:
+            value = getattr(self, setting.attr)
+            if value is None:
+                raw_values[setting.env_var] = None
+            else:
+                raw_values[setting.env_var] = value.get_secret_value()
+        violations = check_raw_secret_values(raw_values)
+        if violations:
+            # Message names only the variable(s), never a value -- see
+            # check_raw_secret_values()'s own docstring.
+            raise ValueError(" ".join(violations))
+        return self
+
+    # [SECURITY] L1 PART C (#7) (out-of-band Phase 7 batch, 2026-10-17):
+    # api_hostname has no app-breaking default in production the way
+    # trusted_proxy_hostname's "caddy" does -- an unset value there would
+    # leave app/main.py's TrustedHostMiddleware with no real hostname to
+    # allow, locking out every genuine request while looking, from the
+    # outside, like a silent misconfiguration rather than a loud startup
+    # failure. Same "fail fast at startup" discipline as every other
+    # required-in-production setting on this class.
+    @model_validator(mode="after")
+    def _require_api_hostname_in_production(self) -> "Settings":
+        if self.app_env == "production" and self.api_hostname is None:
+            raise ValueError(
+                "API_HOSTNAME must be set in production (deploy/Caddyfile already "
+                "requires it; app/main.py's TrustedHostMiddleware needs it too)."
+            )
+        return self
+
+    # [SECURITY] L1 PART C follow-up (advisor review, 2026-10-17): same
+    # fail-loud discipline as api_hostname above -- an unset value here
+    # would leave TrustedHostMiddleware with no way to allow the
+    # dashboard's own same-origin /api/* calls, the exact production
+    # outage this follow-up fixes.
+    @model_validator(mode="after")
+    def _require_dashboard_hostname_in_production(self) -> "Settings":
+        if self.app_env == "production" and self.dashboard_hostname is None:
+            raise ValueError(
+                "DASHBOARD_HOSTNAME must be set in production (deploy/Caddyfile "
+                "already requires it; app/main.py's TrustedHostMiddleware needs "
+                "it too, since Caddy forwards the dashboard's own Host header "
+                "unchanged on every /api/* call)."
+            )
         return self
 
     def database_url_str(self) -> str:

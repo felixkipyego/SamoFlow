@@ -119,15 +119,42 @@ reasoning not restated here).
 ## 4. Environment secrets
 
 Copy `.env.example` to `.env` on the server (never commit `.env`) and
-fill in every value. The table below flags which ones **must never be a
-placeholder** in production -- Step 7.4's own go-live checklist
-(D-pilot-placeholder-secrets-gate) will eventually enforce this in code;
-until that gate exists, this is a MANUAL check. Confirmed live: today
-`Settings.jwt_signing_key`/`db_connection_encryption_key`'s own
-`min_length=32` constraint does NOT reject the committed
-`.env.example` placeholder value (`"change-me-change-me-change-me-
-change-me"` is 40 characters, well over 32) -- a length check is not a
-placeholder check, so this step is not optional.
+fill in every value. **[SECURITY] L1 (out-of-band Phase 7 batch,
+2026-10-17): this is no longer a manual check.** Felix chose to keep
+secrets in `.env` rather than move to Docker secrets
+(D-7decided-env-secrets-kept), on condition of two real, built, enforced
+mechanisms:
+
+1. **`get_settings()` itself now refuses to start** under
+   `APP_ENV=production` if any secret-class variable is missing, is one
+   of the known placeholder/test values (`change-me`, `test-...`,
+   `smoke-...`, `placeholder-...`), or is shorter than its own stated
+   minimum -- `backend/app/secrets_policy.py`, wired into `api`/
+   `worker`/`migrate` alike (they all construct `Settings` only through
+   `get_settings()`). This is a real, code-enforced gate now, not a
+   promise to eventually build one.
+2. **Run `./ops/deploy/preflight.sh` before every deploy** (first deploy
+   and every later one) -- it fails loud, before `docker compose up`
+   ever runs, if: `.env`'s own permissions are looser than `600`; `.env`
+   is not owned by the user running the script; `.env` is tracked by
+   git, or sits untracked-but-unignored in this checkout's own working
+   tree (a careless `git add .`/`git add -A` would commit it); or any
+   secret-class variable is missing/placeholder/weak, reusing the exact
+   same policy `get_settings()` enforces -- one source of truth, never a
+   second, independently-maintained copy of the same rules. It never
+   prints a secret value, only variable names.
+
+The table below flags which variables must never be a placeholder in
+production -- both mechanisms above now ENFORCE this for every
+secret-class variable automatically; the table stays as a human-
+readable reference for what each one is and where to generate a real
+value, not as the only thing standing between a placeholder and a real
+deployment. Confirmed live: `Settings.jwt_signing_key`/
+`db_connection_encryption_key`'s own `min_length=32` constraint does NOT
+by itself reject the committed `.env.example` placeholder value
+(`"change-me-change-me-change-me-change-me"` is 40 characters, well
+over 32) -- a length check alone is not a placeholder check, which is
+exactly why `secrets_policy.py` checks both, separately.
 
 | Variable | Must never be a placeholder in production? | Notes |
 |---|---|---|
@@ -180,6 +207,13 @@ rewriting is still worth it given the credential is already rotated.
 cd /opt && git clone <this repo> samoflow && cd samoflow
 # .env filled in per §4 above, placed at the repo root.
 
+# [SECURITY] L1, PART B (2026-10-17): run before every deploy, first and
+# every later one -- fails loud before anything below it runs if .env's
+# permissions/ownership/git-exposure are wrong, or any secret-class
+# variable is missing/placeholder/weak.
+chmod 600 .env
+./ops/deploy/preflight.sh
+
 # Pull/build the backend image, run migrations (alembic upgrade head,
 # then ensure_collection() and the checkpointer setup -- entrypoint.sh's
 # own "migrate" mode, Task 1.1.h/2.1.g/3.2.b):
@@ -223,6 +257,84 @@ docker compose --env-file .env -f deploy/docker-compose.yml -f deploy/docker-com
 Confirm: `curl -I https://api.softwareske.com/health` returns `200` with
 no `Server:` header (backend/smoke-image.sh already proves this at the
 image level); `https://app.softwareske.com` loads the dashboard login.
+
+**Then run `ops/deploy/smoke-prod-stack.sh`** -- the real, end-to-end
+proof that this specific first deploy actually works, not just that the
+process started. Found and fixed the real reason this step exists: an
+advisor code review caught a production-breaking bug (every dashboard
+SPA `/api/*` call 400'd -- `app/main.py`'s `TrustedHostMiddleware` only
+allowed `API_HOSTNAME`, but Caddy's own dashboard site forwards the
+DASHBOARD host header on every one of those calls) that NOTHING had
+ever caught, because nothing had exercised a real dashboard login
+through the real Caddy, in `APP_ENV=production`, end to end, before.
+This script is that exercise, every time:
+
+```
+ops/deploy/smoke-prod-stack.sh app.softwareske.com api.softwareske.com \
+  widget.softwareske.com <this server's real public IP>
+```
+
+Checks, against the REAL running stack: the dashboard SPA loads with
+its strict CSP; a full login (CSRF fetch, login, an authenticated
+`/api` call, logout) with `__Host-session`/`__Host-csrf` carrying
+exactly the cookie attributes designed (`Secure`/`HttpOnly`/
+`SameSite=Strict` on the session cookie, `Secure`/`SameSite=Strict`
+but NOT `HttpOnly` on the CSRF one); the widget's static assets load;
+a real widget `/session` and a real, genuinely-streamed (not buffered)
+`/chat` turn; `Host: evil.com`/an IP literal/a missing Host are all
+rejected, over both `http` and `https`; every configured hostname's
+plain `http://` redirects to `https://` (and that Caddy's own
+automatic-HTTPS redirect is never swallowed by the Host-validation
+catch-all -- the script's own output explains and cites exactly how,
+Caddy 2.10.2 source and docs); only Caddy publishes a host port.
+Seeds one throwaway, uniquely-named smoke-test tenant/site-key/
+dashboard-owner into the real database each run (via the same
+`admin`/`seed-owner` commands above), with a real OS-CSPRNG password
+held only in a shell variable for the run's own duration -- never
+echoed, logged, written to disk, or passed as a command-line argument
+any other process on the host could read via `ps`.
+
+**This script cleans up after itself**, on every exit path (a clean
+finish, any failed check, Ctrl-C): its own `cleanup()`, wired to
+`trap ... EXIT`, deletes the owner user and the tenant (which cascades
+to the tenant's own site key and any chat data the `/chat` check
+created) via `admin delete-user`/`admin delete-tenant`. Confirmed live,
+twice: after a successful run AND after a deliberately-failed one, the
+SAME email/password is rejected at login (401) and the SAME site key
+is rejected at `/session` (403) -- the credential this run generated
+never outlives the run, success or failure.
+
+**The one case nothing here can catch: a SIGKILL** (or a lost SSH
+session, a host reboot mid-run) kills this script before its own trap
+ever fires, leaving a `smoke-test-*` tenant/owner behind. Recover with
+the one command built for exactly this:
+
+```
+docker compose --env-file .env -f deploy/docker-compose.yml -f deploy/docker-compose.prod.yml \
+  run --rm migrate admin cleanup-smoke-test-leftovers --confirm
+```
+
+Bulk, pattern-matched (`smoke-test-%`), idempotent (a real, successful
+no-op when there is nothing left to clean up), and safe to run at any
+time, including against a live production database with a real pilot
+tenant on it -- that tenant's own name/owner email is never
+`smoke-test-...`, so this can never touch it.
+
+**Locally** (this exact script, unchanged, run against a scratch stack
+instead of the real server -- useful before every real deploy, not
+only once): bring the stack up with a Caddyfile that differs from the
+real `deploy/Caddyfile` ONLY by adding `local_certs` to its global
+options block (Caddy's own internal CA -- instant issuance, no real
+ACME, no real DNS needed), mounted via a throwaway Compose override
+(never edit the real file for this); extract that CA
+(`docker cp <caddy container>:/data/caddy/pki/authorities/local/
+root.crt .`) and pass it as the script's own 5th argument so curl
+verifies the real TLS handshake against a CA it is told to trust --
+**never** `curl -k`, which would also silently accept the WRONG
+certificate. `SMOKE_ENV_FILE`/`SMOKE_PROJECT`/`SMOKE_EXTRA_COMPOSE_ARGS`
+(read from the environment, see the script's own header comment) point
+it at that scratch stack instead of the real tracked `.env`/compose
+files -- leave all three unset for the real run above.
 
 **Never run more than one `api` process** (never `docker compose up
 --scale api=2`, never add `--workers` to entrypoint.sh's own uvicorn

@@ -6,8 +6,10 @@ import pytest
 from pydantic import ValidationError
 
 from app.config import Settings, SettingsError, get_settings
+from app.secrets_policy import SECRET_CLASS_SETTINGS
 from tests.conftest import (
     ALL_SETTINGS_VARS,
+    PRODUCTION_REALISTIC_SECRET_OVERRIDES,
     REQUIRED_VARS,
     TEST_PASSWORD,
     VALID_ENV,
@@ -370,6 +372,26 @@ def test_repr_and_str_never_leak_jwt_signing_keys(monkeypatch):
     assert previous not in str(settings)
 
 
+def test_repr_and_str_never_leak_anthropic_api_key_or_smtp_password(monkeypatch):
+    # [SECURITY] L1, PART B (out-of-band Phase 7 batch, 2026-10-17): the
+    # two secret-class fields with no prior repr/str coverage -- both
+    # optional, so the trivial "default None never leaks" case already
+    # held; this proves the real, configured case too.
+    distinctive_anthropic = "distinctive-anthropic-key-should-never-leak"
+    distinctive_smtp_password = "distinctive-smtp-pw-should-never-leak"  # noqa: S105
+    set_valid_env(
+        monkeypatch,
+        VALID_ENV,
+        ANTHROPIC_API_KEY=distinctive_anthropic,
+        SMTP_PASSWORD=distinctive_smtp_password,
+    )
+    settings = Settings()
+    assert distinctive_anthropic not in repr(settings)
+    assert distinctive_anthropic not in str(settings)
+    assert distinctive_smtp_password not in repr(settings)
+    assert distinctive_smtp_password not in str(settings)
+
+
 def test_settings_error_message_still_names_the_field(monkeypatch):
     set_valid_env(
         monkeypatch, VALID_ENV, DATABASE_URL=f"mysql://user:{TEST_PASSWORD}@localhost/db"
@@ -506,3 +528,193 @@ def test_public_api_base_url_rejects_a_scheme_only_value_with_no_host(monkeypatc
     set_valid_env(monkeypatch, VALID_ENV, PUBLIC_API_BASE_URL="https:")
     with pytest.raises(ValidationError):
         Settings()
+
+
+# --- [SECURITY] L1 (out-of-band Phase 7 batch, 2026-10-17): the production
+# placeholder/weak-secret startup gate (Decision D,
+# D-pilot-placeholder-secrets-gate) --
+
+
+def test_production_rejects_every_known_weak_value_individually(monkeypatch):
+    # Adversarial, per field: VALID_ENV's own secret values are ALL
+    # "test-"-prefixed -- each one alone must be enough to fail startup
+    # under APP_ENV=production, confirmed one at a time so a future field
+    # added to SECRET_CLASS_SETTINGS without real production-gate coverage
+    # cannot hide behind the others already failing.
+    # DATABASE_URL excluded: it is a DSN whose VALID_ENV password ("pw") is
+    # not itself weak-prefixed -- covered separately by
+    # test_production_rejects_a_weak_database_url_password below.
+    weak_env_vars = [
+        s.env_var for s in SECRET_CLASS_SETTINGS if not s.optional and not s.is_dsn
+    ]
+    for env_var in weak_env_vars:
+        set_valid_env(
+            monkeypatch,
+            VALID_ENV,
+            APP_ENV="production",
+            **{k: v for k, v in PRODUCTION_REALISTIC_SECRET_OVERRIDES.items() if k != env_var},
+        )
+        with pytest.raises(ValidationError, match=env_var):
+            Settings()
+
+
+def test_production_accepts_realistic_looking_secrets(monkeypatch):
+    set_valid_env(
+        monkeypatch,
+        VALID_ENV,
+        APP_ENV="production",
+        **PRODUCTION_REALISTIC_SECRET_OVERRIDES,
+    )
+    settings = Settings()
+    assert settings.app_env == "production"
+
+
+def test_development_and_test_env_are_unaffected_by_the_weak_value_check(monkeypatch):
+    # Non-production environments are unaffected -- VALID_ENV's own
+    # "test-"-prefixed values (the common case for local dev/CI) must
+    # never be rejected outside production.
+    for app_env in ("development", "test"):
+        set_valid_env(monkeypatch, VALID_ENV, APP_ENV=app_env)
+        settings = Settings()
+        assert settings.app_env == app_env
+
+
+def test_production_rejects_a_weak_database_url_password(monkeypatch):
+    # DATABASE_URL is a DSN, not a bare token -- the weak check must look
+    # at the embedded PASSWORD, not the whole "postgresql+psycopg://..."
+    # string (which never matches any weak prefix).
+    set_valid_env(
+        monkeypatch,
+        VALID_ENV,
+        APP_ENV="production",
+        DATABASE_URL="postgresql+psycopg://user:change-me@localhost:5432/widgetplatform",
+        **PRODUCTION_REALISTIC_SECRET_OVERRIDES,
+    )
+    with pytest.raises(ValidationError, match="DATABASE_URL"):
+        Settings()
+
+
+def test_production_weak_secret_error_names_only_the_variable(monkeypatch):
+    set_valid_env(
+        monkeypatch,
+        VALID_ENV,
+        APP_ENV="production",
+        **{k: v for k, v in PRODUCTION_REALISTIC_SECRET_OVERRIDES.items() if k != "OPENAI_API_KEY"},
+    )
+    with pytest.raises(ValidationError) as excinfo:
+        Settings()
+    message = str(excinfo.value)
+    assert "OPENAI_API_KEY" in message
+    assert VALID_ENV["OPENAI_API_KEY"] not in message
+
+
+def test_production_leaves_an_optional_unset_secret_alone(monkeypatch):
+    # ANTHROPIC_API_KEY/SMTP_PASSWORD/JWT_SIGNING_KEY_PREVIOUS unset (None)
+    # is a legitimate "not configured" state, even in production -- the
+    # gate must never treat "optional and absent" as a weak-value finding.
+    set_valid_env(
+        monkeypatch,
+        VALID_ENV,
+        APP_ENV="production",
+        **PRODUCTION_REALISTIC_SECRET_OVERRIDES,
+    )
+    settings = Settings()
+    assert settings.anthropic_api_key_str() is None
+    assert settings.smtp_password_str() is None
+    assert settings.jwt_signing_key_previous_str() is None
+
+
+# --- [SECURITY] L1 PART C (#7) (out-of-band Phase 7 batch, 2026-10-17):
+# api_hostname/trusted_proxy_hostname --
+
+
+def test_api_hostname_unset_is_fine_outside_production(monkeypatch):
+    for app_env in ("development", "test"):
+        set_valid_env(monkeypatch, VALID_ENV, APP_ENV=app_env)
+        settings = Settings()
+        assert settings.api_hostname is None
+
+
+def test_api_hostname_required_in_production(monkeypatch):
+    set_valid_env(
+        monkeypatch,
+        VALID_ENV,
+        APP_ENV="production",
+        **{k: v for k, v in PRODUCTION_REALISTIC_SECRET_OVERRIDES.items() if k != "API_HOSTNAME"},
+    )
+    with pytest.raises(ValidationError, match="API_HOSTNAME"):
+        Settings()
+
+
+def test_api_hostname_empty_string_means_unset(monkeypatch):
+    set_valid_env(monkeypatch, VALID_ENV, API_HOSTNAME="")
+    settings = Settings()
+    assert settings.api_hostname is None
+
+
+def test_api_hostname_accepts_a_real_value_in_production(monkeypatch):
+    set_valid_env(
+        monkeypatch,
+        VALID_ENV,
+        APP_ENV="production",
+        **PRODUCTION_REALISTIC_SECRET_OVERRIDES,
+    )
+    settings = Settings()
+    assert settings.api_hostname == "test"
+
+
+# --- [SECURITY] L1 PART C follow-up (advisor review, 2026-10-17):
+# dashboard_hostname -- the real production-breaking bug this follow-up
+# fixes (the dashboard SPA's own same-origin /api/* calls arrive at the
+# api service with Host = this value, not API_HOSTNAME's) --
+
+
+def test_dashboard_hostname_unset_is_fine_outside_production(monkeypatch):
+    for app_env in ("development", "test"):
+        set_valid_env(monkeypatch, VALID_ENV, APP_ENV=app_env)
+        settings = Settings()
+        assert settings.dashboard_hostname is None
+
+
+def test_dashboard_hostname_required_in_production(monkeypatch):
+    set_valid_env(
+        monkeypatch,
+        VALID_ENV,
+        APP_ENV="production",
+        **{
+            k: v
+            for k, v in PRODUCTION_REALISTIC_SECRET_OVERRIDES.items()
+            if k != "DASHBOARD_HOSTNAME"
+        },
+    )
+    with pytest.raises(ValidationError, match="DASHBOARD_HOSTNAME"):
+        Settings()
+
+
+def test_dashboard_hostname_empty_string_means_unset(monkeypatch):
+    set_valid_env(monkeypatch, VALID_ENV, DASHBOARD_HOSTNAME="")
+    settings = Settings()
+    assert settings.dashboard_hostname is None
+
+
+def test_dashboard_hostname_accepts_a_real_value_in_production(monkeypatch):
+    set_valid_env(
+        monkeypatch,
+        VALID_ENV,
+        APP_ENV="production",
+        **PRODUCTION_REALISTIC_SECRET_OVERRIDES,
+    )
+    settings = Settings()
+    assert settings.dashboard_hostname == "test"
+
+
+def test_trusted_proxy_hostname_defaults_to_caddy(monkeypatch):
+    set_valid_env(monkeypatch, VALID_ENV)
+    settings = Settings()
+    assert settings.trusted_proxy_hostname == "caddy"
+
+
+def test_trusted_proxy_hostname_is_configurable(monkeypatch):
+    set_valid_env(monkeypatch, VALID_ENV, TRUSTED_PROXY_HOSTNAME="a-different-proxy")
+    settings = Settings()
+    assert settings.trusted_proxy_hostname == "a-different-proxy"

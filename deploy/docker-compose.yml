@@ -49,6 +49,35 @@ x-app-env: &app-env
   # (not ":?"): absent is a valid "tracing disabled" value, the same
   # shape ANTHROPIC_API_KEY above already uses.
   PHOENIX_COLLECTOR_ENDPOINT: ${PHOENIX_COLLECTOR_ENDPOINT:-}
+  # [SECURITY] L1 PART C (#7) (out-of-band Phase 7 batch, 2026-10-17):
+  # the SAME API_HOSTNAME env var deploy/Caddyfile already reads for its
+  # own {$API_HOSTNAME} site block -- one source of truth, read a second
+  # time here so app/main.py's TrustedHostMiddleware (production only)
+  # validates against the real value instead of a second, hand-copied
+  # one. ":-" (not ":?"): unset is a valid "no Caddy in front yet" value
+  # in development/test -- Settings._require_api_hostname_in_production
+  # (app/config.py) is what makes this mandatory, and only under
+  # APP_ENV=production.
+  API_HOSTNAME: ${API_HOSTNAME:-}
+  # [SECURITY] L1 PART C follow-up (advisor review, 2026-10-17): the SAME
+  # DASHBOARD_HOSTNAME env var deploy/Caddyfile already reads for its own
+  # {$DASHBOARD_HOSTNAME} site -- a real production outage (every
+  # dashboard SPA /api/* call 400'd) was caused by the api service never
+  # seeing this value at all: Caddy's reverse_proxy passes the dashboard
+  # site's own Host header through unchanged on every /api/* call, and
+  # app/main.py's TrustedHostMiddleware had nothing but API_HOSTNAME to
+  # compare it against. Same ":-" treatment as API_HOSTNAME above.
+  DASHBOARD_HOSTNAME: ${DASHBOARD_HOSTNAME:-}
+  # [SECURITY] L1 PART C (#7): Caddy's own compose service name -- the
+  # DNS hostname app/client_ip.py resolves to decide which immediate TCP
+  # peer is trusted to set X-Forwarded-For/X-Real-IP. Baked-in literal
+  # default "caddy" (not ":-", matching deploy/docker-compose.prod.yml's
+  # own UPLOAD_MAX_SIZE_BYTES precedent and its header comment on why: an
+  # explicitly-empty env value is "set to empty", not "unset", to
+  # Compose's own interpolation, so an operator who leaves this var out
+  # of .env entirely still gets the real default here, not an empty
+  # string that would disable the trust boundary outright).
+  TRUSTED_PROXY_HOSTNAME: ${TRUSTED_PROXY_HOSTNAME:-caddy}
 
 # Hardening applied to api, worker and migrate only (our own code running
 # the widgetplatform-backend image): read-only root filesystem with a tmpfs

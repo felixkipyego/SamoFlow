@@ -65,6 +65,25 @@ EXTRA_EXAMPLE_KEYS: tuple[str, ...] = (
     "CHAT_STOP_RATE_LIMIT_PER_VISITOR_WINDOW_SECONDS",
     "CHAT_STOP_RATE_LIMIT_PER_IP",
     "CHAT_STOP_RATE_LIMIT_PER_IP_WINDOW_SECONDS",
+    # [SECURITY] L1 PART C (#7) (out-of-band Phase 7 batch, 2026-10-17):
+    # API_HOSTNAME is now ALSO a real (optional) Settings field --
+    # app/main.py's TrustedHostMiddleware reads it, in production, as
+    # well as deploy/Caddyfile's own {$API_HOSTNAME} site block -- so it
+    # moves here from OPS_ONLY_EXAMPLE_KEYS below, which this file's own
+    # header comment says is only for names with NO Settings field.
+    # TRUSTED_PROXY_HOSTNAME is a new, backend-only field (declared with
+    # its real, non-empty default "caddy", matching the SESSION_RATE_
+    # LIMIT_* entries' own established shape).
+    "API_HOSTNAME",
+    "TRUSTED_PROXY_HOSTNAME",
+    # [SECURITY] L1 PART C follow-up (advisor review, 2026-10-17):
+    # DASHBOARD_HOSTNAME is now ALSO a real (optional) Settings field,
+    # the SAME shape as API_HOSTNAME's own move above -- moves here from
+    # OPS_ONLY_EXAMPLE_KEYS below for the identical reason (a real
+    # production-breaking bug: the dashboard SPA's own /api/* calls
+    # arrive at the api service with Host = this value, and app/main.py's
+    # TrustedHostMiddleware needed to know it).
+    "DASHBOARD_HOSTNAME",
 )
 
 # Step 7.3 prep (ops track): genuinely new deploy/ops-layer configuration
@@ -77,8 +96,6 @@ EXTRA_EXAMPLE_KEYS: tuple[str, ...] = (
 # "this duplicates a Settings field under a new name" mistake. See
 # docs/deploy/RUNBOOK.md for what each one configures.
 OPS_ONLY_EXAMPLE_KEYS: tuple[str, ...] = (
-    "DASHBOARD_HOSTNAME",
-    "API_HOSTNAME",
     "WIDGET_HOSTNAME",
     "CADDY_ACME_EMAIL",
     "DASHBOARD_DIST_DIR",

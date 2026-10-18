@@ -24,6 +24,17 @@
 # `UPDATE` statement) so the session-invalidation hook
 # (`UserManager.on_after_update()`, app/dashboard/auth_backend.py)
 # fires automatically on every one of them.
+#
+# [SECURITY] ops/deploy/smoke-prod-stack.sh cleanup follow-up (advisor
+# review, 2026-10-17): delete-tenant/delete-user added so that script
+# can remove every throwaway tenant/site-key/owner it seeds, on every
+# exit path -- a real production outage this follow-up fixes (a public
+# repo means a guessable smoke-test credential left behind on the real
+# server was a real, working admin login). Both require --confirm and
+# are idempotent (a second call, or one against an id/email already
+# gone, is a no-op, never an error) -- see each command's own docstring
+# for why full deletion (not deactivation) is the clean, correct choice
+# here.
 import argparse
 import asyncio
 import sys
@@ -52,6 +63,7 @@ from app.tenancy.models import Tenant
 from app.tenancy.repository import (
     TenantScopedRepository,
     create_tenant,
+    delete_tenant,
     generate_site_key,
 )
 
@@ -66,6 +78,30 @@ async def cmd_create_tenant(args: argparse.Namespace) -> None:
         tenant = await create_tenant(session, name=args.name, status="active")
         await session.commit()
     print(f"created tenant {tenant.name!r} ({tenant.id})")
+
+
+async def cmd_delete_tenant(args: argparse.Namespace) -> None:
+    # [SECURITY] ops/deploy/smoke-prod-stack.sh cleanup follow-up
+    # (advisor review, 2026-10-17): `--tenant-id`, not `--name` --
+    # every OTHER tenant-scoped command on this CLI (assign-plan,
+    # issue-site-key, revoke-site-key) already keys on `--tenant-id`,
+    # and `tenants.name` carries no unique constraint at the database
+    # level (confirmed by reading app/tenancy/models.py directly) --
+    # a name-based lookup would need to handle "more than one tenant
+    # shares this name" as a real case, which a precise id never does.
+    # `--confirm` is required (not merely accepted) on purpose: this
+    # command is destructive and irreversible, and whoever runs it by
+    # hand on the real production host should have to type one more
+    # deliberate flag, not just a single copy-pasted uuid.
+    if not args.confirm:
+        raise AdminCliError("refusing to delete a tenant without --confirm")
+    async with _session_factory()() as session:
+        name = await delete_tenant(session, args.tenant_id)
+        await session.commit()
+    if name is None:
+        print(f"no tenant with id {args.tenant_id} (already deleted or never existed)")
+        return
+    print(f"deleted tenant {name!r} ({args.tenant_id}) and everything that cascades from it")
 
 
 async def cmd_assign_plan(args: argparse.Namespace) -> None:
@@ -180,6 +216,89 @@ async def _get_user_by_email(user_db: SQLAlchemyUserDatabase, email: str) -> Use
     return user
 
 
+async def cmd_delete_user(args: argparse.Namespace) -> None:
+    # [SECURITY] ops/deploy/smoke-prod-stack.sh cleanup follow-up
+    # (advisor review, 2026-10-17): full deletion via fastapi-users'
+    # own `UserManager.delete()` (BaseUserManager.delete() ->
+    # SQLAlchemyUserDatabase.delete() -> a real DELETE, never a raw
+    # UPDATE/soft-delete flag) -- the SAME "build on the real path"
+    # discipline this module's own header comment already states for
+    # every other mutation here. No separate session-invalidation call
+    # needed: `dashboard_sessions.user_id` is `ondelete="CASCADE"`
+    # (app/dashboard/models.py), so every one of this user's own
+    # sessions is gone, at the database level, the instant this DELETE
+    # commits -- proven live, not assumed (this task's own adversarial
+    # tests). `--confirm` required, same reasoning as delete-tenant's
+    # own identical flag. Idempotent: a second call (or one against an
+    # email that was never real) is a no-op, not an error.
+    if not args.confirm:
+        raise AdminCliError("refusing to delete a user without --confirm")
+    async with _session_factory()() as session:
+        user_db = SQLAlchemyUserDatabase(session, User)
+        user = await user_db.get_by_email(args.email)
+        if user is None:
+            print(f"no user with email {args.email!r} (already deleted or never existed)")
+            return
+        manager = UserManager(user_db, password_helper)
+        await manager.delete(user)
+        await session.commit()
+    print(f"deleted user {args.email!r}")
+
+
+async def cmd_cleanup_smoke_test_leftovers(args: argparse.Namespace) -> None:
+    """[SECURITY] ops/deploy/smoke-prod-stack.sh cleanup follow-up
+    (advisor review, 2026-10-17): the ONE command RUNBOOK §5 names for
+    the one case nothing else here can catch -- a SIGKILL (or a lost
+    SSH session, a host reboot mid-run) kills that script before its
+    own `trap ... EXIT` cleanup ever runs. Everything this command
+    removes was already SUPPOSED to be deleted by that script's own
+    per-run cleanup (delete-tenant/delete-user above) -- this is only
+    ever cleaning up after an ABNORMAL exit, never a normal one.
+
+    Bulk, pattern-based (`smoke-test-%`, the exact prefix every tenant
+    name and owner email that script ever generates uses -- see its
+    own SUFFIX/TENANT_NAME/OWNER_EMAIL) rather than one id/email at a
+    time: an operator recovering from an incident should not have to
+    enumerate leftovers by hand first. Idempotent (running this with
+    nothing left to clean up is a real, successful no-op, not an
+    error) and safe to run at any time, including against a healthy
+    production database with a real pilot tenant on it -- the real
+    pilot tenant's own name/owner email is never `smoke-test-...`, so
+    this can never touch it.
+    """
+    if not args.confirm:
+        raise AdminCliError("refusing to clean up smoke-test leftovers without --confirm")
+    async with _session_factory()() as session:
+        tenant_ids = (
+            (
+                await session.execute(
+                    select(Tenant.id).where(Tenant.name.like("smoke-test-%"))
+                )
+            )
+            .scalars()
+            .all()
+        )
+        for tenant_id in tenant_ids:
+            await delete_tenant(session, tenant_id)
+        user_db = SQLAlchemyUserDatabase(session, User)
+        user_ids = (
+            (
+                await session.execute(
+                    select(User.id).where(User.email.like("smoke-test-%"))
+                )
+            )
+            .scalars()
+            .all()
+        )
+        manager = UserManager(user_db, password_helper)
+        for user_id in user_ids:
+            user = await user_db.get(user_id)
+            if user is not None:
+                await manager.delete(user)
+        await session.commit()
+    print(f"cleaned up {len(tenant_ids)} leftover smoke-test tenant(s), {len(user_ids)} user(s)")
+
+
 async def cmd_reset_password(args: argparse.Namespace) -> None:
     """Alignment task (2026-10-15): the real replacement for seed_cli.py's
     own "use a direct database update for that" workaround -- that line
@@ -243,6 +362,15 @@ def main() -> None:
     create_tenant_parser.add_argument("--name", required=True)
     create_tenant_parser.set_defaults(handler=cmd_create_tenant)
 
+    delete_tenant_parser = subparsers.add_parser("delete-tenant")
+    delete_tenant_parser.add_argument(
+        "--tenant-id", dest="tenant_id", type=uuid.UUID, required=True
+    )
+    delete_tenant_parser.add_argument(
+        "--confirm", action="store_true", help="required -- this permanently deletes the tenant"
+    )
+    delete_tenant_parser.set_defaults(handler=cmd_delete_tenant)
+
     assign_plan_parser = subparsers.add_parser("assign-plan")
     assign_plan_parser.add_argument("--tenant-id", dest="tenant_id", type=uuid.UUID, required=True)
     assign_plan_parser.add_argument("--plan-id", dest="plan_id", type=uuid.UUID, required=True)
@@ -277,6 +405,21 @@ def main() -> None:
 
     seed_plans_parser = subparsers.add_parser("seed-plans")
     seed_plans_parser.set_defaults(handler=cmd_seed_plans)
+
+    delete_user_parser = subparsers.add_parser("delete-user")
+    delete_user_parser.add_argument("--email", required=True)
+    delete_user_parser.add_argument(
+        "--confirm", action="store_true", help="required -- this permanently deletes the user"
+    )
+    delete_user_parser.set_defaults(handler=cmd_delete_user)
+
+    cleanup_smoke_test_parser = subparsers.add_parser("cleanup-smoke-test-leftovers")
+    cleanup_smoke_test_parser.add_argument(
+        "--confirm",
+        action="store_true",
+        help="required -- this permanently deletes every smoke-test-* tenant/user",
+    )
+    cleanup_smoke_test_parser.set_defaults(handler=cmd_cleanup_smoke_test_leftovers)
 
     reset_password_parser = subparsers.add_parser("reset-password")
     reset_password_parser.add_argument("--email", required=True)

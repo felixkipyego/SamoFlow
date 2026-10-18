@@ -77,6 +77,7 @@ from app.chat.schemas import (
     ConversationMessagesResponse,
     ConversationSummary,
 )
+from app.client_ip import get_client_ip
 from app.config import get_settings
 from app.db import _session_factory, get_db_session
 from app.plans import usage
@@ -732,7 +733,7 @@ async def create_chat_turn(payload: ChatRequest, request: Request) -> Response:
             request.state.cors_allowed_origin = identity.org
             graph = request.app.state.graph
 
-            ip = request.client.host if request.client else "unknown"
+            ip = get_client_ip(request, settings)
             per_ip_limiter = _get_per_ip_limiter(request)
             if not per_ip_limiter.check(ip):
                 return _rate_limited_response(per_ip_limiter.get_retry_after(ip))
@@ -917,7 +918,7 @@ async def stop_chat_turn(
     """
     request.state.cors_allowed_origin = identity.org
 
-    ip = request.client.host if request.client else "unknown"
+    ip = get_client_ip(request, get_settings())
     per_ip_limiter = _get_stop_per_ip_limiter(request)
     if not per_ip_limiter.check(ip):
         return _rate_limited_response(per_ip_limiter.get_retry_after(ip))

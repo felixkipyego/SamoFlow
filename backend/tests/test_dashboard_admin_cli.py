@@ -19,7 +19,10 @@ from fastapi_users.db import SQLAlchemyUserDatabase
 from app.dashboard.admin_cli import (
     AdminCliError,
     cmd_assign_plan,
+    cmd_cleanup_smoke_test_leftovers,
     cmd_create_tenant,
+    cmd_delete_tenant,
+    cmd_delete_user,
     cmd_issue_site_key,
     cmd_reset_password,
     cmd_revoke_domain,
@@ -335,3 +338,181 @@ async def test_unset_platform_admin_revokes_the_role_and_invalidates_sessions(
 async def test_set_platform_admin_for_an_unknown_email_raises(reset_test_database):
     with pytest.raises(AdminCliError):
         await cmd_set_platform_admin(Namespace(email="nobody@example.com"))
+
+
+# --- delete-tenant / delete-user (ops/deploy/smoke-prod-stack.sh cleanup
+# follow-up, advisor review, 2026-10-17) -----------------------------------
+
+
+async def test_delete_tenant_requires_confirm(reset_test_database):
+    async with db_session() as session:
+        tenant = Tenant(name="Confirm Me", status="active")
+        session.add(tenant)
+        await session.flush()
+        tenant_id = tenant.id
+        await session.commit()
+
+    with pytest.raises(AdminCliError):
+        await cmd_delete_tenant(Namespace(tenant_id=tenant_id, confirm=False))
+
+    # Rejected before any delete -- the tenant must still be there.
+    async with db_session() as session:
+        still_there = (
+            await session.execute(sa.select(Tenant).where(Tenant.id == tenant_id))
+        ).scalar_one_or_none()
+        assert still_there is not None
+
+
+async def test_delete_tenant_cascades_to_its_site_keys(reset_test_database):
+    async with db_session() as session:
+        tenant = Tenant(name="Cascade Me", status="active")
+        session.add(tenant)
+        await session.flush()
+        tenant_id = tenant.id
+        site_key = SiteKey(
+            tenant_id=tenant_id,
+            key="pk_live_cascade-test-key",
+            allowed_origins=["https://cascade.example.com"],
+            environment="production",
+            status="live",
+        )
+        session.add(site_key)
+        await session.flush()
+        site_key_id = site_key.id
+        await session.commit()
+
+    await cmd_delete_tenant(Namespace(tenant_id=tenant_id, confirm=True))
+
+    async with db_session() as session:
+        tenant_gone = (
+            await session.execute(sa.select(Tenant).where(Tenant.id == tenant_id))
+        ).scalar_one_or_none()
+        assert tenant_gone is None
+        site_key_gone = (
+            await session.execute(sa.select(SiteKey).where(SiteKey.id == site_key_id))
+        ).scalar_one_or_none()
+        assert site_key_gone is None
+
+
+async def test_delete_tenant_on_an_unknown_id_is_a_noop_not_an_error(reset_test_database):
+    await cmd_delete_tenant(Namespace(tenant_id=uuid.uuid4(), confirm=True))
+
+
+async def test_delete_tenant_is_idempotent(reset_test_database):
+    async with db_session() as session:
+        tenant = Tenant(name="Delete Twice", status="active")
+        session.add(tenant)
+        await session.flush()
+        tenant_id = tenant.id
+        await session.commit()
+
+    await cmd_delete_tenant(Namespace(tenant_id=tenant_id, confirm=True))
+    # Second call against the now-already-deleted id: still no raise.
+    await cmd_delete_tenant(Namespace(tenant_id=tenant_id, confirm=True))
+
+
+async def test_delete_user_requires_confirm(reset_test_database):
+    user_id = await _seed_user_with_a_session("confirm-me@example.com")
+
+    with pytest.raises(AdminCliError):
+        await cmd_delete_user(Namespace(email="confirm-me@example.com", confirm=False))
+
+    async with db_session() as session:
+        user_db = SQLAlchemyUserDatabase(session, User)
+        still_there = await user_db.get(user_id)
+        assert still_there is not None
+
+
+async def test_delete_user_deletes_the_row_and_invalidates_sessions(reset_test_database):
+    user_id = await _seed_user_with_a_session("delete-me@example.com")
+    assert await _session_count(user_id) == 1
+
+    await cmd_delete_user(Namespace(email="delete-me@example.com", confirm=True))
+
+    async with db_session() as session:
+        user_db = SQLAlchemyUserDatabase(session, User)
+        gone = await user_db.get(user_id)
+        assert gone is None
+    # ondelete="CASCADE" on dashboard_sessions.user_id -- not a separate
+    # invalidate_all_sessions_for_user() call -- proven directly, not
+    # assumed from reading the FK definition alone.
+    assert await _session_count(user_id) == 0
+
+
+async def test_delete_user_on_an_unknown_email_is_a_noop_not_an_error(reset_test_database):
+    await cmd_delete_user(Namespace(email="nobody-to-delete@example.com", confirm=True))
+
+
+async def test_delete_user_is_idempotent(reset_test_database):
+    await _seed_user_with_a_session("delete-twice@example.com")
+
+    await cmd_delete_user(Namespace(email="delete-twice@example.com", confirm=True))
+    # Second call against the now-already-deleted email: still no raise.
+    await cmd_delete_user(Namespace(email="delete-twice@example.com", confirm=True))
+
+
+# --- cleanup-smoke-test-leftovers (ops/deploy/smoke-prod-stack.sh
+# SIGKILL-recovery follow-up, advisor review, 2026-10-17) ------------------
+
+
+async def test_cleanup_smoke_test_leftovers_requires_confirm(reset_test_database):
+    async with db_session() as session:
+        tenant = Tenant(name="smoke-test-leftover-1", status="active")
+        session.add(tenant)
+        await session.commit()
+
+    with pytest.raises(AdminCliError):
+        await cmd_cleanup_smoke_test_leftovers(Namespace(confirm=False))
+
+    async with db_session() as session:
+        still_there = (
+            await session.execute(
+                sa.select(Tenant).where(Tenant.name == "smoke-test-leftover-1")
+            )
+        ).scalar_one_or_none()
+        assert still_there is not None
+
+
+async def test_cleanup_smoke_test_leftovers_removes_only_the_smoke_test_pattern(
+    reset_test_database,
+):
+    async with db_session() as session:
+        session.add_all(
+            [
+                Tenant(name="smoke-test-leftover-2", status="active"),
+                Tenant(name="smoke-test-leftover-3", status="active"),
+                Tenant(name="Real Pilot Tenant", status="active"),
+            ]
+        )
+        await session.commit()
+    await _seed_user_with_a_session("smoke-test-leftover-user@example.com")
+    await _seed_user_with_a_session("real-owner@example.com")
+
+    await cmd_cleanup_smoke_test_leftovers(Namespace(confirm=True))
+
+    async with db_session() as session:
+        remaining_tenants = (
+            (await session.execute(sa.select(Tenant.name))).scalars().all()
+        )
+        assert set(remaining_tenants) == {"Real Pilot Tenant"}
+        user_db = SQLAlchemyUserDatabase(session, User)
+        assert await user_db.get_by_email("smoke-test-leftover-user@example.com") is None
+        real_owner = await user_db.get_by_email("real-owner@example.com")
+        assert real_owner is not None
+
+
+async def test_cleanup_smoke_test_leftovers_is_idempotent(reset_test_database):
+    async with db_session() as session:
+        tenant = Tenant(name="smoke-test-leftover-4", status="active")
+        session.add(tenant)
+        await session.commit()
+
+    await cmd_cleanup_smoke_test_leftovers(Namespace(confirm=True))
+    # Second call with nothing left to clean up: still no raise.
+    await cmd_cleanup_smoke_test_leftovers(Namespace(confirm=True))
+
+
+async def test_cleanup_smoke_test_leftovers_on_an_empty_database_is_a_noop(
+    reset_test_database,
+):
+    await cmd_cleanup_smoke_test_leftovers(Namespace(confirm=True))
