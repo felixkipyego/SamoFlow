@@ -96,6 +96,14 @@ EXTRA_EXAMPLE_KEYS: tuple[str, ...] = (
 # "this duplicates a Settings field under a new name" mistake. See
 # docs/deploy/RUNBOOK.md for what each one configures.
 OPS_ONLY_EXAMPLE_KEYS: tuple[str, ...] = (
+    # [SECURITY] L2 (Phase 7 role split, 2026-10-18): bare OWNER-role
+    # credentials -- no Settings field reads these directly (the backend
+    # reads DATABASE_URL_MIGRATE, a real Settings field, instead); only
+    # ops/backup/docker-compose.yml's PGUSER/PGPASSWORD need the bare
+    # username/password, which a DSN cannot supply to plain YAML
+    # interpolation.
+    "POSTGRES_OWNER_USER",
+    "POSTGRES_OWNER_PASSWORD",
     "WIDGET_HOSTNAME",
     "CADDY_ACME_EMAIL",
     "DASHBOARD_DIST_DIR",

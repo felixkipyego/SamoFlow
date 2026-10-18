@@ -57,12 +57,19 @@ class SecretClassSetting:
 
 # Every SecretStr-typed field on Settings (app/config.py), found by
 # introspecting Settings.model_fields directly (confirmed live: exactly
-# these 9, via `typing.get_args(field.annotation)` containing SecretStr or
+# these 10, via `typing.get_args(field.annotation)` containing SecretStr or
 # the bare annotation being SecretStr) -- backend/tests/test_secrets_
 # policy_guard.py fails if a new one is ever added here without a matching
 # SecretClassSetting entry.
 SECRET_CLASS_SETTINGS: tuple[SecretClassSetting, ...] = (
     SecretClassSetting("database_url", "DATABASE_URL", None, optional=False, is_dsn=True),
+    # [SECURITY] L2 (Phase 7 role split, 2026-10-18): the OWNER/MIGRATOR
+    # role's own DSN (app/config.py's database_url_migrate) -- covers that
+    # role's own password the identical way DATABASE_URL above already
+    # covers the APP role's.
+    SecretClassSetting(
+        "database_url_migrate", "DATABASE_URL_MIGRATE", None, optional=False, is_dsn=True
+    ),
     SecretClassSetting("qdrant_api_key", "QDRANT_API_KEY", None, optional=False),
     SecretClassSetting(
         "qdrant_read_only_api_key", "QDRANT_READ_ONLY_API_KEY", None, optional=False

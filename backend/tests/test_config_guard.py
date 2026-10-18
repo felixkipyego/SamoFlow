@@ -29,6 +29,8 @@
 #     config.py's model_config comment);
 #   - only files listed in ALLOWED_DATABASE_URL_CALLERS may call
 #     database_url_str() outside app/config.py;
+#   - only files listed in ALLOWED_DATABASE_URL_MIGRATE_CALLERS may call
+#     database_url_migrate_str() outside app/config.py;
 #   - only files listed in ALLOWED_QDRANT_API_KEY_CALLERS may call
 #     qdrant_api_key_str() outside app/config.py;
 #   - only files listed in ALLOWED_JWT_KEY_CALLERS may call
@@ -54,9 +56,24 @@ CONFIG_FILE = APP_DIR / "config.py"
 # psycopg/psycopg_pool (not through app/db.py's SQLAlchemy engine), so it
 # needs the real DATABASE_URL itself, converted to a plain psycopg conninfo
 # string (checkpointer_conninfo()) rather than reused as-is.
+# [SECURITY] L2 (Phase 7 role split, 2026-10-18): alembic/env.py REMOVED --
+# it now calls database_url_migrate_str() (the OWNER role) instead, see
+# ALLOWED_DATABASE_URL_MIGRATE_CALLERS below. database_url_str() is now the
+# APP role's own DSN, least-privilege, used only by the live runtime
+# connections api/worker open.
 ALLOWED_DATABASE_URL_CALLERS: tuple[str, ...] = (
-    "alembic/env.py",
     "app/db.py",
+    "app/agent/checkpointer.py",
+)
+
+# [SECURITY] L2 (Phase 7 role split, 2026-10-18): the OWNER/MIGRATOR role's
+# own DSN -- alembic/env.py (runs every migration) and app/agent/
+# checkpointer.py (run_checkpointer_setup(), the migrate-time DDL call;
+# checkpointer_conninfo() takes an explicit url= now, so the SAME file
+# calls both accessors, one per caller, never confusing which role a given
+# connection uses).
+ALLOWED_DATABASE_URL_MIGRATE_CALLERS: tuple[str, ...] = (
+    "alembic/env.py",
     "app/agent/checkpointer.py",
 )
 
@@ -107,6 +124,7 @@ ALLOWED_SMTP_PASSWORD_CALLERS: tuple[str, ...] = ("app/notifications/service.py"
 # same reasoning as the task's own single shared allow-list decision.
 _SECRET_ACCESSOR_ALLOW_LISTS: dict[str, tuple[str, ...]] = {
     "database_url_str": ALLOWED_DATABASE_URL_CALLERS,
+    "database_url_migrate_str": ALLOWED_DATABASE_URL_MIGRATE_CALLERS,
     "qdrant_api_key_str": ALLOWED_QDRANT_API_KEY_CALLERS,
     # Task 3.1.b: shares ALLOWED_QDRANT_API_KEY_CALLERS -- both accessors
     # are scoped to the identical single file (app/qdrant.py), matching
