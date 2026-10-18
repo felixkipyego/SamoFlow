@@ -228,8 +228,9 @@ docker compose --env-file .env -f deploy/docker-compose.yml -f deploy/docker-com
 # migrate's own runtime credentials. Run this BEFORE migrate, every time
 # roles might not exist yet (a genuinely fresh server) or might still be
 # the pre-split single shared role (an existing volume upgrading to this
-# split for the first time -- REASSIGN OWNED BY moves ownership of every
-# table the old role created, with zero data loss).
+# split for the first time -- a per-table/sequence ALTER ... OWNER TO
+# loop moves ownership of everything the old role created, with zero
+# data loss).
 docker compose --env-file .env -f deploy/docker-compose.yml -f deploy/docker-compose.prod.yml \
   run --rm provision-roles
 
@@ -550,11 +551,13 @@ nightly backup (§6) into a fresh stack instead of downgrading in place.
 
 **Rolling back the Postgres role split itself** ([SECURITY] L2, Phase 7,
 2026-10-18): `provision-roles` never drops or renames the old BOOTSTRAP
-role, and `REASSIGN OWNED BY` is the only ownership change it makes to
-existing objects -- a superuser bypasses ownership checks regardless of
-which role nominally owns a table, so BOOTSTRAP can still read/write/
-alter everything even after `REASSIGN OWNED BY` has moved nominal
-ownership to OWNER. To roll back past this split's own commit:
+role, and a per-table/sequence `ALTER ... OWNER TO` loop (never a
+blanket `REASSIGN OWNED BY` -- that also touches template0/template1,
+which Postgres refuses to reassign outright, confirmed live) is the
+only ownership change it makes to existing objects -- a superuser
+bypasses ownership checks regardless of which role nominally owns a
+table, so BOOTSTRAP can still read/write/alter everything even after
+that loop has moved nominal ownership to OWNER. To roll back past this split's own commit:
 1. `git checkout <previous-good-commit>` and redeploy, as above.
 2. **Also hand-edit the real `.env` on the server** (it is not tracked
    by git, so step 1 alone does not touch it): point `DATABASE_URL` back
@@ -591,9 +594,9 @@ the owner's password, which is ALWAYS freshly rotated and printed once
 
 **[SECURITY] L2 (Phase 7 role split, 2026-10-18), existing demo volume:**
 `start.sh` now provisions the owner+app Postgres roles as its own first
-step (idempotent, zero data loss -- `REASSIGN OWNED BY` moves ownership
-of whatever this demo's existing volume already has from the old single
-shared role), so the next `./ops/demo/start.sh` run upgrades an existing
+step (idempotent, zero data loss -- a per-table/sequence ALTER ... OWNER
+TO loop moves ownership of whatever this demo's existing volume already
+has from the old single shared role), so the next `./ops/demo/start.sh` run upgrades an existing
 local demo volume automatically -- no separate manual step is needed.
 To provision ONLY, without starting the rest of the demo stack (e.g. to
 inspect the roles first):
