@@ -70,24 +70,49 @@ def _create_or_update_role(conn: psycopg.Connection, role_name: str, password: s
     # Idempotent: CREATE on a fresh volume, ALTER (refreshing the
     # password/attributes) when the role already exists -- safe to rerun
     # against Felix's existing local demo volume with no data loss
-    # (REASSIGN OWNED BY below, not role creation, is what touches
-    # existing objects).
+    # (the per-table/sequence ALTER ... OWNER TO loop in provision()
+    # below, not role creation, is what touches existing objects).
+    # sql.Literal(password), not a %s bind parameter: confirmed live --
+    # Postgres's own CREATE/ALTER ROLE grammar requires PASSWORD's own
+    # value as a literal string constant (Sconst), not a query parameter
+    # ($1) -- psycopg sends a parameterized PASSWORD as a real bind
+    # parameter regardless of placeholder style, which Postgres then
+    # rejects with a syntax error ("syntax error at or near '$1'").
+    # sql.Literal() safely quotes the value INTO the statement text
+    # itself (the correct, injection-safe mechanism for exactly this
+    # case), never string-formatted by hand.
     if _role_exists(conn, role_name):
         conn.execute(
             sql.SQL(
-                "ALTER ROLE {} WITH LOGIN PASSWORD %s NOSUPERUSER NOCREATEROLE NOCREATEDB"
-            ).format(sql.Identifier(role_name)),
-            (password,),
+                "ALTER ROLE {} WITH LOGIN PASSWORD {} NOSUPERUSER NOCREATEROLE NOCREATEDB"
+            ).format(sql.Identifier(role_name), sql.Literal(password))
         )
         logger.info("role %s already exists; password/attributes refreshed", role_name)
     else:
         conn.execute(
             sql.SQL(
-                "CREATE ROLE {} WITH LOGIN PASSWORD %s NOSUPERUSER NOCREATEROLE NOCREATEDB"
-            ).format(sql.Identifier(role_name)),
-            (password,),
+                "CREATE ROLE {} WITH LOGIN PASSWORD {} NOSUPERUSER NOCREATEROLE NOCREATEDB"
+            ).format(sql.Identifier(role_name), sql.Literal(password))
         )
         logger.info("role %s created", role_name)
+
+
+def _existing_tables(conn: psycopg.Connection) -> list[str]:
+    return [
+        row[0]
+        for row in conn.execute(
+            "SELECT tablename FROM pg_tables WHERE schemaname = 'public'"
+        ).fetchall()
+    ]
+
+
+def _existing_sequences(conn: psycopg.Connection) -> list[str]:
+    return [
+        row[0]
+        for row in conn.execute(
+            "SELECT sequencename FROM pg_sequences WHERE schemaname = 'public'"
+        ).fetchall()
+    ]
 
 
 def grant_app_role_privileges(conn: psycopg.Connection, owner_role: str, app_role: str) -> None:
@@ -129,26 +154,14 @@ def grant_app_role_privileges(conn: psycopg.Connection, owner_role: str, app_rol
         ).format(sql.Identifier(owner_role), sql.Identifier(app_role))
     )
 
-    existing_tables = [
-        row[0]
-        for row in conn.execute(
-            "SELECT tablename FROM pg_tables WHERE schemaname = 'public'"
-        ).fetchall()
-    ]
-    for table_name in existing_tables:
+    for table_name in _existing_tables(conn):
         conn.execute(
             sql.SQL("GRANT {} ON {} TO {}").format(
                 table_privileges, sql.Identifier(table_name), sql.Identifier(app_role)
             )
         )
 
-    existing_sequences = [
-        row[0]
-        for row in conn.execute(
-            "SELECT sequencename FROM pg_sequences WHERE schemaname = 'public'"
-        ).fetchall()
-    ]
-    for sequence_name in existing_sequences:
+    for sequence_name in _existing_sequences(conn):
         conn.execute(
             sql.SQL("GRANT USAGE, SELECT ON SEQUENCE {} TO {}").format(
                 sql.Identifier(sequence_name), sql.Identifier(app_role)
@@ -168,6 +181,27 @@ def provision(
     app_role: str,
     app_password: str,
 ) -> None:
+    # A real, found-live hazard, not a speculative one: `_create_or_
+    # update_role()` ALTERs an already-existing role to NOSUPERUSER
+    # NOCREATEROLE NOCREATEDB -- if DATABASE_URL/DATABASE_URL_MIGRATE
+    # ever named the SAME username as BOOTSTRAP (an operator's copy-
+    # paste mistake while editing .env, e.g. forgetting to change
+    # DATABASE_URL's own username away from POSTGRES_USER's), this
+    # would silently strip BOOTSTRAP's own superuser status on this
+    # exact run -- and BOOTSTRAP is the only role this script itself
+    # connects as, so every FUTURE run would then also fail to connect
+    # at all. Fail loudly before touching anything, instead.
+    if owner_role == bootstrap_user or app_role == bootstrap_user:
+        raise RuntimeError(
+            "DATABASE_URL_MIGRATE's or DATABASE_URL's username must not be "
+            "the same as POSTGRES_USER (the bootstrap superuser) -- this "
+            "would strip the bootstrap role's own superuser status."
+        )
+    if owner_role == app_role:
+        raise RuntimeError(
+            "DATABASE_URL_MIGRATE's and DATABASE_URL's usernames must be "
+            "different roles (owner vs. app)."
+        )
     with psycopg.connect(
         host=bootstrap_host,
         port=bootstrap_port,
@@ -179,6 +213,37 @@ def provision(
         _create_or_update_role(conn, owner_role, owner_password)
         _create_or_update_role(conn, app_role, app_password)
 
+        # [SECURITY] L2: OWNER "owns the schema" literally, not just via a
+        # GRANT -- confirmed live: `public` starts out owned by the
+        # pg_database_owner pseudo-role (Postgres 15+'s own default,
+        # inherited through whichever role owns the DATABASE itself,
+        # BOOTSTRAP here), and DROP SCHEMA requires real ownership, not
+        # merely the CREATE privilege the GRANT below provides -- without
+        # this, OWNER could create tables inside public but could never
+        # run `DROP SCHEMA public CASCADE` itself (backend/tests/
+        # test_alembic.py's own _reset_public_schema() does exactly this,
+        # as OWNER, between every live migration test). Idempotent, and
+        # only needs to run once ever: once OWNER owns the schema, any
+        # DROP+CREATE SCHEMA public OWNER later runs as itself keeps
+        # OWNER as the new schema's owner automatically (CREATE SCHEMA's
+        # own default owner is the executing role).
+        conn.execute(
+            sql.SQL("ALTER SCHEMA public OWNER TO {}").format(sql.Identifier(owner_role))
+        )
+        # CREATE SCHEMA/CREATE TABLE both ALSO require CREATE on the
+        # DATABASE itself (confirmed live: PUBLIC has no such privilege
+        # by default on a modern Postgres, the identical "not granted to
+        # PUBLIC by default" change this project already relies on at
+        # the schema level, app/ingest/database_adapter.py's own read-
+        # only-probe design) -- without this, OWNER owning schema public
+        # is not enough on its own to let it `CREATE SCHEMA public` back
+        # after a DROP (test_alembic.py's own _reset_public_schema()).
+        conn.execute(
+            sql.SQL("GRANT CREATE ON DATABASE {} TO {}").format(
+                sql.Identifier(bootstrap_dbname), sql.Identifier(owner_role)
+            )
+        )
+
         # Created here, as BOOTSTRAP (a real superuser, so this always
         # succeeds regardless of whether pgcrypto happens to be a
         # "trusted" extension on this image) -- guarantees it exists
@@ -188,17 +253,39 @@ def provision(
         # rather than depending on OWNER's own extension-create rights.
         conn.execute("CREATE EXTENSION IF NOT EXISTS pgcrypto")
 
-        # No-op on a fresh volume (BOOTSTRAP owns nothing yet but the
-        # extension above); on Felix's existing local demo volume, this
-        # moves ownership of every table the OLD single shared role
-        # created to OWNER, with zero data loss -- REASSIGN OWNED BY only
-        # ever changes catalog ownership columns (e.g. pg_class.relowner),
-        # never touches row data.
-        conn.execute(
-            sql.SQL("REASSIGN OWNED BY {} TO {}").format(
-                sql.Identifier(bootstrap_user), sql.Identifier(owner_role)
+        # No-op on a fresh volume (no tables exist yet); on Felix's
+        # existing local demo volume, this moves ownership of every table
+        # the OLD single shared role created to OWNER, with zero data
+        # loss -- ALTER TABLE/SEQUENCE OWNER TO only ever changes a
+        # catalog ownership column (pg_class.relowner), never touches row
+        # data.
+        #
+        # Deliberately table-by-table (ALTER TABLE/SEQUENCE OWNER TO),
+        # NOT a blanket `REASSIGN OWNED BY bootstrap_user TO owner_role`
+        # -- confirmed live, not assumed: BOOTSTRAP (the Postgres
+        # container's own POSTGRES_USER) also owns template0/template1/
+        # the `postgres` database itself (initdb's own doing, not this
+        # script's), and REASSIGN OWNED BY, run as a superuser, also
+        # attempts to reassign those CLUSTER-SHARED objects -- which
+        # Postgres unconditionally refuses ("cannot reassign ownership of
+        # objects owned by role ... because they are required by the
+        # database system"), aborting the whole provisioning run before
+        # it ever reaches a single real table. BOOTSTRAP keeping those
+        # system objects is correct and desired anyway; only TABLE/
+        # SEQUENCE ownership inside the application's own schema needs
+        # to move.
+        for table_name in _existing_tables(conn):
+            conn.execute(
+                sql.SQL("ALTER TABLE {} OWNER TO {}").format(
+                    sql.Identifier(table_name), sql.Identifier(owner_role)
+                )
             )
-        )
+        for sequence_name in _existing_sequences(conn):
+            conn.execute(
+                sql.SQL("ALTER SEQUENCE {} OWNER TO {}").format(
+                    sql.Identifier(sequence_name), sql.Identifier(owner_role)
+                )
+            )
 
         grant_app_role_privileges(conn, owner_role, app_role)
 
