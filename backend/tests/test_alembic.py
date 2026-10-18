@@ -1175,3 +1175,129 @@ def test_audit_log_update_delete_and_truncate_are_denied_for_the_app_role(
         # silently-swallowed no-op.
         (remaining,) = connection.execute(sa.text("SELECT count(*) FROM audit_log")).one()
     assert remaining == 1
+
+
+# --- [SECURITY] L2 (Phase 7 role split, 2026-10-18): the privilege guard --
+# task-direct instruction: "a guard test that FAILS if any table lacks the
+# expected app-role grants, or if the app role can CREATE, ALTER or DROP
+# anything." Four tests, grouped by whether they need a real migrated
+# schema (ALTER/DROP need a real existing table; CREATE TABLE/CREATE ROLE/
+# reading pg_authid do not, by Postgres's own schema-independent
+# permission model) -- same "_test_engine, _reset_public_schema,
+# _run_alembic" shape every other live test in this file already uses, not
+# a new pattern invented here.
+
+
+def test_app_and_owner_roles_have_no_superuser_or_special_privileges(_test_engine):
+    with _test_engine.connect() as connection:
+        for role in (APP_ROLE, OWNER_ROLE):
+            row = connection.execute(
+                sa.text(
+                    "SELECT rolsuper, rolcreaterole, rolcreatedb "
+                    "FROM pg_roles WHERE rolname = :role"
+                ),
+                {"role": role},
+            ).one()
+            assert row.rolsuper is False, f"{role} must not be a superuser"
+            assert row.rolcreaterole is False, f"{role} must not have CREATEROLE"
+            assert row.rolcreatedb is False, f"{role} must not have CREATEDB"
+
+
+def test_app_role_cannot_create_a_table_or_a_role_or_read_pg_authid(_test_engine):
+    app_engine = sa.create_engine(require_test_database_app(), poolclass=sa.pool.NullPool)
+    try:
+        with app_engine.connect() as connection:
+            with pytest.raises(SQLAlchemyError, match="(?i)permission denied"):
+                connection.execute(sa.text("CREATE TABLE app_role_ddl_probe (id int)"))
+            connection.rollback()
+
+            with pytest.raises(SQLAlchemyError, match="(?i)permission denied"):
+                connection.execute(
+                    sa.text("CREATE ROLE app_role_privilege_escalation_probe LOGIN PASSWORD 'x'")
+                )
+            connection.rollback()
+
+            # pg_authid (unlike the pg_roles view) holds every role's own
+            # password hash -- Postgres restricts it to superusers by
+            # default; a non-superuser APP role reading it would be a
+            # genuine privilege-escalation path.
+            with pytest.raises(SQLAlchemyError, match="(?i)permission denied"):
+                connection.execute(sa.text("SELECT * FROM pg_authid"))
+            connection.rollback()
+    finally:
+        app_engine.dispose()
+
+
+def test_app_role_cannot_alter_or_drop_an_existing_table(_test_engine):
+    engine = _test_engine
+    _reset_public_schema(engine)
+    migrated = _run_alembic("upgrade", "head", engine=engine)
+    assert migrated.returncode == 0, migrated.stdout + migrated.stderr
+
+    app_engine = sa.create_engine(require_test_database_app(), poolclass=sa.pool.NullPool)
+    try:
+        with app_engine.connect() as connection:
+            with pytest.raises(SQLAlchemyError, match="(?i)must be owner"):
+                connection.execute(sa.text("ALTER TABLE tenants ADD COLUMN ddl_probe int"))
+            connection.rollback()
+
+            with pytest.raises(SQLAlchemyError, match="(?i)must be owner"):
+                connection.execute(sa.text("DROP TABLE tenants"))
+            connection.rollback()
+    finally:
+        app_engine.dispose()
+
+    with engine.connect() as connection:
+        # The table is still there, with its original columns -- every
+        # denial above was a genuine rejection, never a silently-
+        # swallowed no-op.
+        columns = {c["name"] for c in sa.inspect(engine).get_columns("tenants")}
+    assert "ddl_probe" not in columns
+
+
+# Every table this app/db_provisioning.py's own ALTER DEFAULT PRIVILEGES
+# grants APP full DML on by default gets SELECT/INSERT/UPDATE/DELETE here
+# too -- audit_log is the one deliberate exception (SELECT/INSERT only,
+# enforced by 26f5747ef216_revoke_audit_log_mutation_from_app_role.py).
+_APP_FULL_DML = frozenset({"SELECT", "INSERT", "UPDATE", "DELETE"})
+_AUDIT_LOG_ONLY_DML = frozenset({"SELECT", "INSERT"})
+_AUDIT_LOG_FORBIDDEN_DML = frozenset({"UPDATE", "DELETE", "TRUNCATE"})
+
+
+def test_every_existing_table_has_the_expected_app_role_grants(_test_engine):
+    engine = _test_engine
+    _reset_public_schema(engine)
+    migrated = _run_alembic("upgrade", "head", engine=engine)
+    assert migrated.returncode == 0, migrated.stdout + migrated.stderr
+
+    with engine.connect() as connection:
+        all_tables = {
+            row[0]
+            for row in connection.execute(
+                sa.text("SELECT tablename FROM pg_tables WHERE schemaname = 'public'")
+            )
+        }
+        assert all_tables, "no tables exist after a real 'alembic upgrade head' -- test is broken"
+
+        grants_by_table: dict[str, set[str]] = {}
+        for table_name, privilege in connection.execute(
+            sa.text(
+                "SELECT table_name, privilege_type FROM information_schema.table_privileges "
+                "WHERE grantee = :app_role"
+            ),
+            {"app_role": APP_ROLE},
+        ):
+            grants_by_table.setdefault(table_name, set()).add(privilege)
+
+    violations = []
+    for table in sorted(all_tables):
+        granted = grants_by_table.get(table, set())
+        if table == "audit_log":
+            if not _AUDIT_LOG_ONLY_DML.issubset(granted):
+                violations.append(f"{table}: missing {_AUDIT_LOG_ONLY_DML - granted}")
+            forbidden_present = granted & _AUDIT_LOG_FORBIDDEN_DML
+            if forbidden_present:
+                violations.append(f"{table}: must NOT have {forbidden_present}")
+        elif not _APP_FULL_DML.issubset(granted):
+            violations.append(f"{table}: missing {_APP_FULL_DML - granted}")
+    assert not violations, "\n".join(violations)
