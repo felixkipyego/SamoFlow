@@ -156,11 +156,22 @@ ecc6628c14b366bfb0187cc7a844c80ba01b94f2:deploy/smoke-image.sh:generic-api-key:3
 
 # deploy/smoke-image.sh (commit dafe4731, "Run deploy/smoke-image.sh's
 # integration checks as the app role..."): APP_ENV_ARGS/STACK_ENV's own
-# JWT_SIGNING_KEY=smoke-test-jwt-signing-key-32-chars-ok literal, already
-# allowlisted above at this file's OLD line numbers -- the L2 role-split
-# edit shifted both occurrences down by a few lines (new DATABASE_URL_
-# MIGRATE env vars inserted above each), landing on new line numbers
-# gitleaks reports as distinct fingerprints. Same throwaway value, same
-# disposable ephemeral container, confirmed by reading the file directly.
+# JWT_SIGNING_KEY fixture value (the same one already allowlisted above
+# at this file's OLD line numbers -- deliberately not re-quoted here,
+# since gitleaks also scans this file's own comment text and flags its
+# own literal). The L2 role-split edit shifted both occurrences down by
+# a few lines (new DATABASE_URL_MIGRATE env vars inserted above each),
+# landing on new line numbers gitleaks reports as distinct fingerprints.
+# Same throwaway value, same disposable ephemeral container, confirmed
+# by reading the file directly.
 dafe4731e967c1807a07cf3a0884900d8cc618f6:deploy/smoke-image.sh:generic-api-key:49
 dafe4731e967c1807a07cf3a0884900d8cc618f6:deploy/smoke-image.sh:generic-api-key:224
+
+# This file's own PRIOR comment (commit 5b3e7df, the entry directly
+# above) re-quoted the literal JWT_SIGNING_KEY fixture value by name --
+# gitleaks scans .gitleaksignore's own content like any other tracked
+# file, so that comment flagged itself. Fixed going forward (the
+# comment above no longer re-quotes it), but the historical commit's
+# own content still needs its own entry here, same as every other
+# historical finding in this file.
+5b3e7df9b5674fb8b207401167b30fb605353ac9:.gitleaksignore:generic-api-key:159
