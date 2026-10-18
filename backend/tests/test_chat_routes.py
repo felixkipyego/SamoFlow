@@ -122,9 +122,9 @@ async def _build_app(
     if retrieve_chunks is not None:
         fake_node = await _fake_retrieve_node_with(retrieve_chunks, best_dense_score)
         monkeypatch.setattr(graph_module, "_retrieve_node", fake_node)
+    await checkpointer.run_checkpointer_setup()
     await checkpointer.open_checkpointer_pool()
     cp = checkpointer.get_checkpointer()
-    await cp.setup()
     graph = build_graph(cp)
     app = create_app()
     app.state.graph = graph

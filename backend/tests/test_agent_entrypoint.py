@@ -417,9 +417,9 @@ async def test_agent_state_retrieved_chunks_round_trips_with_no_serialization_wa
     # regardless of whether the underlying behavior fired; caplog is the
     # real mechanism this needs.
     await reset_checkpoint_env(monkeypatch)
+    await checkpointer.run_checkpointer_setup()
     await checkpointer.open_checkpointer_pool()
     cp = checkpointer.get_checkpointer()
-    await cp.setup()
     graph = _build_agent_state_graph(cp)
 
     config = {"configurable": {"thread_id": str(uuid.uuid4())}}
