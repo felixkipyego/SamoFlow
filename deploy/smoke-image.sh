@@ -41,7 +41,12 @@ fail() {
 
 # Shared by the api and worker checks below; word-splitting each
 # "-e NAME=value" token is safe since none contain whitespace.
-APP_ENV_ARGS="-e APP_ENV=development -e DATABASE_URL=postgresql+psycopg://widgetplatform:change-me@postgres:5432/widgetplatform -e QDRANT_URL=http://qdrant:6333 -e QDRANT_API_KEY=smoke-test-key -e QDRANT_READ_ONLY_API_KEY=smoke-test-readonly-key -e JWT_SIGNING_KEY=smoke-test-jwt-signing-key-32-chars-ok -e DB_CONNECTION_ENCRYPTION_KEY=smoke-test-db-connection-key-32-chars-ok -e OPENAI_API_KEY=smoke-test-openai-key -e API_HOST=0.0.0.0 -e API_PORT=8000"
+# [SECURITY] L2 (Phase 7 role split, 2026-10-18): DATABASE_URL_MIGRATE
+# added -- a required Settings field now; harmless here (neither check
+# (d)'s api mode nor check (e)'s worker mode ever calls
+# database_url_migrate_str(), and neither ever reaches a real postgres
+# at all in this pair of checks).
+APP_ENV_ARGS="-e APP_ENV=development -e DATABASE_URL=postgresql+psycopg://widgetplatform:change-me@postgres:5432/widgetplatform -e DATABASE_URL_MIGRATE=postgresql+psycopg://widgetplatform:change-me@postgres:5432/widgetplatform -e QDRANT_URL=http://qdrant:6333 -e QDRANT_API_KEY=smoke-test-key -e QDRANT_READ_ONLY_API_KEY=smoke-test-readonly-key -e JWT_SIGNING_KEY=smoke-test-jwt-signing-key-32-chars-ok -e DB_CONNECTION_ENCRYPTION_KEY=smoke-test-db-connection-key-32-chars-ok -e OPENAI_API_KEY=smoke-test-openai-key -e API_HOST=0.0.0.0 -e API_PORT=8000"
 
 stop_and_time() {
     # $1 = container id; fails unless docker stop exits 0 within 10s.
@@ -81,7 +86,7 @@ rc=$?
 set -e
 [ "$rc" -eq 2 ] || fail "bogus mode exited $rc, expected 2"
 case "$out" in
-    *"Usage: entrypoint.sh {api|worker|migrate|seed-owner|admin}"*) : ;;
+    *"Usage: entrypoint.sh {api|worker|migrate|provision-roles|seed-owner|admin}"*) : ;;
     *) fail "bogus mode did not print the usage line: $out" ;;
 esac
 echo "PASS: bogus mode exits 2 with the usage line"
@@ -117,18 +122,23 @@ echo "PASS: worker container stops within 10s (exit 0)"
 # (f) migrate mode against an unreachable host fails without leaking the password.
 # invalid.invalid (RFC 2606) never resolves, so this fails fast on DNS, not a
 # TCP-connect timeout; PGCONNECT_TIMEOUT bounds the worst case regardless.
-# Built from APP_ENV_ARGS (same base env as checks d/e) with DATABASE_URL
-# overridden to the unreachable host and PGCONNECT_TIMEOUT added -- repeated
-# -e flags for the same name are last-wins, so the later DATABASE_URL wins.
+# Built from APP_ENV_ARGS (same base env as checks d/e) with DATABASE_URL_
+# MIGRATE overridden to the unreachable host and PGCONNECT_TIMEOUT added --
+# [SECURITY] L2 (Phase 7 role split, 2026-10-18): migrate mode connects via
+# alembic/env.py's own database_url_migrate_str() now (the OWNER role), not
+# database_url_str() -- DATABASE_URL_MIGRATE is the variable that must be
+# overridden for this check to actually exercise the real connection
+# target migrate uses; repeated -e flags for the same name are last-wins,
+# so the later DATABASE_URL_MIGRATE wins.
 set +e
 out=$(docker run --rm $APP_ENV_ARGS -e PGCONNECT_TIMEOUT=5 \
-    -e DATABASE_URL=postgresql+psycopg://widgetplatform:change-me@invalid.invalid:5432/widgetplatform \
+    -e DATABASE_URL_MIGRATE=postgresql+psycopg://widgetplatform_owner:change-me-owner@invalid.invalid:5432/widgetplatform \
     "$image" migrate 2>&1)
 rc=$?
 set -e
 [ "$rc" -ne 0 ] || fail "migrate against an unreachable host exited 0"
 case "$out" in
-    *change-me*) fail "migrate output leaked the database password" ;;
+    *change-me-owner*) fail "migrate output leaked the database password" ;;
 esac
 echo "PASS: migrate against an unreachable host fails without leaking the password"
 
@@ -206,7 +216,25 @@ done
 NETWORK=$(docker inspect "$test_db_cid" --format '{{range $k, $v := .NetworkSettings.Networks}}{{$k}}{{end}}')
 [ -n "$NETWORK" ] || fail "could not determine the compose network test-db is attached to"
 
-STACK_ENV="-e APP_ENV=development -e DATABASE_URL=postgresql+psycopg://widgetplatform:change-me@test-db:5432/widgetplatform_test -e QDRANT_URL=http://test-qdrant:6333 -e QDRANT_API_KEY=test-qdrant-key -e QDRANT_READ_ONLY_API_KEY=test-qdrant-readonly-key -e JWT_SIGNING_KEY=smoke-test-jwt-signing-key-32-chars-ok -e DB_CONNECTION_ENCRYPTION_KEY=smoke-test-db-connection-key-32-chars-ok -e OPENAI_API_KEY=smoke-test-openai-key -e API_HOST=0.0.0.0 -e API_PORT=8000"
+# [SECURITY] L2 (Phase 7 role split, 2026-10-18): STACK_ENV's DATABASE_URL
+# is now the APP role, least privilege -- matching exactly what api/
+# worker connect as in production, so a missing grant fails right here,
+# not only later against the real stack. DATABASE_URL_MIGRATE (the OWNER
+# role) is what migrate mode actually dials for its own DDL.
+STACK_ENV="-e APP_ENV=development -e DATABASE_URL=postgresql+psycopg://widgetplatform_app:change-me-app@test-db:5432/widgetplatform_test -e DATABASE_URL_MIGRATE=postgresql+psycopg://widgetplatform_owner:change-me-owner@test-db:5432/widgetplatform_test -e QDRANT_URL=http://test-qdrant:6333 -e QDRANT_API_KEY=test-qdrant-key -e QDRANT_READ_ONLY_API_KEY=test-qdrant-readonly-key -e JWT_SIGNING_KEY=smoke-test-jwt-signing-key-32-chars-ok -e DB_CONNECTION_ENCRYPTION_KEY=smoke-test-db-connection-key-32-chars-ok -e OPENAI_API_KEY=smoke-test-openai-key -e API_HOST=0.0.0.0 -e API_PORT=8000"
+
+# [SECURITY] L2 (Phase 7 role split, 2026-10-18): the owner/app roles
+# must exist on test-db before migrate (below) ever connects as either
+# one -- a SEPARATE env (BOOTSTRAP credentials, never part of STACK_ENV
+# above) matching deploy/docker-compose.yml's own provision-roles-test
+# service.
+PROVISION_ENV="-e PGHOST=test-db -e PGPORT=5432 -e POSTGRES_USER=widgetplatform -e POSTGRES_PASSWORD=change-me -e POSTGRES_DB=widgetplatform_test -e DATABASE_URL=postgresql+psycopg://widgetplatform_app:change-me-app@test-db:5432/widgetplatform_test -e DATABASE_URL_MIGRATE=postgresql+psycopg://widgetplatform_owner:change-me-owner@test-db:5432/widgetplatform_test"
+set +e
+out=$(docker run --rm --network "$NETWORK" $PROVISION_ENV "$image" provision-roles 2>&1)
+rc=$?
+set -e
+[ "$rc" -eq 0 ] || fail "provision-roles failed against the disposable test-db stack: $out"
+echo "PASS: provision-roles succeeds against the disposable test-db stack"
 
 set +e
 out=$(docker run --rm --network "$NETWORK" $STACK_ENV "$image" migrate 2>&1)
@@ -288,6 +316,7 @@ set +e
 placeholder_out=$(docker run --rm \
     -e APP_ENV=production \
     -e DATABASE_URL=postgresql+psycopg://widgetplatform:change-me@postgres:5432/widgetplatform \
+    -e DATABASE_URL_MIGRATE=postgresql+psycopg://widgetplatform:change-me@postgres:5432/widgetplatform \
     -e QDRANT_URL=http://qdrant:6333 \
     -e QDRANT_API_KEY=change-me \
     -e QDRANT_READ_ONLY_API_KEY=change-me \
@@ -321,7 +350,8 @@ echo "PASS: api mode with .env.example's placeholder values under APP_ENV=produc
 set +e
 realistic_out=$(docker run --rm --entrypoint python3 \
     -e APP_ENV=production \
-    -e DATABASE_URL=postgresql+psycopg://widgetplatform:rK9mLpQ2vXzNcHdWaT@postgres:5432/widgetplatform \
+    -e DATABASE_URL=postgresql+psycopg://widgetplatform_app:rK9mLpQ2vXzNcHdWaT@postgres:5432/widgetplatform \
+    -e DATABASE_URL_MIGRATE=postgresql+psycopg://widgetplatform_owner:aD5fRtGyHuJiKoLpM@postgres:5432/widgetplatform \
     -e QDRANT_URL=http://qdrant:6333 \
     -e QDRANT_API_KEY=rK9mLpQ2vXzNcHdWaTfYbGjUeSoIhAkR \
     -e QDRANT_READ_ONLY_API_KEY=bN4oPqR7sTuVwXyZaB1cD2eF3gH4iJ5k \
