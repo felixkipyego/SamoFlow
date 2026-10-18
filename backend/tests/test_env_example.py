@@ -19,6 +19,17 @@ EXTRA_EXAMPLE_KEYS: tuple[str, ...] = (
     "POSTGRES_USER",
     "POSTGRES_PASSWORD",
     "POSTGRES_DB",
+    # [SECURITY] L2 follow-up (advisor review, 2026-10-18): Settings.
+    # database_url_migrate is now Optional (SecretStr | None, no
+    # unconditional default REQUIRED everywhere) -- api/worker's own
+    # Settings() construction must succeed without it (deploy/docker-
+    # compose.yml's x-app-env no longer carries it at all), so
+    # REQUIRED_VARS (derived from field.is_required()) no longer
+    # includes it. .env.example still declares a REAL value here (never
+    # left empty): migrate/provision-roles genuinely need one, and
+    # ops/deploy/check_env_secrets.py's own SECRET_CLASS_SETTINGS entry
+    # (app/secrets_policy.py) still enforces that on the real server.
+    "DATABASE_URL_MIGRATE",
     "JWT_SIGNING_KEY_PREVIOUS",
     "ANTHROPIC_API_KEY",
     # Step 4.5: PHOENIX_COLLECTOR_ENDPOINT is the identical shape --

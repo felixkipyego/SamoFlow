@@ -47,8 +47,16 @@ class SecretClassSetting:
     # like OPENAI_API_KEY has no artificial length floor to check against --
     # see app/config.py's own field-level comments for why).
     min_length: int | None
-    # True if unset (None) is a legitimate "not configured" state (e.g.
-    # ANTHROPIC_API_KEY, SMTP_PASSWORD) rather than a startup failure.
+    # True if the REAL VALUE this env var must hold in a genuine
+    # deployment's own .env is allowed to be absent -- this is what
+    # check_env_secrets.py's own "missing" check (and preflight.sh,
+    # through it) enforces against the operator's .env FILE. Deliberately
+    # a SEPARATE question from whether the matching Settings field has a
+    # Python-level default (e.g. database_url_migrate below is Optional
+    # on Settings -- api/worker's own process must start without it --
+    # but .env itself must always carry a real value, since migrate/
+    # provision-roles genuinely need one; optional=False here is correct
+    # for exactly that reason, not stale).
     optional: bool
     # True if this setting's real value is a connection-string DSN with an
     # embedded password, not a bare secret token -- only DATABASE_URL today.
@@ -66,7 +74,12 @@ SECRET_CLASS_SETTINGS: tuple[SecretClassSetting, ...] = (
     # [SECURITY] L2 (Phase 7 role split, 2026-10-18): the OWNER/MIGRATOR
     # role's own DSN (app/config.py's database_url_migrate) -- covers that
     # role's own password the identical way DATABASE_URL above already
-    # covers the APP role's.
+    # covers the APP role's. optional=False here (advisor review,
+    # 2026-10-18): the .env FILE must always carry a real value (migrate/
+    # provision-roles need one), even though the Settings FIELD itself is
+    # Optional so api/worker's own Settings() construction succeeds
+    # without it -- see this dataclass's own `optional` field comment for
+    # why those are different questions.
     SecretClassSetting(
         "database_url_migrate", "DATABASE_URL_MIGRATE", None, optional=False, is_dsn=True
     ),

@@ -79,12 +79,30 @@ class Settings(BaseSettings):
     # reaches for the bare accessor gets the least-privileged role, never
     # the more powerful one.
     database_url: SecretStr
+    # [SECURITY] L2 follow-up (advisor review, 2026-10-18): OPTIONAL
+    # (SecretStr | None), not required -- a REAL finding, not a style
+    # choice: this field holds the OWNER role's own password, and every
+    # Settings field is REQUIRED for every process that calls
+    # get_settings() (api and worker included) unless it has a default.
+    # Making it required would force api/worker to receive this
+    # credential just to start, which is exactly the "a compromised api/
+    # worker process can read the OWNER credentials from its own
+    # environment" defect this field's own optionality now prevents --
+    # deploy/docker-compose.yml's own x-app-env (api+worker) no longer
+    # carries DATABASE_URL_MIGRATE at all (only the migrate service's own
+    # environment does), so api/worker's own Settings() construction must
+    # succeed with this field absent. database_url_migrate_str() below is
+    # the enforcement point instead: it raises SettingsError (never
+    # silently falls back to the APP role or any other value) if called
+    # when this is unset -- a real bug (wrong process calling it) fails
+    # loudly, not quietly.
+    #
     # The OWNER/MIGRATOR role's own DSN -- owns the schema and every table,
     # runs Alembic (alembic/env.py) and the checkpointer's one-time
     # setup() (app/agent/checkpointer.py's run_checkpointer_setup()). Not a
-    # superuser, no CREATEROLE -- see ops/deploy/provision_db_roles.py.
-    # Never used by api/worker at runtime.
-    database_url_migrate: SecretStr
+    # superuser, no CREATEROLE -- see app/db_provisioning.py. Never used by
+    # api/worker at runtime -- enforced now, not just documented.
+    database_url_migrate: SecretStr | None = Field(default=None)
     qdrant_url: str
     qdrant_api_key: SecretStr
     # Task 3.1.b: a SEPARATE, server-enforced read-only credential for
@@ -927,8 +945,15 @@ class Settings(BaseSettings):
     @field_validator("database_url", "database_url_migrate")
     @classmethod
     def _require_postgres_psycopg_scheme(
-        cls, value: SecretStr, info: ValidationInfo
-    ) -> SecretStr:
+        cls, value: SecretStr | None, info: ValidationInfo
+    ) -> SecretStr | None:
+        # database_url_migrate is the only Optional one of the two
+        # (database_url has no default, so pydantic never calls this with
+        # None for that field) -- unset is a legitimate state for a
+        # process that must never receive the OWNER role at all (api/
+        # worker), so there is nothing to validate.
+        if value is None:
+            return None
         parts = urlsplit(value.get_secret_value())
         database_name = parts.path.lstrip("/")
         if parts.scheme != POSTGRES_SCHEME or not parts.hostname or not database_name:
@@ -1163,6 +1188,18 @@ class Settings(BaseSettings):
 
     def database_url_migrate_str(self) -> str:
         # The one explicit call that unwraps the secret. Never log this.
+        # [SECURITY] L2 follow-up (advisor review, 2026-10-18): raises
+        # loudly, never silently falls back to database_url (the APP
+        # role) or anything else -- api/worker never have this field set
+        # at all (see its own field comment), so a call reaching here
+        # from either process is a real bug, not a configuration gap to
+        # paper over.
+        if self.database_url_migrate is None:
+            raise SettingsError(
+                "DATABASE_URL_MIGRATE is not set. database_url_migrate_str() "
+                "must only be called from migrate/provision-roles -- api and "
+                "worker never receive this credential."
+            )
         return self.database_url_migrate.get_secret_value()
 
     def qdrant_api_key_str(self) -> str:

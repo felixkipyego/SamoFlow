@@ -63,10 +63,14 @@ BACKEND_DIR = Path(__file__).resolve().parent.parent
 # role) is now one of these -- alembic/env.py reads DATABASE_URL_MIGRATE
 # instead (see _alembic_subprocess_env() below), so DATABASE_URL itself is
 # just a harmless placeholder Settings still requires present.
+# [SECURITY] L2 follow-up (advisor review, 2026-10-18): DATABASE_URL_
+# MIGRATE deliberately NOT included here -- it is Optional on Settings
+# now, and _alembic_subprocess_env() below always sets the REAL value
+# explicitly on top of this dict regardless, so a harmless placeholder
+# here would never do anything but mask a real bug.
 _HARMLESS_ENV = {
     "APP_ENV": "test",
     "DATABASE_URL": "postgresql+psycopg://harmless:harmless@203.0.113.1:5432/harmless",
-    "DATABASE_URL_MIGRATE": "postgresql+psycopg://harmless:harmless@203.0.113.1:5432/harmless",
     "QDRANT_URL": "http://203.0.113.1:6333",
     "QDRANT_API_KEY": "harmless-test-key",  # noqa: S105 (test fixture value, not a real secret)
     "QDRANT_READ_ONLY_API_KEY": "harmless-readonly-test-key",  # noqa: S105 (test fixture value, not a real secret)

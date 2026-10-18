@@ -38,10 +38,11 @@ _SCHEMA_PATH = _BACKEND_DIR.parent / "docs" / "openapi.json"
 _MINIMAL_ENV = {
     "APP_ENV": "development",
     "DATABASE_URL": "postgresql+psycopg://user:pw@localhost:5432/widgetplatform",
-    # [SECURITY] L2 (Phase 7 role split, 2026-10-18): a required Settings
-    # field now, same "placeholder only, never a real connection" treatment
-    # as DATABASE_URL above.
-    "DATABASE_URL_MIGRATE": "postgresql+psycopg://owner:pw@localhost:5432/widgetplatform",
+    # [SECURITY] L2 follow-up (advisor review, 2026-10-18): deliberately
+    # NOT included -- database_url_migrate is Optional on Settings
+    # (app/config.py), and this script's own create_app() never calls
+    # database_url_migrate_str(), so schema generation must succeed with
+    # this absent entirely.
     "QDRANT_URL": "http://localhost:6333",
     "QDRANT_API_KEY": "placeholder-qdrant-key",
     "QDRANT_READ_ONLY_API_KEY": "placeholder-qdrant-readonly-key",

@@ -23,12 +23,6 @@ x-app-env: &app-env
   # agent/checkpointer.py's live pool); migrate never calls database_url_
   # str() itself, but Settings requires the field present regardless.
   DATABASE_URL: ${DATABASE_URL:?DATABASE_URL must be set in .env}
-  # The OWNER/MIGRATOR role -- owns the schema and every table. Only
-  # migrate actually dials this (alembic/env.py, the checkpointer's
-  # setup()); present here anyway because this one anchor is shared
-  # across all three services and an unused Settings value is harmless
-  # (the same treatment PHOENIX_COLLECTOR_ENDPOINT below already gets).
-  DATABASE_URL_MIGRATE: ${DATABASE_URL_MIGRATE:?DATABASE_URL_MIGRATE must be set in .env}
   QDRANT_URL: ${QDRANT_URL:?QDRANT_URL must be set in .env}
   QDRANT_API_KEY: ${QDRANT_API_KEY:?QDRANT_API_KEY must be set in .env}
   # Required (Task 3.1.b): retrieve()'s own least-privilege, server-
@@ -88,6 +82,21 @@ x-app-env: &app-env
   # of .env entirely still gets the real default here, not an empty
   # string that would disable the trust boundary outright).
   TRUSTED_PROXY_HOSTNAME: ${TRUSTED_PROXY_HOSTNAME:-caddy}
+
+# [SECURITY] L2 follow-up (advisor review, 2026-10-18): a REAL finding,
+# fixed -- DATABASE_URL_MIGRATE (the OWNER role's own password) used to
+# live in x-app-env above, which api and worker ALSO merge in; a
+# compromised api or worker process could then read the OWNER
+# credentials straight out of its own environment and reconnect as the
+# schema owner (DDL, owner rights on audit_log, the REVOKE bypassed),
+# defeating the role split. migrate is the ONLY service that extends
+# this -- api/worker's own `environment: *app-env` below never sees this
+# key at all. Settings.database_url_migrate is Optional for exactly this
+# reason (app/config.py's own field comment): api/worker's Settings()
+# construction must succeed without it.
+x-migrate-env: &migrate-env
+  <<: *app-env
+  DATABASE_URL_MIGRATE: ${DATABASE_URL_MIGRATE:?DATABASE_URL_MIGRATE must be set in .env}
 
 # Hardening applied to api, worker and migrate only (our own code running
 # the widgetplatform-backend image): read-only root filesystem with a tmpfs
@@ -339,7 +348,7 @@ services:
   migrate:
     <<: [*app-build, *app-hardening]
     command: ["migrate"]
-    environment: *app-env
+    environment: *migrate-env
     # Not part of `up`: this is a deploy step, run explicitly with
     #   docker compose --env-file .env -f deploy/docker-compose.yml run --rm migrate
     profiles: ["tools"]

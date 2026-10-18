@@ -287,11 +287,16 @@ def minimal_subprocess_env() -> dict[str, str]:
 VALID_ENV = {
     "APP_ENV": "development",
     "DATABASE_URL": "postgresql+psycopg://user:pw@localhost:5432/widgetplatform",
-    # [SECURITY] L2 (Phase 7 role split, 2026-10-18): the OWNER/MIGRATOR
-    # role's own DSN -- a required Settings field now, same "chosen only
-    # to be valid" treatment as DATABASE_URL above, a different username
-    # so a test that accidentally mixes the two up is easy to spot.
-    "DATABASE_URL_MIGRATE": "postgresql+psycopg://owner:pw@localhost:5432/widgetplatform",
+    # [SECURITY] L2 follow-up (advisor review, 2026-10-18): deliberately
+    # NOT included -- database_url_migrate is Optional on Settings
+    # (app/config.py), and api/worker-style code (what the vast majority
+    # of tests using this base dict exercise) must construct Settings
+    # and run correctly WITHOUT it. Leaving it out here is itself a live
+    # proof of that: any test that silently needed it would fail loudly
+    # the moment it ran. reset_checkpoint_env()/reset_test_database()
+    # below add a REAL owner-role value as an explicit override wherever
+    # a test genuinely drives migrate-level code (run_checkpointer_
+    # setup(), real alembic subprocess runs).
     "QDRANT_URL": "http://localhost:6333",
     "QDRANT_API_KEY": "test-qdrant-key",  # noqa: S105 (test fixture value, not a real secret)
     "QDRANT_READ_ONLY_API_KEY": "test-qdrant-readonly-key",  # noqa: S105 (test fixture value, not a real secret)
