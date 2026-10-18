@@ -56,10 +56,21 @@ if [ ! -f .env ]; then
   exit 1
 fi
 
-echo "==> [1/9] Starting postgres, qdrant, api, worker (project: ${PROJECT_NAME})"
+# [SECURITY] L2 (Phase 7 role split, 2026-10-18): one-time, idempotent --
+# creates/updates the owner+app Postgres roles and (on an EXISTING demo
+# volume, the common case here) reassigns ownership of every table the
+# old single shared role created, with zero data loss. Must run before
+# api/worker ever start: `run` brings up `postgres` itself first (its own
+# `depends_on: postgres: condition: service_healthy`), and api's own
+# /ready check below would otherwise spend its whole 60s budget failing
+# to authenticate as a role that doesn't exist yet.
+echo "==> [1/10] Provisioning Postgres roles (owner, app)"
+"${COMPOSE[@]}" run --rm provision-roles
+
+echo "==> [2/10] Starting postgres, qdrant, api, worker (project: ${PROJECT_NAME})"
 "${COMPOSE[@]}" up -d --build postgres qdrant api worker
 
-echo "==> [2/9] Waiting for the API to report ready on ${API_BASE}"
+echo "==> [3/10] Waiting for the API to report ready on ${API_BASE}"
 ready=""
 for _ in $(seq 1 60); do
   if curl -fsS "${API_BASE}/ready" >/dev/null 2>&1; then
@@ -73,13 +84,13 @@ if [ -z "$ready" ]; then
   exit 1
 fi
 
-echo "==> [3/9] Running migrations"
+echo "==> [4/10] Running migrations"
 "${COMPOSE[@]}" run --rm migrate
 
-echo "==> [4/9] Seeding the two pilot plans (Starter, Growth)"
+echo "==> [5/10] Seeding the two pilot plans (Starter, Growth)"
 "${COMPOSE[@]}" run --rm -T migrate admin seed-plans
 
-echo "==> [5/9] Seeding the demo tenant + owner account (${OWNER_EMAIL})"
+echo "==> [6/10] Seeding the demo tenant + owner account (${OWNER_EMAIL})"
 NEW_PASSWORD="$(python3 -c 'import secrets; print(secrets.token_urlsafe(18))')"
 set +e
 SEED_OUTPUT=$(printf '%s\n%s\n' "$NEW_PASSWORD" "$NEW_PASSWORD" | \
@@ -102,7 +113,7 @@ else
   exit 1
 fi
 
-echo "==> [6/9] Assigning the ${PLAN_NAME} plan and ensuring a site key for ${WIDGET_ORIGIN}"
+echo "==> [7/10] Assigning the ${PLAN_NAME} plan and ensuring a site key for ${WIDGET_ORIGIN}"
 # No CLI subcommand does this idempotently (admin_cli's own assign-plan/
 # issue-site-key always write/insert unconditionally, which would mint a
 # fresh duplicate site key on every rerun) -- same repository primitives
@@ -159,7 +170,7 @@ if [ -z "$SITE_KEY" ]; then
   exit 1
 fi
 
-echo "==> [7/9] Logging in and setting support details + uploading the golden-set pages"
+echo "==> [8/10] Logging in and setting support details + uploading the golden-set pages"
 COOKIE_JAR="$(mktemp)"
 trap 'rm -f "$COOKIE_JAR"' EXIT
 
@@ -214,7 +225,7 @@ for page in "$REPO_ROOT"/evals/golden_set/pages/*.md; do
 done
 echo "    uploaded ${page_count} golden-set pages into upload source ${SOURCE_ID}"
 
-echo "==> [8/9] Waiting for the worker to finish indexing"
+echo "==> [9/10] Waiting for the worker to finish indexing"
 indexed=""
 for _ in $(seq 1 30); do
   status=$(curl -fsS -b "$COOKIE_JAR" "${API_BASE}/api/v1/dashboard/sources" | \
@@ -235,7 +246,7 @@ if [ -z "$indexed" ]; then
   echo "    check: ${COMPOSE[*]} logs worker" >&2
 fi
 
-echo "==> [9/9] Starting the dashboard dev server and the widget test page"
+echo "==> [10/10] Starting the dashboard dev server and the widget test page"
 
 if [ ! -d dashboard/node_modules ]; then
   echo "    installing dashboard/ npm dependencies (first run only)"

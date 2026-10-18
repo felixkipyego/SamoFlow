@@ -158,7 +158,9 @@ exactly why `secrets_policy.py` checks both, separately.
 
 | Variable | Must never be a placeholder in production? | Notes |
 |---|---|---|
-| `DATABASE_URL`, `POSTGRES_PASSWORD` | Yes | Generate a real random password. |
+| `POSTGRES_PASSWORD` | Yes | The BOOTSTRAP (superuser) password -- used only by `provision-roles` (§5 below), never by api/worker/migrate at runtime. |
+| `DATABASE_URL_MIGRATE`, `POSTGRES_OWNER_USER`, `POSTGRES_OWNER_PASSWORD` | Yes | The OWNER/MIGRATOR role -- owns the schema and every table, runs Alembic and the checkpointer's setup(). `POSTGRES_OWNER_PASSWORD` must match the password embedded in `DATABASE_URL_MIGRATE`. |
+| `DATABASE_URL` | Yes | [SECURITY] L2 (Phase 7 role split, 2026-10-18): now the APP role (api+worker) -- least privilege, no DDL, no CREATE on the schema; INSERT/SELECT only on `audit_log`. Generate a real random password. |
 | `QDRANT_API_KEY`, `QDRANT_READ_ONLY_API_KEY` | Yes | Two DIFFERENT real random values -- confirmed live (Task 3.1.b) that Qdrant itself rejects a write through the read-only key with a real 403, so these must genuinely differ. |
 | `JWT_SIGNING_KEY` | Yes | `openssl rand -base64 32`. |
 | `DB_CONNECTION_ENCRYPTION_KEY` | Yes | `openssl rand -base64 32`. Loses access to every `db_connections` row if ever changed without a re-encrypt -- see §6 below, this is exactly what the restore drill proves survives a restore. |
@@ -214,11 +216,27 @@ cd /opt && git clone <this repo> samoflow && cd samoflow
 chmod 600 .env
 ./ops/deploy/preflight.sh
 
-# Pull/build the backend image, run migrations (alembic upgrade head,
-# then ensure_collection() and the checkpointer setup -- entrypoint.sh's
-# own "migrate" mode, Task 1.1.h/2.1.g/3.2.b):
+# Pull/build the backend image:
 docker compose --env-file .env -f deploy/docker-compose.yml -f deploy/docker-compose.prod.yml \
   build
+
+# [SECURITY] L2 (Phase 7 role split, 2026-10-18): ONE-TIME, idempotent --
+# creates/updates the owner+app Postgres roles (app/db_provisioning.py),
+# safe to rerun on this exact command on EVERY later deploy too (a no-op
+# once the roles already exist and match .env). Connects as BOOTSTRAP
+# (POSTGRES_USER/PASSWORD, the real superuser) -- never api/worker/
+# migrate's own runtime credentials. Run this BEFORE migrate, every time
+# roles might not exist yet (a genuinely fresh server) or might still be
+# the pre-split single shared role (an existing volume upgrading to this
+# split for the first time -- REASSIGN OWNED BY moves ownership of every
+# table the old role created, with zero data loss).
+docker compose --env-file .env -f deploy/docker-compose.yml -f deploy/docker-compose.prod.yml \
+  run --rm provision-roles
+
+# Run migrations (alembic upgrade head, then ensure_collection() and the
+# checkpointer setup -- entrypoint.sh's own "migrate" mode, Task
+# 1.1.h/2.1.g/3.2.b -- now connecting as the OWNER role, not a shared
+# superuser):
 docker compose --env-file .env -f deploy/docker-compose.yml -f deploy/docker-compose.prod.yml \
   run --rm migrate
 
@@ -385,8 +403,15 @@ Nightly, via cron as the `deploy` user (`crontab -e`):
 
 This runs `ops/backup/backup.sh` inside `ops/backup/Dockerfile`'s own
 image, on the same Compose network as the real `postgres`/`qdrant` --
-reached by service name, zero published ports needed anywhere. Each
-night: a `pg_dump`, a Qdrant snapshot of `knowledge_chunks`, both
+reached by service name, zero published ports needed anywhere.
+**[SECURITY] L2 (Phase 7 role split, 2026-10-18): `pg_dump` connects as
+the OWNER role** (`POSTGRES_OWNER_USER`/`POSTGRES_OWNER_PASSWORD`,
+`ops/backup/docker-compose.yml`'s own `backup` service), never BOOTSTRAP
+and never APP -- OWNER already has unrestricted read access to every
+table it owns, and `pg_dump --no-owner --no-privileges` strips every
+embedded role name from the dump anyway, so the restore side below is
+unaffected by this choice. Each night: a `pg_dump`, a Qdrant snapshot of
+`knowledge_chunks`, both
 age-encrypted (to `BACKUP_AGE_PUBLIC_KEY` only -- the encrypting side
 never sees the private key) and uploaded to `S3_BACKUP_BUCKET`, with
 objects older than `S3_BACKUP_RETENTION_DAYS` deleted afterward.
@@ -405,7 +430,14 @@ DB_CONNECTION_ENCRYPTION_KEY="$(grep DB_CONNECTION_ENCRYPTION_KEY /path/to/.env 
 ```
 
 It downloads the most recent backup set, restores it into a disposable
-scratch Postgres/Qdrant pair (never the real ones), and PROVES -- not
+scratch Postgres/Qdrant pair (never the real ones) -- the restore itself
+runs as that scratch Postgres's own bootstrap role (`drill`,
+`ops/backup/docker-compose.yml`'s `postgres-scratch` service), a
+completely separate, disposable role from the real stack's own BOOTSTRAP/
+OWNER/APP three; `pg_dump --no-owner --no-privileges` means the dump
+carries no embedded role names at all, so which role performs the
+restore has no bearing on the restored data's own correctness -- and
+PROVES -- not
 merely checks the files exist -- that every restored `db_connections`
 row decrypts with the separately-supplied key (or, when the table has
 no rows yet, which is the real pilot-launch state since
@@ -516,6 +548,28 @@ this project are additive-only and were never written with a real
 downgrade path in mind). If in doubt, restore from the most recent
 nightly backup (§6) into a fresh stack instead of downgrading in place.
 
+**Rolling back the Postgres role split itself** ([SECURITY] L2, Phase 7,
+2026-10-18): `provision-roles` never drops or renames the old BOOTSTRAP
+role, and `REASSIGN OWNED BY` is the only ownership change it makes to
+existing objects -- a superuser bypasses ownership checks regardless of
+which role nominally owns a table, so BOOTSTRAP can still read/write/
+alter everything even after `REASSIGN OWNED BY` has moved nominal
+ownership to OWNER. To roll back past this split's own commit:
+1. `git checkout <previous-good-commit>` and redeploy, as above.
+2. **Also hand-edit the real `.env` on the server** (it is not tracked
+   by git, so step 1 alone does not touch it): point `DATABASE_URL` back
+   at BOOTSTRAP's own credentials (`POSTGRES_USER`/`POSTGRES_PASSWORD`),
+   matching that older commit's own single-role `.env.example` shape,
+   and remove `DATABASE_URL_MIGRATE` (the rolled-back code never reads
+   it). Skipping this step leaves the OLD code running with the NEW
+   `.env`'s APP-role `DATABASE_URL` -- DML keeps working (APP already
+   has it), but that old code's own "migrate" step would fail outright
+   the moment it next needs real DDL (APP has none).
+The OWNER/APP roles themselves are left in place, unused, not deleted --
+deleting them is a separate, manual `DROP ROLE`, never automatic, and
+only safe once you are certain no roll-forward is coming. No data loss
+either direction.
+
 ## 11. Local demo
 
 `ops/demo/start.sh` brings up a full local stack -- postgres/qdrant/api/
@@ -533,6 +587,20 @@ the owner's password, which is ALWAYS freshly rotated and printed once
 # ... prints the dashboard URL, login email, a fresh password, and the
 # widget test page URL at the end ...
 ./ops/demo/stop.sh   # stops containers + the two dev servers; data volume kept
+```
+
+**[SECURITY] L2 (Phase 7 role split, 2026-10-18), existing demo volume:**
+`start.sh` now provisions the owner+app Postgres roles as its own first
+step (idempotent, zero data loss -- `REASSIGN OWNED BY` moves ownership
+of whatever this demo's existing volume already has from the old single
+shared role), so the next `./ops/demo/start.sh` run upgrades an existing
+local demo volume automatically -- no separate manual step is needed.
+To provision ONLY, without starting the rest of the demo stack (e.g. to
+inspect the roles first):
+```
+docker compose --env-file .env -f deploy/docker-compose.yml \
+  -f ops/demo/docker-compose.override.yml -p samoflow-demo \
+  run --rm provision-roles
 ```
 
 Needs `.env` at the repo root with a real `OPENAI_API_KEY` (chat answers
