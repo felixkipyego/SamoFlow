@@ -153,3 +153,14 @@ ecc6628c14b366bfb0187cc7a844c80ba01b94f2:deploy/smoke-image.sh:generic-api-key:3
 1ca1251a835fc9c58a4b45d438109276ed7640df:backend/tests/test_host_binding.py:generic-api-key:164
 1ca1251a835fc9c58a4b45d438109276ed7640df:backend/tests/test_host_binding.py:generic-api-key:165
 1ca1251a835fc9c58a4b45d438109276ed7640df:backend/tests/test_host_binding.py:generic-api-key:166
+
+# deploy/smoke-image.sh (commit dafe4731, "Run deploy/smoke-image.sh's
+# integration checks as the app role..."): APP_ENV_ARGS/STACK_ENV's own
+# JWT_SIGNING_KEY=smoke-test-jwt-signing-key-32-chars-ok literal, already
+# allowlisted above at this file's OLD line numbers -- the L2 role-split
+# edit shifted both occurrences down by a few lines (new DATABASE_URL_
+# MIGRATE env vars inserted above each), landing on new line numbers
+# gitleaks reports as distinct fingerprints. Same throwaway value, same
+# disposable ephemeral container, confirmed by reading the file directly.
+dafe4731e967c1807a07cf3a0884900d8cc618f6:deploy/smoke-image.sh:generic-api-key:49
+dafe4731e967c1807a07cf3a0884900d8cc618f6:deploy/smoke-image.sh:generic-api-key:224
