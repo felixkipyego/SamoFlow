@@ -51,14 +51,15 @@ ACTIONLINT_IMAGE = rhysd/actionlint:1.7.12@sha256:b1934ee5f1c509618f2508e6eb47ee
 
 .DEFAULT_GOAL := help
 
-.PHONY: help env up down down-volumes migrate test test-db test-db-down test-qdrant test-qdrant-down test-all lint evals eval eval-answers eval-calibrate install lock lock-upgrade lock-check audit hooks openapi dashboard-install dashboard-lint dashboard-test dashboard-build dashboard-audit dashboard-e2e
+.PHONY: help env up down down-volumes provision-roles migrate test test-db test-db-down test-qdrant test-qdrant-down test-all lint evals eval eval-answers eval-calibrate install lock lock-upgrade lock-check audit hooks openapi dashboard-install dashboard-lint dashboard-test dashboard-build dashboard-audit dashboard-e2e
 
 help:
 	@echo "make env          create .env from .env.example if it does not exist yet"
 	@echo "make up           build and start postgres, qdrant, api, worker"
 	@echo "make down         stop and remove containers (volumes are kept)"
 	@echo "make down-volumes stop and remove containers AND volumes (destroys data)"
-	@echo "make migrate      run alembic upgrade head in Docker"
+	@echo "make provision-roles  one-time, idempotent: create/update the owner+app Postgres roles"
+	@echo "make migrate      run alembic upgrade head in Docker (run provision-roles first)"
 	@echo "make test         run the backend test suite (no database required)"
 	@echo "make test-db      start the disposable test database and wait until ready"
 	@echo "make test-db-down stop and remove the test database"
@@ -102,6 +103,14 @@ down-volumes:
 	@echo "WARNING: this stops the stack AND deletes the postgres/qdrant data volumes."
 	$(COMPOSE) down -v
 
+# [SECURITY] L2 (Phase 7 role split, 2026-10-18): one-time, idempotent --
+# safe to rerun against a fresh volume (the real server, on first setup)
+# or an existing one (Felix's local demo/dev data, with zero data loss).
+# Must run at least once before `make migrate` ever connects as the owner
+# role; see docs/deploy/RUNBOOK.md for the rollback path.
+provision-roles: env
+	$(COMPOSE) run --rm provision-roles
+
 # Runs in Docker (not "cd backend && alembic upgrade head"), so this does
 # not depend on the caller's working directory or local Python environment.
 migrate: env
@@ -122,6 +131,11 @@ test-db: env
 	  fi; \
 	  sleep 1; \
 	done
+	# [SECURITY] L2 (Phase 7 role split, 2026-10-18): test-db is tmpfs-
+	# backed (fresh on every `up`), so the owner/app roles never survive a
+	# restart -- this must run every time, not just once like the real
+	# postgres service's own provision-roles.
+	$(COMPOSE) --profile test run --rm provision-roles-test
 
 test-db-down:
 	$(COMPOSE) --profile test stop test-db
@@ -153,8 +167,13 @@ test-qdrant-down:
 # follow) instead of relying on make's own error handling for cleanup.
 # TEST_QDRANT_API_KEY/TEST_QDRANT_READ_ONLY_API_KEY match the literal keys
 # test-qdrant sets above.
+# [SECURITY] L2 (Phase 7 role split, 2026-10-18): TEST_DATABASE_URL_APP
+# (the APP role) is new -- reset_test_database()/reset_checkpoint_env()
+# (backend/tests/conftest.py) point application code under test at this
+# one, not TEST_DATABASE_URL, so a missing grant fails here, locally,
+# instead of only in production.
 test-all: test-db test-qdrant
-	@(cd backend && TEST_DATABASE_URL=postgresql+psycopg://widgetplatform:change-me@127.0.0.1:55432/widgetplatform_test TEST_QDRANT_URL=http://127.0.0.1:56333 TEST_QDRANT_API_KEY=test-qdrant-key TEST_QDRANT_READ_ONLY_API_KEY=test-qdrant-readonly-key python -m pytest tests -q); \
+	@(cd backend && TEST_DATABASE_URL=postgresql+psycopg://widgetplatform_owner:change-me-owner@127.0.0.1:55432/widgetplatform_test TEST_DATABASE_URL_APP=postgresql+psycopg://widgetplatform_app:change-me-app@127.0.0.1:55432/widgetplatform_test TEST_QDRANT_URL=http://127.0.0.1:56333 TEST_QDRANT_API_KEY=test-qdrant-key TEST_QDRANT_READ_ONLY_API_KEY=test-qdrant-readonly-key python -m pytest tests -q); \
 	rc=$$?; \
 	$(MAKE) test-db-down; \
 	$(MAKE) test-qdrant-down; \
@@ -191,7 +210,7 @@ eval: test-qdrant
 # production Qdrant/Postgres.
 eval-answers: test-db test-qdrant
 	@(set -a; . ./.env; set +a; \
-	  cd backend && TEST_DATABASE_URL=postgresql+psycopg://widgetplatform:change-me@127.0.0.1:55432/widgetplatform_test TEST_QDRANT_URL=http://127.0.0.1:56333 TEST_QDRANT_API_KEY=test-qdrant-key TEST_QDRANT_READ_ONLY_API_KEY=test-qdrant-readonly-key python scripts/manual_run_answer_eval.py $(ARGS)); \
+	  cd backend && TEST_DATABASE_URL=postgresql+psycopg://widgetplatform_owner:change-me-owner@127.0.0.1:55432/widgetplatform_test TEST_DATABASE_URL_APP=postgresql+psycopg://widgetplatform_app:change-me-app@127.0.0.1:55432/widgetplatform_test TEST_QDRANT_URL=http://127.0.0.1:56333 TEST_QDRANT_API_KEY=test-qdrant-key TEST_QDRANT_READ_ONLY_API_KEY=test-qdrant-readonly-key python scripts/manual_run_answer_eval.py $(ARGS)); \
 	rc=$$?; \
 	$(MAKE) test-db-down; \
 	$(MAKE) test-qdrant-down; \

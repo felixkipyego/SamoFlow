@@ -12,7 +12,8 @@
 #   cd backend
 #   make test-db      # a real Postgres, for the real checkpointer
 #   make test-qdrant  # a real Qdrant, for the real retrieve()
-#   export TEST_DATABASE_URL=postgresql+psycopg://widgetplatform:change-me@127.0.0.1:55432/widgetplatform_test
+#   export TEST_DATABASE_URL=postgresql+psycopg://widgetplatform_owner:change-me-owner@127.0.0.1:55432/widgetplatform_test
+#   export TEST_DATABASE_URL_APP=postgresql+psycopg://widgetplatform_app:change-me-app@127.0.0.1:55432/widgetplatform_test
 #   export TEST_QDRANT_URL=http://127.0.0.1:56333
 #   export TEST_QDRANT_API_KEY=...
 #   export TEST_QDRANT_READ_ONLY_API_KEY=...
@@ -68,17 +69,26 @@ def _point_env_at_test_services() -> None:
     from urllib.parse import urlsplit
 
     point_test_env_at_env_vars()  # Qdrant half (shared helper)
-    missing = [name for name in ("TEST_DATABASE_URL",) if not os.environ.get(name)]
+    # [SECURITY] L2 (Phase 7 role split, 2026-10-18): TEST_DATABASE_URL is
+    # the OWNER role (run_checkpointer_setup()'s own real DDL below);
+    # TEST_DATABASE_URL_APP is the APP role (every other live app-code
+    # path this script exercises -- open_checkpointer_pool(), the real
+    # graph/retrieve() call). Both required now, matching backend/tests/
+    # conftest.py's own require_test_database()/require_test_database_app()
+    # split.
+    required = ("TEST_DATABASE_URL", "TEST_DATABASE_URL_APP")
+    missing = [name for name in required if not os.environ.get(name)]
     if missing:
         raise SystemExit(f"Missing required env var(s): {', '.join(missing)}.")
-    url = os.environ["TEST_DATABASE_URL"]
-    host = urlsplit(url).hostname
-    if host not in {"localhost", "127.0.0.1"}:
-        raise SystemExit(
-            f"TEST_DATABASE_URL host {host!r} is not localhost/127.0.0.1 -- refusing to run "
-            "against a non-local Postgres instance."
-        )
-    os.environ["DATABASE_URL"] = url
+    for name in required:
+        host = urlsplit(os.environ[name]).hostname
+        if host not in {"localhost", "127.0.0.1"}:
+            raise SystemExit(
+                f"{name} host {host!r} is not localhost/127.0.0.1 -- refusing to run "
+                "against a non-local Postgres instance."
+            )
+    os.environ["DATABASE_URL_MIGRATE"] = os.environ["TEST_DATABASE_URL"]
+    os.environ["DATABASE_URL"] = os.environ["TEST_DATABASE_URL_APP"]
 
 
 _point_env_at_test_services()  # MUST run before any `app.*` import below

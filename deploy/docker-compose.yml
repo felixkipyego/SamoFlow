@@ -18,7 +18,17 @@ name: widgetplatform
 # merged) for the environment: of api, worker and migrate below.
 x-app-env: &app-env
   APP_ENV: ${APP_ENV:?APP_ENV must be set in .env}
+  # [SECURITY] L2 (Phase 7 role split, 2026-10-18): the APP role -- least
+  # privilege, no DDL. Used at runtime by api/worker (app/db.py, app/
+  # agent/checkpointer.py's live pool); migrate never calls database_url_
+  # str() itself, but Settings requires the field present regardless.
   DATABASE_URL: ${DATABASE_URL:?DATABASE_URL must be set in .env}
+  # The OWNER/MIGRATOR role -- owns the schema and every table. Only
+  # migrate actually dials this (alembic/env.py, the checkpointer's
+  # setup()); present here anyway because this one anchor is shared
+  # across all three services and an unused Settings value is harmless
+  # (the same treatment PHOENIX_COLLECTOR_ENDPOINT below already gets).
+  DATABASE_URL_MIGRATE: ${DATABASE_URL_MIGRATE:?DATABASE_URL_MIGRATE must be set in .env}
   QDRANT_URL: ${QDRANT_URL:?QDRANT_URL must be set in .env}
   QDRANT_API_KEY: ${QDRANT_API_KEY:?QDRANT_API_KEY must be set in .env}
   # Required (Task 3.1.b): retrieve()'s own least-privilege, server-
@@ -344,6 +354,35 @@ services:
         condition: service_healthy
     restart: "no"
 
+  # [SECURITY] L2 (Phase 7 role split, 2026-10-18): a ONE-TIME, idempotent
+  # admin step (app/db_provisioning.py), run explicitly, never part of
+  # `up` and never chained into `migrate` above -- BOOTSTRAP credentials
+  # (POSTGRES_USER/PASSWORD/DB, the real Postgres superuser) must never be
+  # part of api/worker/migrate's own x-app-env, only this service's own
+  # separate environment: block. See docs/deploy/RUNBOOK.md for the real
+  # fresh-volume/existing-volume commands and rollback path.
+  #   docker compose --env-file .env -f deploy/docker-compose.yml \
+  #     run --rm provision-roles
+  provision-roles:
+    <<: *app-build
+    command: ["provision-roles"]
+    profiles: ["tools"]
+    environment:
+      PGHOST: postgres
+      PGPORT: "5432"
+      POSTGRES_USER: ${POSTGRES_USER:?POSTGRES_USER must be set in .env}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set in .env}
+      POSTGRES_DB: ${POSTGRES_DB:?POSTGRES_DB must be set in .env}
+      # Parsed for their embedded username/password only -- app/db_
+      # provisioning.py never makes a real connection with either DSN as-
+      # is (it connects as BOOTSTRAP, above, for everything).
+      DATABASE_URL: ${DATABASE_URL:?DATABASE_URL must be set in .env}
+      DATABASE_URL_MIGRATE: ${DATABASE_URL_MIGRATE:?DATABASE_URL_MIGRATE must be set in .env}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
   test-db:
     # Same pinned image as postgres above; a separate, disposable instance
     # for backend/tests' integration tests (Task 1.1.h), never used by
@@ -366,6 +405,33 @@ services:
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U widgetplatform -d widgetplatform_test"]
       <<: *healthcheck-timing
+    restart: "no"
+
+  # [SECURITY] L2 (Phase 7 role split, 2026-10-18): the identical one-time
+  # provisioning step the real postgres service needs (see provision-roles
+  # above), pointed at test-db instead -- test-db is tmpfs-backed (fresh on
+  # every `up`), so this must run every time, never just once. Wired into
+  # the Makefile's own test-db target, right after the pg_isready wait.
+  # Test-only credentials, written literally (not from .env), same
+  # "throwaway, localhost-only, never real data" convention test-db's own
+  # POSTGRES_USER/PASSWORD above already uses -- these three ALSO match
+  # backend/tests/conftest.py's own _LOCAL_DOCKER_RUN_HINT and backend/
+  # app/db_provisioning.py's own OWNER_ROLE/APP_ROLE constants.
+  provision-roles-test:
+    <<: *app-build
+    command: ["provision-roles"]
+    profiles: ["test"]
+    environment:
+      PGHOST: test-db
+      PGPORT: "5432"
+      POSTGRES_USER: widgetplatform
+      POSTGRES_PASSWORD: change-me
+      POSTGRES_DB: widgetplatform_test
+      DATABASE_URL: postgresql+psycopg://widgetplatform_app:change-me-app@test-db:5432/widgetplatform_test
+      DATABASE_URL_MIGRATE: postgresql+psycopg://widgetplatform_owner:change-me-owner@test-db:5432/widgetplatform_test
+    depends_on:
+      test-db:
+        condition: service_healthy
     restart: "no"
 
   test-qdrant:

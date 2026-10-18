@@ -10,6 +10,17 @@
 #   docker compose -f deploy/docker-compose.yml -f ops/backup/docker-compose.yml \
 #     run --rm backup ./backup.sh
 # (docs/deploy/RUNBOOK.md's own crontab line.)
+#
+# [SECURITY] L2 (Phase 7 role split, 2026-10-18): pg_dump runs as the
+# OWNER/MIGRATOR role (PGUSER/PGPASSWORD, ops/backup/docker-compose.yml's
+# own `backup` service) -- never BOOTSTRAP (the real superuser) and never
+# APP. OWNER already has unrestricted read access to every table it owns
+# (no risk of a missing grant silently producing an incomplete dump the
+# way the APP role's own narrower audit_log grant would), and `pg_dump
+# --no-owner --no-privileges` below strips every embedded role name from
+# the output anyway, so the restore side (restore-drill.sh, run as
+# whichever role owns the TARGET database -- the scratch stack's own
+# disposable "drill" role, never this one) is unaffected by this choice.
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")"
 # shellcheck source=lib.sh
