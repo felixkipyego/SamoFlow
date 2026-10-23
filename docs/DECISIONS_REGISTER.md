@@ -369,6 +369,20 @@ whoever runs 7.3/7.4 on the real server.
 
 ---
 
+### [SECURITY] L2: Postgres role split and its advisor-review follow-ups (2026-10-18)
+
+L2's own commits recorded these only in PROJECT_SPEC.md §5, not here (a rule-21 gap found at the second follow-up). The first two rows are backfilled from those §5 entries, unchanged in substance.
+
+| id | date | topic | decision | status | step(s) | source |
+|---|---|---|---|---|---|---|
+| D-L2-role-split | 2026-10-18 | [SECURITY] #6, Postgres roles | Three roles replace the single shared superuser: BOOTSTRAP (`POSTGRES_USER`, one-time provisioning only), OWNER/MIGRATOR (`widgetplatform_owner`, owns the schema, runs Alembic and the checkpointer `setup()`), APP (`widgetplatform_app`, api+worker, DML only, SELECT/INSERT only on `audit_log`). Idempotent `app/db_provisioning.py` (`provision-roles`), safe on a fresh or existing volume. RESOLVES `D-2.2-superuser`'s "until the role split lands" and the 7.3 forward commitment below. | APPROVED, built and proven live | L2 | PROJECT_SPEC.md §5 "[SECURITY] L2: the Postgres migration-vs-application role split" |
+| D-L2-owner-credential-isolation | 2026-10-18 | [SECURITY] advisor review of c260f23 | api/worker never receive `DATABASE_URL_MIGRATE`, `POSTGRES_PASSWORD` or `POSTGRES_OWNER_PASSWORD`; only `migrate` (`x-migrate-env`) and `provision-roles` do. `Settings.database_url_migrate` is Optional. Guarded by `test_compose_env_isolation_guard.py` (real `docker compose config`). | APPROVED, built and proven live | L2 follow-up 1 | PROJECT_SPEC.md §5 "[SECURITY] L2 fix: api/worker were handed the OWNER role's own credential" |
+| D-L2-deploy-secrets-classified | 2026-10-18 | [SECURITY] advisor review of eedad4e | `POSTGRES_PASSWORD`, `POSTGRES_OWNER_PASSWORD` (required) and `AWS_SECRET_ACCESS_KEY` (optional) are secret-class through `DEPLOY_SECRET_SETTINGS` (`app/secrets_policy.py`), using the same weak-prefix rules with no invented minimum length. Enforced by `preflight.sh`/`check_env_secrets.py`, and by `provision-roles` under `APP_ENV=production` before connecting (`APP_ENV` required and must be one of the three `Settings` literals, fail closed). The completeness guard now starts from `.env.example`, not only `Settings`. | APPROVED, built and adversarially proven | L2 follow-up 2 | PROJECT_SPEC.md §5 "[SECURITY] L2 follow-up: deploy-layer Postgres passwords" |
+| D-L2-owner-credential-duplicate-kept | 2026-10-18 | OWNER credential duplication | Keep bare `POSTGRES_OWNER_USER`/`POSTGRES_OWNER_PASSWORD` alongside `DATABASE_URL_MIGRATE`, and have `preflight.sh` fail (naming variables only) when they differ, rather than derive the backup job's libpq credentials from the DSN. Deriving them would change a backup path not verifiable end to end without the real S3 bucket. Reconsider if the backup job is ever reworked. | APPROVED (task-level judgment call, justified in §5) | L2 follow-up 2 | same |
+| D-L2-env-parser-compose-faithful | 2026-10-18 | [SECURITY] adversarial finding, pre-existing since L1 | `check_env_secrets.py` reads `.env` the way Docker Compose does (confirmed live: `export` prefix, quoted values ending at the closing quote, ` #` inline comments, single quotes literal). A secret-class value Compose would `${...}`-interpolate fails closed: its real value cannot be verified from the file. | APPROVED, built and tested | L2 follow-up 2 | same |
+| D-L2-provisioning-safe-errors | 2026-10-18 | [SECURITY] adversarial finding | `db_provisioning.main()` prints `psycopg.Error.diag.message_primary`, never `str(exc)`. The latter carries libpq's `LINE 1:` statement context, which quotes a `CREATE/ALTER ROLE … PASSWORD` literal (confirmed live). | APPROVED, built and tested live | L2 follow-up 2 | same |
+| D-L2-phoenix-fresh-volume-defect | 2026-10-18 | Production defect, found not fixed (outside this [SECURITY] task's scope) | On a fresh volume, `phoenix` crash-loops (`/data/inferences` not writable by the non-root image user), and its healthcheck calls `bash`, which the image lacks, so `up --wait` fails on a fresh server. Tracing is optional, so the stack serves without it. Fix and verify on a fresh volume before go-live. | CANDIDATE (forward commitment) | owner 7.3 | PROJECT_SPEC.md §9 marker (same date) |
+
 ## 2. Forward commitments by step
 
 Every instruction addressed to a future step or phase (due at / owner / deferred to / revisit
@@ -722,7 +736,7 @@ or the first non-Felix-operated one. The following join it by Felix's decision G
   live inside a real Linux container, both the clean-run and the forced-alert path), final
   verification (a real alert actually reaching a real inbox, the real uptime checker actually
   configured) owned by 7.3/7.4.**
-- Separate migration-vs-application Postgres roles (DDL rights vs. data rights only) — this
+- **RESOLVED by L2 (2026-10-18), see `D-L2-role-split`.** Separate migration-vs-application Postgres roles (DDL rights vs. data rights only) — this
   is also what finally makes the `audit_log` `REVOKE` (D-2.2-superuser) real enforcement for
   the first time; re-verify the existing regression test flips to FAIL→pass as expected. (PROJECT_SPEC.md:6869)
 - Replace plaintext secrets in the environment with Docker secrets or an external secrets
@@ -739,6 +753,7 @@ or the first non-Felix-operated one. The following join it by Felix's decision G
   chat-model swap, since it implies re-indexing the tenant's corpus. (PROJECT_SPEC.md:6942, 6835)
 - The CI `test`/`security.yml` job duplication (a composite action) — deferred until
   genuinely painful. (PROJECT_SPEC.md:6853)
+- Fix the `phoenix` fresh-volume crash-loop and its `bash`-based healthcheck, and verify on a fresh volume (`D-L2-phoenix-fresh-volume-defect`, found at the L2 follow-up, 2026-10-18; §9 marker of the same date).
 
 ### 7.4 Go-live checklist and spec reconciliation
 - **Rejecting placeholder secrets when `APP_ENV=production` is a mandatory go-live gate**
