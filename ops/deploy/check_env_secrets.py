@@ -22,7 +22,11 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "backend"))
 
-from app.secrets_policy import SECRET_CLASS_SETTINGS, check_raw_secret_values  # noqa: E402
+from app.secrets_policy import (  # noqa: E402
+    ALL_SECRET_ENV_SETTINGS,
+    check_credential_consistency,
+    check_raw_secret_values,
+)
 
 
 def parse_env_file(path: Path) -> dict[str, str]:
@@ -58,7 +62,7 @@ def main(argv: list[str]) -> int:
 
     missing = [
         setting.env_var
-        for setting in SECRET_CLASS_SETTINGS
+        for setting in ALL_SECRET_ENV_SETTINGS
         if not setting.optional and not raw.get(setting.env_var)
     ]
     if missing:
@@ -66,13 +70,23 @@ def main(argv: list[str]) -> int:
             print(f"FAIL: {name} is required but missing or empty in {env_path}", file=sys.stderr)
         return 1
 
-    violations = check_raw_secret_values({k: (v or None) for k, v in raw.items()})
+    # [SECURITY] L2 follow-up (2026-10-18): ALL_SECRET_ENV_SETTINGS also
+    # covers the deploy-layer secrets no Settings field reads
+    # (POSTGRES_PASSWORD, POSTGRES_OWNER_PASSWORD, ...), and the OWNER
+    # credential's two copies must agree.
+    raw_or_none = {k: (v or None) for k, v in raw.items()}
+    violations = check_raw_secret_values(raw_or_none) + check_credential_consistency(
+        raw_or_none
+    )
     if violations:
         for v in violations:
             print(f"FAIL: {v}", file=sys.stderr)
         return 1
 
-    print("OK: every secret-class variable is present and not a known placeholder/weak value")
+    print(
+        "OK: every secret-class variable is present, not a known placeholder/weak "
+        "value, and the OWNER credential's two copies agree"
+    )
     return 0
 
 

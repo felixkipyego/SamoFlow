@@ -15,7 +15,9 @@
 # never appears in any file an operator would reference while deploying):
 #   - .env.example itself: "change-me" (DATABASE_URL's password,
 #     QDRANT_API_KEY, QDRANT_READ_ONLY_API_KEY, JWT_SIGNING_KEY,
-#     DB_CONNECTION_ENCRYPTION_KEY, OPENAI_API_KEY).
+#     DB_CONNECTION_ENCRYPTION_KEY, OPENAI_API_KEY, POSTGRES_PASSWORD);
+#     "change-me-owner" (DATABASE_URL_MIGRATE's password,
+#     POSTGRES_OWNER_PASSWORD) -- both covered by the "change-me" prefix.
 #   - deploy/smoke-image.sh: "smoke-test-..." for every secret-class var.
 #   - backend/tests/conftest.py's own VALID_ENV (the base fixture every
 #     other test environment in this project starts from): "test-...".
@@ -33,8 +35,10 @@ WEAK_VALUE_PREFIXES: tuple[str, ...] = ("change-me", "test-", "smoke-", "placeho
 
 @dataclass(frozen=True)
 class SecretClassSetting:
-    # Settings attribute name (app/config.py).
-    attr: str
+    # Settings attribute name (app/config.py), or None for a deploy-layer-
+    # only secret (DEPLOY_SECRET_SETTINGS below) that no Settings field
+    # reads at all.
+    attr: str | None
     # The environment variable name -- pydantic-settings matches this to
     # `attr` case-insensitively by default (confirmed against the installed
     # pydantic-settings: no case_sensitive/alias config exists on Settings'
@@ -59,7 +63,8 @@ class SecretClassSetting:
     # for exactly that reason, not stale).
     optional: bool
     # True if this setting's real value is a connection-string DSN with an
-    # embedded password, not a bare secret token -- only DATABASE_URL today.
+    # embedded password, not a bare secret token -- DATABASE_URL and
+    # DATABASE_URL_MIGRATE.
     is_dsn: bool = False
 
 
@@ -102,6 +107,38 @@ SECRET_CLASS_SETTINGS: tuple[SecretClassSetting, ...] = (
 )
 
 
+# [SECURITY] L2 follow-up (advisor review of eedad4e, 2026-10-18): secrets
+# .env carries that NO Settings field reads -- each is consumed directly
+# by a container or ops script instead -- so the Settings-driven guard
+# (backend/tests/test_secrets_policy_guard.py) could never see them, and
+# after the role split POSTGRES_PASSWORD no longer duplicates any checked
+# DSN: a production .env could carry the bootstrap superuser's own
+# "change-me" and pass preflight.sh. Same weak-value rules, same "no
+# minimum length invented here" stance as the DSN passwords above.
+# test_secrets_policy_guard.py's .env.example-driven guard now fails if a
+# secret-looking .env.example variable is classified in neither tuple.
+DEPLOY_SECRET_SETTINGS: tuple[SecretClassSetting, ...] = (
+    # The BOOTSTRAP superuser (deploy/docker-compose.yml's postgres
+    # service, and app/db_provisioning.py's own connection).
+    SecretClassSetting(None, "POSTGRES_PASSWORD", None, optional=False),
+    # The OWNER role's bare password, for ops/backup/docker-compose.yml's
+    # PGPASSWORD -- must equal DATABASE_URL_MIGRATE's own embedded
+    # password (check_credential_consistency() below).
+    SecretClassSetting(None, "POSTGRES_OWNER_PASSWORD", None, optional=False),
+    # The backup bucket's secret key (ops/backup/docker-compose.yml).
+    # optional=True: preflight.sh gates the app deploy, and the backup
+    # stack's own `${...:?}` interpolation already refuses to start
+    # without it -- this entry only rejects a placeholder when it IS set.
+    SecretClassSetting(None, "AWS_SECRET_ACCESS_KEY", None, optional=True),
+)
+
+# Everything a real .env must get right -- what check_env_secrets.py
+# (preflight.sh) checks. Settings' own production gate checks only
+# SECRET_CLASS_SETTINGS, the subset it actually reads.
+ALL_SECRET_ENV_SETTINGS: tuple[SecretClassSetting, ...] = (
+    SECRET_CLASS_SETTINGS + DEPLOY_SECRET_SETTINGS
+)
+
 def password_from_dsn(dsn: str) -> str | None:
     # The one place either caller (the Settings validator, or preflight.sh's
     # own raw-.env-text check) extracts a DSN's embedded password -- never
@@ -130,7 +167,7 @@ def check_raw_secret_values(raw_values: dict[str, str | None]) -> list[str]:
     # this check ever runs; preflight.sh checks "required variable present
     # at all" as its own separate rule (ops/deploy/preflight.sh).
     violations: list[str] = []
-    for setting in SECRET_CLASS_SETTINGS:
+    for setting in ALL_SECRET_ENV_SETTINGS:
         raw = raw_values.get(setting.env_var)
         if raw is None:
             continue
@@ -148,4 +185,37 @@ def check_raw_secret_values(raw_values: dict[str, str | None]) -> list[str]:
                 f"{setting.env_var} is shorter than its required minimum "
                 f"({setting.min_length} characters)."
             )
+    return violations
+
+
+def check_credential_consistency(raw_values: dict[str, str | None]) -> list[str]:
+    # The one credential .env deliberately carries twice: the OWNER role's
+    # username/password live both inside DATABASE_URL_MIGRATE (read by
+    # migrate and provision-roles -- provision-roles SETS the role's real
+    # password from it) and as bare POSTGRES_OWNER_USER/PASSWORD (read by
+    # ops/backup/docker-compose.yml's PGUSER/PGPASSWORD, which plain YAML
+    # interpolation cannot extract from a DSN). If they drift, the nightly
+    # backup fails to authenticate. The APP role's password lives only in
+    # DATABASE_URL and the bootstrap password only in POSTGRES_PASSWORD,
+    # so neither has a second copy to drift from. Messages name variables
+    # only, never values. A missing value is not this function's concern
+    # (check_env_secrets.py's own presence check runs first).
+    dsn = raw_values.get("DATABASE_URL_MIGRATE")
+    if not dsn:
+        return []
+    parts = urlsplit(dsn)
+    violations: list[str] = []
+    bare_user = raw_values.get("POSTGRES_OWNER_USER")
+    if bare_user and unquote(parts.username or "") != bare_user:
+        violations.append(
+            "POSTGRES_OWNER_USER does not match the username inside DATABASE_URL_MIGRATE "
+            "-- both must name the same OWNER role."
+        )
+    bare_password = raw_values.get("POSTGRES_OWNER_PASSWORD")
+    if bare_password and password_from_dsn(dsn) != bare_password:
+        violations.append(
+            "POSTGRES_OWNER_PASSWORD does not match the password inside "
+            "DATABASE_URL_MIGRATE -- both must hold the same OWNER role password "
+            "(nightly backups authenticate with POSTGRES_OWNER_PASSWORD)."
+        )
     return violations

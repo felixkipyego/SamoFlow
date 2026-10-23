@@ -4,17 +4,23 @@
 # SECRET_CLASS_SETTINGS registry stays complete and accurate as Settings
 # (app/config.py) evolves -- a new SecretStr field added there without a
 # matching entry here must fail a test, not silently ship unclassified.
+import re
 import typing
 
+import pytest
 from pydantic import SecretStr
 
 from app.config import Settings
 from app.secrets_policy import (
+    ALL_SECRET_ENV_SETTINGS,
+    DEPLOY_SECRET_SETTINGS,
     SECRET_CLASS_SETTINGS,
+    check_credential_consistency,
     check_raw_secret_values,
     is_weak_value,
     password_from_dsn,
 )
+from tests.test_env_example import _parse_env_example
 
 
 def _settings_secretstr_field_names() -> set[str]:
@@ -144,3 +150,236 @@ def test_check_raw_secret_values_accepts_a_fully_realistic_env():
 
     violations = check_raw_secret_values(dict(PRODUCTION_REALISTIC_SECRET_OVERRIDES))
     assert violations == []
+
+
+
+# --- [SECURITY] L2 follow-up (advisor review of eedad4e, 2026-10-18) ---
+#
+# Why the guards above never caught POSTGRES_PASSWORD/POSTGRES_OWNER_
+# PASSWORD: their universe is Settings' own SecretStr fields, and neither
+# variable is a Settings field (deploy containers/scripts read them
+# directly). Nothing ever looked at .env.example itself -- the file an
+# operator actually fills in. The guard below starts from .env.example.
+
+# A name that looks like a credential. Deliberately broad: a false
+# positive costs one reasoned line in NOT_SECRET_CLASS_EXAMPLE_KEYS; a
+# false negative is exactly the bug this guard exists to prevent. The one
+# carve-out: "SITE_KEY" (the *_RATE_LIMIT_PER_SITE_KEY settings) -- a
+# site key is the widget's PUBLIC identifier, embedded in every customer
+# page's HTML, never a credential.
+_SECRET_LOOKING_NAME = re.compile(r"PASSWORD|SECRET|TOKEN|(^|(?<!SITE)_)KEY(_|$)")
+
+# .env.example variables whose NAME looks like a credential but which are
+# not secret -- each with the reason. Adding to this list is a deliberate,
+# reviewed decision, never a way to silence the guard.
+NOT_SECRET_CLASS_EXAMPLE_KEYS: dict[str, str] = {
+    "BACKUP_AGE_PUBLIC_KEY": "the PUBLIC (encrypting) half of the backup age keypair; "
+    "the private half never lives in .env",
+    "AWS_ACCESS_KEY_ID": "an access-key IDENTIFIER, not the secret half "
+    "(AWS_SECRET_ACCESS_KEY, which is classified)",
+}
+
+
+def _unclassified_secret_looking_keys(
+    example_values: dict[str, str], classified_env_vars: set[str]
+) -> set[str]:
+    found = set()
+    for key, value in example_values.items():
+        looks_secret = bool(_SECRET_LOOKING_NAME.search(key)) or (
+            "://" in value and password_from_dsn(value) is not None
+        )
+        exempt = key in classified_env_vars or key in NOT_SECRET_CLASS_EXAMPLE_KEYS
+        if looks_secret and not exempt:
+            found.add(key)
+    return found
+
+
+def _all_classified_env_vars() -> set[str]:
+    return {setting.env_var for setting in ALL_SECRET_ENV_SETTINGS}
+
+
+def test_every_secret_looking_env_example_variable_is_classified():
+    missing = _unclassified_secret_looking_keys(_parse_env_example(), _all_classified_env_vars())
+    assert not missing, (
+        f".env.example declares secret-looking variable(s) {sorted(missing)} that "
+        "app/secrets_policy.py classifies nowhere -- add each to SECRET_CLASS_SETTINGS "
+        "(a Settings field) or DEPLOY_SECRET_SETTINGS (read only by a container/script), "
+        "or, if genuinely not a secret, to NOT_SECRET_CLASS_EXAMPLE_KEYS with the reason."
+    )
+
+
+def test_the_env_example_guard_would_have_caught_the_original_finding():
+    # Non-vacuous: the exact pre-fix state (neither name classified) must
+    # be flagged by the same detector the real guard above uses.
+    pre_fix = _all_classified_env_vars() - {"POSTGRES_PASSWORD", "POSTGRES_OWNER_PASSWORD"}
+    assert _unclassified_secret_looking_keys(_parse_env_example(), pre_fix) == {
+        "POSTGRES_PASSWORD",
+        "POSTGRES_OWNER_PASSWORD",
+    }
+
+
+def test_the_env_example_guard_flags_a_dsn_with_an_embedded_password_by_value():
+    # A credential hiding inside a URL under an innocent-looking name.
+    flagged = _unclassified_secret_looking_keys(
+        {"REPLICA_URL": "postgresql+psycopg://u:pw@h:5432/db", "QDRANT_URL": "http://qdrant:6333"},
+        set(),
+    )
+    assert flagged == {"REPLICA_URL"}
+
+
+@pytest.mark.parametrize(
+    ("name", "looks_secret"),
+    [
+        ("POSTGRES_PASSWORD", True),
+        ("REDIS_PASSWORD", True),
+        ("AWS_SECRET_ACCESS_KEY", True),
+        ("GITHUB_TOKEN", True),
+        ("KEY", True),
+        ("PRIVATE_KEY", True),
+        ("JWT_SIGNING_KEY_PREVIOUS", True),
+        ("STRIPE_SITE_KEY_SECRET", True),  # the SITE_KEY carve-out never hides a SECRET
+        ("SESSION_RATE_LIMIT_PER_SITE_KEY", False),
+        ("MONKEY_COUNT", False),
+        ("KEYRING_PATH", False),
+        ("QDRANT_URL", False),
+    ],
+)
+def test_secret_looking_name_detector(name, looks_secret):
+    assert bool(_SECRET_LOOKING_NAME.search(name)) is looks_secret
+
+
+def test_not_secret_class_exemptions_are_real_and_not_also_classified():
+    example = _parse_env_example()
+    for key in NOT_SECRET_CLASS_EXAMPLE_KEYS:
+        assert key in example, f"stale exemption: {key} is no longer in .env.example"
+        assert key not in _all_classified_env_vars(), f"{key} is both exempt and classified"
+
+
+def test_every_deploy_secret_is_declared_in_env_example_and_is_not_a_settings_field():
+    example = _parse_env_example()
+    settings_env_vars = {name.upper() for name in Settings.model_fields}
+    for setting in DEPLOY_SECRET_SETTINGS:
+        assert setting.attr is None
+        assert setting.env_var in example, f"stale entry: {setting.env_var} not in .env.example"
+        assert setting.env_var not in settings_env_vars, (
+            f"{setting.env_var} is a real Settings field -- classify it in "
+            "SECRET_CLASS_SETTINGS instead, so Settings' own production gate covers it"
+        )
+
+
+@pytest.mark.parametrize("env_var", ["POSTGRES_PASSWORD", "POSTGRES_OWNER_PASSWORD"])
+@pytest.mark.parametrize(
+    "weak_value",
+    [
+        "change-me",  # .env.example's POSTGRES_PASSWORD
+        "change-me-owner",  # .env.example's POSTGRES_OWNER_PASSWORD
+        "CHANGE-ME",
+        "  change-me  ",
+        "test-postgres-password",
+        "smoke-test-postgres",
+        "placeholder-password",
+    ],
+)
+def test_postgres_passwords_reject_placeholder_and_weak_values(env_var, weak_value):
+    violations = check_raw_secret_values({env_var: weak_value})
+    assert len(violations) == 1
+    assert env_var in violations[0]
+    assert weak_value.strip() not in violations[0]
+
+
+@pytest.mark.parametrize("env_var", ["POSTGRES_PASSWORD", "POSTGRES_OWNER_PASSWORD"])
+def test_postgres_passwords_accept_a_realistic_value(env_var):
+    assert check_raw_secret_values({env_var: "Xk3vQ9pL2mN8rT5wY7zA1bC4dE6fG0hJ"}) == []
+
+
+def test_aws_secret_access_key_is_checked_only_when_set():
+    assert check_raw_secret_values({"AWS_SECRET_ACCESS_KEY": None}) == []
+    violations = check_raw_secret_values({"AWS_SECRET_ACCESS_KEY": "change-me"})
+    assert len(violations) == 1 and "AWS_SECRET_ACCESS_KEY" in violations[0]
+
+
+_OWNER_DSN = "postgresql+psycopg://widgetplatform_owner:owner-pw-for-consistency-tests@postgres:5432/widgetplatform"
+
+
+def test_credential_consistency_accepts_matching_owner_credentials():
+    assert (
+        check_credential_consistency(
+            {
+                "DATABASE_URL_MIGRATE": _OWNER_DSN,
+                "POSTGRES_OWNER_USER": "widgetplatform_owner",
+                "POSTGRES_OWNER_PASSWORD": "owner-pw-for-consistency-tests",
+            }
+        )
+        == []
+    )
+
+
+def test_credential_consistency_compares_the_decoded_dsn_password():
+    # A password with URL-special characters is percent-encoded inside
+    # the DSN but written raw in POSTGRES_OWNER_PASSWORD -- still a match.
+    dsn = "postgresql+psycopg://widgetplatform_owner:p%40ss%2Fw0rd%3Axyz@postgres:5432/widgetplatform"
+    assert (
+        check_credential_consistency(
+            {
+                "DATABASE_URL_MIGRATE": dsn,
+                "POSTGRES_OWNER_USER": "widgetplatform_owner",
+                "POSTGRES_OWNER_PASSWORD": "p@ss/w0rd:xyz",
+            }
+        )
+        == []
+    )
+
+
+def test_credential_consistency_rejects_a_mismatched_owner_password_naming_only_variables():
+    distinctive = "Distinctive-Bare-Owner-Password-Marker"
+    violations = check_credential_consistency(
+        {
+            "DATABASE_URL_MIGRATE": _OWNER_DSN,
+            "POSTGRES_OWNER_USER": "widgetplatform_owner",
+            "POSTGRES_OWNER_PASSWORD": distinctive,
+        }
+    )
+    assert len(violations) == 1
+    assert "POSTGRES_OWNER_PASSWORD" in violations[0]
+    assert "DATABASE_URL_MIGRATE" in violations[0]
+    assert distinctive not in violations[0]
+    assert "owner-pw-for-consistency-tests" not in violations[0]
+
+
+def test_credential_consistency_rejects_a_mismatched_owner_user():
+    violations = check_credential_consistency(
+        {
+            "DATABASE_URL_MIGRATE": _OWNER_DSN,
+            "POSTGRES_OWNER_USER": "some_other_role",
+            "POSTGRES_OWNER_PASSWORD": "owner-pw-for-consistency-tests",
+        }
+    )
+    assert len(violations) == 1 and "POSTGRES_OWNER_USER" in violations[0]
+
+
+def test_credential_consistency_rejects_a_dsn_with_no_password_at_all():
+    violations = check_credential_consistency(
+        {
+            "DATABASE_URL_MIGRATE": "postgresql+psycopg://widgetplatform_owner@postgres:5432/db",
+            "POSTGRES_OWNER_PASSWORD": "owner-pw-for-consistency-tests",
+        }
+    )
+    assert len(violations) == 1 and "POSTGRES_OWNER_PASSWORD" in violations[0]
+
+
+def test_credential_consistency_is_case_sensitive():
+    violations = check_credential_consistency(
+        {
+            "DATABASE_URL_MIGRATE": _OWNER_DSN,
+            "POSTGRES_OWNER_PASSWORD": "OWNER-PW-FOR-CONSISTENCY-TESTS",
+        }
+    )
+    assert len(violations) == 1
+
+
+@pytest.mark.parametrize(
+    "raw_values",
+    [{}, {"DATABASE_URL_MIGRATE": None}, {"DATABASE_URL_MIGRATE": _OWNER_DSN}],
+)
+def test_credential_consistency_leaves_missing_values_to_the_presence_check(raw_values):
+    assert check_credential_consistency(raw_values) == []
