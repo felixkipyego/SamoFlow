@@ -141,8 +141,15 @@ mechanisms:
    tree (a careless `git add .`/`git add -A` would commit it); or any
    secret-class variable is missing/placeholder/weak, reusing the exact
    same policy `get_settings()` enforces -- one source of truth, never a
-   second, independently-maintained copy of the same rules. It never
-   prints a secret value, only variable names.
+   second, independently-maintained copy of the same rules. That
+   includes the deploy-layer secrets no `Settings` field reads
+   (`POSTGRES_PASSWORD`, `POSTGRES_OWNER_PASSWORD`, and
+   `AWS_SECRET_ACCESS_KEY` when set -- [SECURITY] L2 follow-up,
+   2026-10-18), and it fails if `POSTGRES_OWNER_USER`/
+   `POSTGRES_OWNER_PASSWORD` disagree with the username/password inside
+   `DATABASE_URL_MIGRATE`. It never prints a secret value, only variable
+   names. `provision-roles` applies the same refusal to the three
+   passwords it handles under `APP_ENV=production`, before connecting.
 
 The table below flags which variables must never be a placeholder in
 production -- both mechanisms above now ENFORCE this for every
@@ -158,8 +165,8 @@ exactly why `secrets_policy.py` checks both, separately.
 
 | Variable | Must never be a placeholder in production? | Notes |
 |---|---|---|
-| `POSTGRES_PASSWORD` | Yes | The BOOTSTRAP (superuser) password -- used only by `provision-roles` (§5 below), never by api/worker/migrate at runtime. |
-| `DATABASE_URL_MIGRATE`, `POSTGRES_OWNER_USER`, `POSTGRES_OWNER_PASSWORD` | Yes | The OWNER/MIGRATOR role -- owns the schema and every table, runs Alembic and the checkpointer's setup(). `POSTGRES_OWNER_PASSWORD` must match the password embedded in `DATABASE_URL_MIGRATE`. **[SECURITY] L2 follow-up (advisor review, 2026-10-18): only `migrate` and `provision-roles` ever receive `DATABASE_URL_MIGRATE` -- `api` and `worker` never do** (confirmed live: `docker compose exec api env`/`worker env` carry neither this nor either bootstrap/owner bare password); `Settings.database_url_migrate` is Optional for exactly that reason, so api/worker's own startup never depends on it. |
+| `POSTGRES_PASSWORD` | Yes | The BOOTSTRAP (superuser) password -- used by the `postgres` service itself and by `provision-roles` (§5 below), never by api/worker/migrate at runtime. The `postgres` image applies it ONLY when initializing a fresh, empty volume: changing it in `.env` afterward does not change the real superuser password (that takes an `ALTER ROLE ... PASSWORD` as the superuser, then the matching `.env` edit) -- so get it right before the very first `up`, which is exactly when `preflight.sh` checks it. |
+| `DATABASE_URL_MIGRATE`, `POSTGRES_OWNER_USER`, `POSTGRES_OWNER_PASSWORD` | Yes | The OWNER/MIGRATOR role -- owns the schema and every table, runs Alembic and the checkpointer's setup(). `POSTGRES_OWNER_PASSWORD` must match the password embedded in `DATABASE_URL_MIGRATE` (and `POSTGRES_OWNER_USER` its username) -- `preflight.sh` fails, naming the variables, if they differ; a mismatch would otherwise surface only as a failed nightly backup. **[SECURITY] L2 follow-up (advisor review, 2026-10-18): only `migrate` and `provision-roles` ever receive `DATABASE_URL_MIGRATE` -- `api` and `worker` never do** (confirmed live: `docker compose exec api env`/`worker env` carry neither this nor either bootstrap/owner bare password); `Settings.database_url_migrate` is Optional for exactly that reason, so api/worker's own startup never depends on it. |
 | `DATABASE_URL` | Yes | [SECURITY] L2 (Phase 7 role split, 2026-10-18): now the APP role (api+worker) -- least privilege, no DDL, no CREATE on the schema; INSERT/SELECT only on `audit_log`. Generate a real random password. |
 | `QDRANT_API_KEY`, `QDRANT_READ_ONLY_API_KEY` | Yes | Two DIFFERENT real random values -- confirmed live (Task 3.1.b) that Qdrant itself rejects a write through the read-only key with a real 403, so these must genuinely differ. |
 | `JWT_SIGNING_KEY` | Yes | `openssl rand -base64 32`. |

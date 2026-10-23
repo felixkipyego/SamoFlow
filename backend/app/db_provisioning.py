@@ -40,13 +40,15 @@ from urllib.parse import unquote, urlsplit
 import psycopg
 from psycopg import sql
 
+from app.secrets_policy import check_raw_secret_values
+
 logger = logging.getLogger(__name__)
 
 # The two role names this entire L2 batch agrees on -- used here, and
 # imported directly by backend/tests/test_alembic.py's own
 # _reset_public_schema() (which must re-apply grant_app_role_privileges()
 # after every DROP SCHEMA public CASCADE; see that function's own
-# docstring for why) and by backend/tests/test_db_provisioning_guard.py's
+# docstring for why) and by backend/tests/test_alembic.py's own
 # live grant-correctness guard, so the real name is never hand-copied a
 # second time anywhere.
 OWNER_ROLE = "widgetplatform_owner"
@@ -308,9 +310,43 @@ def _require_env(name: str) -> str:
     return value
 
 
+# NOTE: mirrors app/config.py's own Settings.app_env Literal (not imported:
+# see this module's header) -- backend/tests/test_db_provisioning.py fails
+# if the two ever drift.
+APP_ENVS = ("development", "test", "production")
+
+
+def _reject_weak_secrets_in_production() -> None:
+    # [SECURITY] L2 follow-up (advisor review of eedad4e, 2026-10-18): the
+    # same production gate Settings applies to api/worker/migrate, applied
+    # here to the three credentials this process handles -- the bootstrap
+    # superuser's own password, plus the OWNER/APP passwords this run is
+    # about to SET on the real roles. Runs before any connection is made.
+    # APP_ENV is required and must be one of Settings' own three values
+    # (fail closed): a missing value or a typo like "Production" must
+    # never silently skip the gate -- Settings would reject that same
+    # typo for api/worker/migrate, but only AFTER this run had already
+    # set the weak passwords. secrets_policy.py is stdlib-only, so this
+    # keeps the module's "no Settings import" discipline (header comment).
+    app_env = _require_env("APP_ENV")
+    if app_env not in APP_ENVS:
+        raise RuntimeError(f"APP_ENV must be one of {', '.join(APP_ENVS)}")
+    if app_env != "production":
+        return
+    violations = check_raw_secret_values(
+        {
+            name: os.environ.get(name)
+            for name in ("POSTGRES_PASSWORD", "DATABASE_URL_MIGRATE", "DATABASE_URL")
+        }
+    )
+    if violations:
+        raise RuntimeError(" ".join(violations))
+
+
 def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
     try:
+        _reject_weak_secrets_in_production()
         owner_user, owner_password = _bare_credentials(
             _require_env("DATABASE_URL_MIGRATE"), "DATABASE_URL_MIGRATE"
         )
@@ -335,7 +371,6 @@ def main() -> None:
         # message), so printing str(exc) directly is safe.
         print(str(exc), file=sys.stderr)
         sys.exit(1)
-
 
 if __name__ == "__main__":
     main()

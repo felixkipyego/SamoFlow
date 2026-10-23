@@ -120,3 +120,7 @@ def test_provision_roles_has_bootstrap_and_owner_credentials_by_design():
     env = services["provision-roles"].get("environment", {})
     assert "DATABASE_URL_MIGRATE" in env
     assert "POSTGRES_PASSWORD" in env
+    # [SECURITY] L2 follow-up (2026-10-18): app/db_provisioning.py's own
+    # production weak-password gate reads APP_ENV (and refuses to run
+    # without it) -- dropping it here would break every provisioning run.
+    assert env.get("APP_ENV") == _CONFIG_ENV["APP_ENV"]

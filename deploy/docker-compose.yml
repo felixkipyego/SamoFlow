@@ -377,6 +377,10 @@ services:
     command: ["provision-roles"]
     profiles: ["tools"]
     environment:
+      # [SECURITY] L2 follow-up (2026-10-18): app/db_provisioning.py
+      # refuses placeholder/weak passwords under APP_ENV=production, and
+      # requires APP_ENV set (fail closed, never a silently skipped gate).
+      APP_ENV: ${APP_ENV:?APP_ENV must be set in .env}
       PGHOST: postgres
       PGPORT: "5432"
       POSTGRES_USER: ${POSTGRES_USER:?POSTGRES_USER must be set in .env}
@@ -431,6 +435,7 @@ services:
     command: ["provision-roles"]
     profiles: ["test"]
     environment:
+      APP_ENV: test
       PGHOST: test-db
       PGPORT: "5432"
       POSTGRES_USER: widgetplatform

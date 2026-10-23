@@ -185,11 +185,19 @@ def test_the_real_repository_marker_count_is_64():
     # re-pinning this number: exactly one new line added, nothing else in
     # this task's own changed files (app/config.py, app/secrets_policy.py,
     # the new test files) carries any of the four trigger words.
+    # 65 -> 66 at the [SECURITY] L2 follow-up (advisor review of eedad4e,
+    # 2026-10-18), real, not accidental: app/db_provisioning.py's own new
+    # APP_ENVS tuple mirrors app/config.py's Settings.app_env literal
+    # instead of importing it (that module deliberately never imports
+    # Settings), so it carries the rule-4 "points at the similar logic"
+    # marker (the scanner's own fourth trigger word). Confirmed by diffing
+    # `python hooks.py` output: exactly that one new line, nothing else in
+    # this task's own changed files carries any of the four trigger words.
     stdout = _run_hooks(REPO_ROOT)
     first_line = stdout.splitlines()[0]
     count = int(first_line.split()[0])
-    assert count == 65, (
-        f"expected 65 markers against the real repository, got {count} -- "
+    assert count == 66, (
+        f"expected 66 markers against the real repository, got {count} -- "
         f"either a real marker was added/removed, or the exclusion below "
         f"needs revisiting:\n{stdout}"
     )

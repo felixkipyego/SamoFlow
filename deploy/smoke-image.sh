@@ -228,13 +228,32 @@ STACK_ENV="-e APP_ENV=development -e DATABASE_URL=postgresql+psycopg://widgetpla
 # one -- a SEPARATE env (BOOTSTRAP credentials, never part of STACK_ENV
 # above) matching deploy/docker-compose.yml's own provision-roles-test
 # service.
-PROVISION_ENV="-e PGHOST=test-db -e PGPORT=5432 -e POSTGRES_USER=widgetplatform -e POSTGRES_PASSWORD=change-me -e POSTGRES_DB=widgetplatform_test -e DATABASE_URL=postgresql+psycopg://widgetplatform_app:change-me-app@test-db:5432/widgetplatform_test -e DATABASE_URL_MIGRATE=postgresql+psycopg://widgetplatform_owner:change-me-owner@test-db:5432/widgetplatform_test"
+PROVISION_ENV="-e APP_ENV=test -e PGHOST=test-db -e PGPORT=5432 -e POSTGRES_USER=widgetplatform -e POSTGRES_PASSWORD=change-me -e POSTGRES_DB=widgetplatform_test -e DATABASE_URL=postgresql+psycopg://widgetplatform_app:change-me-app@test-db:5432/widgetplatform_test -e DATABASE_URL_MIGRATE=postgresql+psycopg://widgetplatform_owner:change-me-owner@test-db:5432/widgetplatform_test"
 set +e
 out=$(docker run --rm --network "$NETWORK" $PROVISION_ENV "$image" provision-roles 2>&1)
 rc=$?
 set -e
 [ "$rc" -eq 0 ] || fail "provision-roles failed against the disposable test-db stack: $out"
 echo "PASS: provision-roles succeeds against the disposable test-db stack"
+
+# [SECURITY] L2 follow-up (2026-10-18): the SAME placeholder credentials
+# under APP_ENV=production must be refused before any connection is made
+# (no --network at all, so a connection attempt could not succeed anyway)
+# -- the bootstrap superuser's "change-me" is named, never echoed.
+PROVISION_ENV_PROD=$(printf '%s' "$PROVISION_ENV" | sed 's/APP_ENV=test/APP_ENV=production/')
+set +e
+out=$(docker run --rm --network none $PROVISION_ENV_PROD "$image" provision-roles 2>&1)
+rc=$?
+set -e
+[ "$rc" -ne 0 ] || fail "provision-roles accepted placeholder credentials under APP_ENV=production"
+case "$out" in
+    *POSTGRES_PASSWORD*) : ;;
+    *) fail "provision-roles' production refusal did not name POSTGRES_PASSWORD: $out" ;;
+esac
+case "$out" in
+    *change-me*) fail "provision-roles' production refusal echoed a credential value" ;;
+esac
+echo "PASS: provision-roles refuses placeholder credentials under APP_ENV=production, naming only the variable"
 
 set +e
 out=$(docker run --rm --network "$NETWORK" $STACK_ENV "$image" migrate 2>&1)
