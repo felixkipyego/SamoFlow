@@ -17,6 +17,7 @@
 # Prints nothing but PASS/FAIL lines and variable NAMES; never a value.
 from __future__ import annotations
 
+import re
 import sys
 from pathlib import Path
 
@@ -29,24 +30,52 @@ from app.secrets_policy import (  # noqa: E402
 )
 
 
-def parse_env_file(path: Path) -> dict[str, str]:
+def parse_env_file(path: Path) -> tuple[dict[str, str], set[str]]:
+    # Returns (values, interpolated): values as Docker Compose's own
+    # --env-file parser reads them, plus the keys whose value contains a
+    # "$" that Compose would INTERPOLATE -- for those, the text in the file
+    # is not the value the containers get.
+    #
+    # [SECURITY] L2 follow-up adversarial pass (2026-10-18), each rule
+    # confirmed live against `docker compose config` (Compose v5.1.4), not
+    # assumed: the earlier parser read raw text only, so
+    #   WEAK=change-me / POSTGRES_PASSWORD=${WEAK}
+    # resolved to "change-me" in the container while this check saw the
+    # literal "${WEAK}" and passed it; an `export ` prefix hid the key
+    # entirely; and an inline " # comment" stayed glued to the value.
+    # Compose's rules, mirrored here:
+    #   - an optional leading `export ` is ignored;
+    #   - a single-quoted value is literal (no interpolation) and ends at
+    #     the closing quote; a double-quoted value ends at its closing
+    #     quote but IS interpolated; anything after the closing quote is
+    #     ignored;
+    #   - an unquoted value ends at the first " #" (inline comment) and IS
+    #     interpolated ("pa$word" becomes "pa").
     values: dict[str, str] = {}
+    interpolated: set[str] = set()
     for raw_line in path.read_text().splitlines():
         line = raw_line.strip()
+        if line.startswith("export "):
+            line = line[len("export ") :].lstrip()
         if not line or line.startswith("#") or "=" not in line:
             continue
         key, _, value = line.partition("=")
         key = key.strip()
         value = value.strip()
-        # .env values are not shell-quoted by this project's own
-        # .env.example (confirmed by reading it directly) -- a leading/
-        # trailing matched quote pair is stripped the same way Docker
-        # Compose's own --env-file parser does, so a quoted placeholder
-        # is still recognized as the same placeholder.
-        if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
-            value = value[1:-1]
+        quote = value[:1]
+        closing = value.find(quote, 1) if quote in ("'", '"') else -1
+        if closing != -1:
+            value = value[1:closing]
+            may_interpolate = quote == '"'
+        else:
+            value = re.split(r"\s#", value, maxsplit=1)[0].rstrip()
+            may_interpolate = True
+        if may_interpolate and "$" in value:
+            interpolated.add(key)
+        else:
+            interpolated.discard(key)
         values[key] = value
-    return values
+    return values, interpolated
 
 
 def main(argv: list[str]) -> int:
@@ -58,7 +87,24 @@ def main(argv: list[str]) -> int:
         print(f"FAIL: {env_path} not found", file=sys.stderr)
         return 1
 
-    raw = parse_env_file(env_path)
+    raw, interpolated = parse_env_file(env_path)
+
+    # Fail closed: a secret-class value Compose would interpolate cannot
+    # be verified from the file's text -- the real value is whatever the
+    # "${...}" expands to. A literal "$" inside a real password must be
+    # single-quoted anyway, or Compose would silently mangle it.
+    dynamic = sorted(
+        setting.env_var for setting in ALL_SECRET_ENV_SETTINGS if setting.env_var in interpolated
+    )
+    if dynamic:
+        for name in dynamic:
+            print(
+                f"FAIL: {name} contains a '$' that Docker Compose would interpolate, so "
+                "its real value cannot be checked -- write the literal value, "
+                "single-quoted if it contains '$'",
+                file=sys.stderr,
+            )
+        return 1
 
     missing = [
         setting.env_var

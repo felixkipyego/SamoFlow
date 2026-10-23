@@ -130,3 +130,89 @@ def test_unset_aws_secret_access_key_is_not_required_but_a_placeholder_fails(tmp
     assert result.returncode == 1
     assert "AWS_SECRET_ACCESS_KEY" in result.stderr
 
+
+# --- Adversarial pass (2026-10-18): the .env text must be read the way
+# Docker Compose reads it, or the check verifies a different value than
+# the containers get. Each rule below was confirmed live against `docker
+# compose config` (Compose v5.1.4) before being encoded here.
+
+
+def _append(path: Path, text: str) -> Path:
+    path.write_text(path.read_text() + text)
+    return path
+
+
+def test_interpolated_placeholder_is_refused_not_passed(tmp_path):
+    # Compose resolves POSTGRES_PASSWORD=${WEAK} to "change-me"; the old
+    # raw-text parser saw "${WEAK}" and passed it.
+    path = _append(_write_env(tmp_path), "WEAK=change-me\nPOSTGRES_PASSWORD=${WEAK}\n")
+    result = _run(path)
+    assert result.returncode == 1
+    assert "POSTGRES_PASSWORD contains a '$'" in result.stderr
+    assert "change-me" not in result.stderr
+
+
+@pytest.mark.parametrize("line", ['POSTGRES_PASSWORD="${WEAK}"', "POSTGRES_PASSWORD=pa$word"])
+def test_double_quoted_or_bare_dollar_in_a_secret_fails_closed(tmp_path, line):
+    result = _run(_append(_write_env(tmp_path), f"{line}\n"))
+    assert result.returncode == 1
+    assert "POSTGRES_PASSWORD contains a '$'" in result.stderr
+
+
+def test_single_quoted_dollar_is_literal_and_accepted(tmp_path):
+    # Compose never interpolates inside single quotes.
+    result = _run(_append(_write_env(tmp_path), "POSTGRES_PASSWORD='bootstrap-pw-with-$-sign'\n"))
+    assert result.returncode == 0, result.stderr
+
+
+def test_dollar_in_a_non_secret_variable_is_not_this_checks_concern(tmp_path):
+    result = _run(_append(_write_env(tmp_path), "MONITORING_DISK_PATH=${HOME}\n"))
+    assert result.returncode == 0, result.stderr
+
+
+def test_export_prefix_does_not_hide_a_placeholder(tmp_path):
+    # Compose accepts `export KEY=value`; the old parser read the key as
+    # "export AWS_SECRET_ACCESS_KEY" and so never checked this optional one.
+    path = _append(
+        _write_env(tmp_path, AWS_SECRET_ACCESS_KEY=None), "export AWS_SECRET_ACCESS_KEY=change-me\n"
+    )
+    result = _run(path)
+    assert result.returncode == 1
+    assert "AWS_SECRET_ACCESS_KEY is set to a known placeholder" in result.stderr
+
+
+def test_duplicate_key_last_one_wins_like_compose(tmp_path):
+    path = _append(_write_env(tmp_path), "POSTGRES_PASSWORD=change-me\n")
+    result = _run(path)
+    assert result.returncode == 1
+    assert "POSTGRES_PASSWORD is set to a known placeholder" in result.stderr
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        f"POSTGRES_OWNER_PASSWORD={_OWNER_PASSWORD} # rotated 2026-10",
+        f'POSTGRES_OWNER_PASSWORD="{_OWNER_PASSWORD}" # rotated 2026-10',
+        f"POSTGRES_OWNER_PASSWORD='{_OWNER_PASSWORD}'   # rotated",
+    ],
+)
+def test_inline_comment_is_not_part_of_the_value(tmp_path, line):
+    # Compose strips " # ..." (and anything after a closing quote), so the
+    # bare password still matches the DSN's.
+    result = _run(_append(_write_env(tmp_path), f"{line}\n"))
+    assert result.returncode == 0, result.stderr
+
+
+def test_quoted_placeholder_with_trailing_comment_is_still_caught(tmp_path):
+    # The old parser only unquoted a value whose LAST char was the quote,
+    # so '"change-me" # x' kept its leading quote and dodged the prefix check.
+    result = _run(_append(_write_env(tmp_path), 'POSTGRES_PASSWORD="change-me" # x\n'))
+    assert result.returncode == 1
+    assert "POSTGRES_PASSWORD is set to a known placeholder" in result.stderr
+
+
+def test_percent_encoded_placeholder_inside_a_dsn_is_caught(tmp_path):
+    dsn = "postgresql+psycopg://widgetplatform_app:change%2Dme@postgres:5432/widgetplatform"
+    result = _run(_write_env(tmp_path, DATABASE_URL=dsn))
+    assert result.returncode == 1
+    assert "DATABASE_URL is set to a known placeholder" in result.stderr
