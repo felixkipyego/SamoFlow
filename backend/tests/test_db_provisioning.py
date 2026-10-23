@@ -7,9 +7,12 @@
 # means "never connected". The real provisioning run against a live
 # Postgres is covered by the test-db stack's own provision-roles-test
 # service and deploy/smoke-image.sh.
+import psycopg
 import pytest
+from psycopg import sql
 
 from app import db_provisioning
+from tests.conftest import require_test_database
 
 _REALISTIC_ENV = {
     "PGHOST": "postgres",
@@ -121,3 +124,44 @@ def test_app_envs_match_settings_literal():
 
     assert db_provisioning.APP_ENVS == typing.get_args(Settings.model_fields["app_env"].annotation)
 
+
+def test_safe_error_message_never_echoes_a_password_from_statement_text():
+    # Live, against the real test-db: a positioned error on an ALTER ROLE
+    # ... PASSWORD '<literal>' statement. str(exc) carries the password in
+    # libpq's "LINE 1:" context (asserted, so this test proves the hazard
+    # is real, not hypothetical); safe_error_message() must not.
+    url = require_test_database()
+    marker = "provisioning-marker-pw-never-printed"  # noqa: S105
+    conninfo = url.replace("postgresql+psycopg://", "postgresql://", 1)
+    with psycopg.connect(conninfo, autocommit=True) as conn:
+        with pytest.raises(psycopg.Error) as exc:
+            conn.execute(
+                sql.SQL("ALTER ROLE {} WITH LOGIN PASSWORD {} NOT_A_ROLE_OPTION").format(
+                    sql.Identifier(db_provisioning.OWNER_ROLE), sql.Literal(marker)
+                )
+            )
+    assert marker in str(exc.value)
+    message = db_provisioning.safe_error_message(exc.value)
+    assert marker not in message
+    assert "not_a_role_option" in message
+
+
+def test_main_prints_the_safe_message_for_a_database_error(monkeypatch, capsys, provision_calls):
+    class _FakeDiag:
+        message_primary = "role option rejected"
+
+    class _FakePgError(psycopg.Error):
+        @property
+        def diag(self):
+            return _FakeDiag()
+
+    def _raise(**kwargs):
+        raise _FakePgError("syntax error\nLINE 1: ALTER ROLE x PASSWORD 'leaked-value'")
+
+    monkeypatch.setattr(db_provisioning, "provision", _raise)
+    _set_env(monkeypatch, APP_ENV="development")
+    with pytest.raises(SystemExit):
+        db_provisioning.main()
+    err = capsys.readouterr().err
+    assert "role option rejected" in err
+    assert "leaked-value" not in err

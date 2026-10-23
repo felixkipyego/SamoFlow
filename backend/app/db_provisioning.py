@@ -365,12 +365,27 @@ def main() -> None:
             app_password=app_password,
         )
     except (RuntimeError, psycopg.Error) as exc:
-        # A clean one-line message, no traceback -- every value interpolated
-        # above is a role/variable NAME, never a password (passwords are
-        # always passed as bind parameters, never string-formatted into a
-        # message), so printing str(exc) directly is safe.
-        print(str(exc), file=sys.stderr)
+        # A clean one-line message, no traceback. Every RuntimeError above
+        # names only roles/variables, never a value.
+        print(safe_error_message(exc), file=sys.stderr)
         sys.exit(1)
+
+
+def safe_error_message(exc: Exception) -> str:
+    # [SECURITY] L2 follow-up adversarial pass (2026-10-18): str() of a
+    # psycopg.Error is NOT safe here, contrary to this handler's earlier
+    # comment -- confirmed live against postgres:18.2: for any error with
+    # a statement position, str(exc) carries libpq's "LINE 1: ..." context,
+    # which echoes the statement text, and CREATE/ALTER ROLE's PASSWORD is
+    # quoted INTO that text (sql.Literal, not a bind parameter -- see
+    # _create_or_update_role()). The server's primary message never
+    # carries statement text. A connection-level failure has no server
+    # diagnostics; its str() is libpq's connection message, which names
+    # host/user but never the password (confirmed live in L1 PART B).
+    if isinstance(exc, psycopg.Error):
+        return exc.diag.message_primary or str(exc)
+    return str(exc)
+
 
 if __name__ == "__main__":
     main()
