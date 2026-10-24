@@ -216,3 +216,35 @@ def test_percent_encoded_placeholder_inside_a_dsn_is_caught(tmp_path):
     result = _run(_write_env(tmp_path, DATABASE_URL=dsn))
     assert result.returncode == 1
     assert "DATABASE_URL is set to a known placeholder" in result.stderr
+
+
+# --- [SECURITY] 2026-10-24 (Felix-approved, D-db-password-min-length) ---
+
+
+def _with_db_password(env_var: str, password: str) -> dict[str, str]:
+    # Keep the OWNER credential's two copies consistent, so ONLY the length
+    # rule is under test.
+    if env_var == "POSTGRES_PASSWORD":
+        return {"POSTGRES_PASSWORD": password}
+    if env_var == "DATABASE_URL":
+        return {
+            "DATABASE_URL": f"postgresql+psycopg://widgetplatform_app:{password}@postgres:5432/widgetplatform"
+        }
+    return {
+        "POSTGRES_OWNER_PASSWORD": password,
+        "DATABASE_URL_MIGRATE": (
+            f"postgresql+psycopg://widgetplatform_owner:{password}@postgres:5432/widgetplatform"
+        ),
+    }
+
+
+@pytest.mark.parametrize(
+    "env_var", ["POSTGRES_PASSWORD", "POSTGRES_OWNER_PASSWORD", "DATABASE_URL"]
+)
+def test_preflight_rejects_a_15_character_db_password_and_accepts_16(tmp_path, env_var):
+    short, ok = "abcdefghijklmn5", "abcdefghijklmno6"
+    result = _run(_write_env(tmp_path, **_with_db_password(env_var, short)))
+    assert result.returncode == 1
+    assert f"{env_var} is shorter than its required minimum (16 characters)" in result.stderr
+    assert short not in result.stderr + result.stdout
+    assert _run(_write_env(tmp_path, **_with_db_password(env_var, ok))).returncode == 0

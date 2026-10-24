@@ -286,7 +286,9 @@ def minimal_subprocess_env() -> dict[str, str]:
 # addresses, to prove /health never contacts anything).
 VALID_ENV = {
     "APP_ENV": "development",
-    "DATABASE_URL": "postgresql+psycopg://user:pw@localhost:5432/widgetplatform",
+    # 2026-10-24 (D-db-password-min-length): >= 16 characters, so production-
+    # mode tests built on VALID_ENV pass the database-password minimum.
+    "DATABASE_URL": "postgresql+psycopg://user:valid-env-db-password@localhost:5432/widgetplatform",
     # [SECURITY] L2 follow-up (advisor review, 2026-10-18): deliberately
     # NOT included -- database_url_migrate is Optional on Settings
     # (app/config.py), and api/worker-style code (what the vast majority
@@ -345,8 +347,9 @@ TEST_PASSWORD = "sup3r-secret-pw"  # noqa: S105 (test fixture value, not a real 
 # -- never a real secret, matching VALID_ENV's own "chosen only to be
 # valid, not to resemble anything real" precedent, just avoiding the 4
 # prefixes this gate checks for. Deliberately does NOT include
-# DATABASE_URL: every VALID_ENV variant's own password ("pw") is already
-# not weak-prefixed, so overriding it here would only risk silently
+# DATABASE_URL: every VALID_ENV variant's own password ("valid-env-db-
+# password", 21 characters since 2026-10-24) is already not weak-prefixed
+# and meets the 16-character minimum, so overriding it here would only risk silently
 # replacing a test's own deliberately-chosen host (e.g. test_main.py's
 # own TEST-NET-3 address, proving /health never contacts anything) for no
 # real benefit -- a test that specifically needs a weak DATABASE_URL

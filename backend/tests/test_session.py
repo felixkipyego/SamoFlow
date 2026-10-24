@@ -35,7 +35,7 @@ DISALLOWED_ORIGIN = "https://not-allowed.example"
 # Unroutable (RFC 5737 TEST-NET-3): proves a code path never actually
 # attempts a database connection, the same way test_main.py's own /health
 # tests prove it never contacts Postgres or Qdrant.
-_UNROUTABLE_DATABASE_URL = "postgresql+psycopg://user:pw@203.0.113.1:5432/widgetplatform"
+_UNROUTABLE_DATABASE_URL = "postgresql+psycopg://user:valid-env-db-password@203.0.113.1:5432/widgetplatform"
 
 
 def _normalized(response):

@@ -158,7 +158,7 @@ def test_require_api_host_accepts_the_configured_value(monkeypatch):
 _ROUTE_FAMILY_ENV = {
     **VALID_ENV,
     "APP_ENV": "production",
-    "DATABASE_URL": "postgresql+psycopg://user:pw@127.0.0.1:1/widgetplatform",
+    "DATABASE_URL": "postgresql+psycopg://user:valid-env-db-password@127.0.0.1:1/widgetplatform",
     "QDRANT_API_KEY": "zQ7mK2pR9xLaUeVbNcOd",  # noqa: S105 (realistic-looking, not a real secret)
     "QDRANT_READ_ONLY_API_KEY": "aB3dE6fG9hJkLmNoPqRs",  # noqa: S105
     "JWT_SIGNING_KEY": "zQ7mK2pR9xLaUeVbNcOdTfGhIjKlMnOp",  # noqa: S105

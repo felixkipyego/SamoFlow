@@ -60,7 +60,7 @@ from tests.conftest import (
 # routable. Used here to prove /health answers without contacting anything.
 VALID_ENV = {
     "APP_ENV": "development",
-    "DATABASE_URL": "postgresql+psycopg://user:pw@203.0.113.1:5432/widgetplatform",
+    "DATABASE_URL": "postgresql+psycopg://user:valid-env-db-password@203.0.113.1:5432/widgetplatform",
     # [SECURITY] L2 follow-up (advisor review, 2026-10-18): deliberately
     # NOT included -- database_url_migrate is Optional on Settings
     # (app/config.py); app/main.py's own create_app() never calls

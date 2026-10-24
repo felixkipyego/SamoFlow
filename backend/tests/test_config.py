@@ -541,8 +541,8 @@ def test_production_rejects_every_known_weak_value_individually(monkeypatch):
     # under APP_ENV=production, confirmed one at a time so a future field
     # added to SECRET_CLASS_SETTINGS without real production-gate coverage
     # cannot hide behind the others already failing.
-    # DATABASE_URL excluded: it is a DSN whose VALID_ENV password ("pw") is
-    # not itself weak-prefixed -- covered separately by
+    # DATABASE_URL excluded: it is a DSN whose VALID_ENV password
+    # ("valid-env-db-password") is not itself weak-prefixed -- covered separately by
     # test_production_rejects_a_weak_database_url_password below.
     weak_env_vars = [
         s.env_var for s in SECRET_CLASS_SETTINGS if not s.optional and not s.is_dsn
@@ -718,3 +718,35 @@ def test_trusted_proxy_hostname_is_configurable(monkeypatch):
     set_valid_env(monkeypatch, VALID_ENV, TRUSTED_PROXY_HOSTNAME="a-different-proxy")
     settings = Settings()
     assert settings.trusted_proxy_hostname == "a-different-proxy"
+
+
+# --- [SECURITY] 2026-10-24 (Felix-approved, D-db-password-min-length) ---
+# Settings' own production gate reads the same table, so DATABASE_URL and
+# DATABASE_URL_MIGRATE get the 16-character minimum for api/worker/migrate.
+
+
+@pytest.mark.parametrize("env_var", ["DATABASE_URL", "DATABASE_URL_MIGRATE"])
+def test_production_settings_reject_a_15_character_db_password_and_accept_16(monkeypatch, env_var):
+    def dsn(pw):
+        return f"postgresql+psycopg://some_role:{pw}@localhost:5432/widgetplatform"
+
+    set_valid_env(
+        monkeypatch,
+        VALID_ENV,
+        APP_ENV="production",
+        **{env_var: dsn("abcdefghijklmn5")},
+        **PRODUCTION_REALISTIC_SECRET_OVERRIDES,
+    )
+    with pytest.raises(ValidationError) as exc:
+        Settings()
+    assert f"{env_var} is shorter than its required minimum (16 characters)" in str(exc.value)
+    assert "abcdefghijklmn5" not in str(exc.value)
+
+    set_valid_env(
+        monkeypatch,
+        VALID_ENV,
+        APP_ENV="production",
+        **{env_var: dsn("abcdefghijklmno6")},
+        **PRODUCTION_REALISTIC_SECRET_OVERRIDES,
+    )
+    assert Settings().app_env == "production"

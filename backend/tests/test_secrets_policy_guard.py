@@ -123,8 +123,9 @@ def test_check_raw_secret_values_catches_a_weak_dsn_password_even_though_the_who
     violations = check_raw_secret_values(
         {"DATABASE_URL": "postgresql+psycopg://user:change-me@host:5432/db"}
     )
-    assert len(violations) == 1
-    assert "DATABASE_URL" in violations[0]
+    placeholder = [v for v in violations if "known placeholder" in v]
+    assert len(placeholder) == 1
+    assert "DATABASE_URL" in placeholder[0]
 
 
 def test_check_raw_secret_values_ignores_none_optional_values():
@@ -282,9 +283,13 @@ def test_every_deploy_secret_is_declared_in_env_example_and_is_not_a_settings_fi
 )
 def test_postgres_passwords_reject_placeholder_and_weak_values(env_var, weak_value):
     violations = check_raw_secret_values({env_var: weak_value})
-    assert len(violations) == 1
-    assert env_var in violations[0]
-    assert weak_value.strip() not in violations[0]
+    # A short placeholder also trips the 16-character minimum
+    # (D-db-password-min-length) -- the placeholder finding itself must be
+    # there exactly once either way.
+    placeholder = [v for v in violations if "known placeholder" in v]
+    assert len(placeholder) == 1
+    assert all(env_var in v for v in violations)
+    assert all(weak_value.strip() not in v for v in violations)
 
 
 @pytest.mark.parametrize("env_var", ["POSTGRES_PASSWORD", "POSTGRES_OWNER_PASSWORD"])
@@ -383,3 +388,60 @@ def test_credential_consistency_is_case_sensitive():
 )
 def test_credential_consistency_leaves_missing_values_to_the_presence_check(raw_values):
     assert check_credential_consistency(raw_values) == []
+
+
+# --- [SECURITY] 2026-10-24 (Felix-approved, D-db-password-min-length) ---
+# All four database passwords need >= 16 characters; 15 is rejected, 16
+# passes, and the message names the variable, never the value. For a DSN
+# the length is the DECODED embedded password's, not the whole string's.
+
+from app.secrets_policy import DB_PASSWORD_MIN_LENGTH  # noqa: E402
+
+_DB_PASSWORD_VARS = (
+    "POSTGRES_PASSWORD",
+    "POSTGRES_OWNER_PASSWORD",
+    "DATABASE_URL",
+    "DATABASE_URL_MIGRATE",
+)
+
+
+def _as_value(env_var: str, password: str) -> str:
+    if env_var.startswith("DATABASE_URL"):
+        return f"postgresql+psycopg://some_role:{password}@postgres:5432/widgetplatform"
+    return password
+
+
+def test_db_password_minimum_is_16():
+    assert DB_PASSWORD_MIN_LENGTH == 16
+    by_var = {s.env_var: s.min_length for s in ALL_SECRET_ENV_SETTINGS}
+    assert all(by_var[v] == 16 for v in _DB_PASSWORD_VARS)
+
+
+@pytest.mark.parametrize("env_var", _DB_PASSWORD_VARS)
+def test_a_15_character_db_password_is_rejected_naming_only_the_variable(env_var):
+    candidate = "abcdefghijklmn5"  # 15 characters, not placeholder-prefixed
+    assert len(candidate) == 15
+    violations = check_raw_secret_values({env_var: _as_value(env_var, candidate)})
+    assert violations == [
+        f"{env_var} is shorter than its required minimum (16 characters)."
+    ]
+    assert candidate not in violations[0]
+
+
+@pytest.mark.parametrize("env_var", _DB_PASSWORD_VARS)
+def test_a_16_character_db_password_passes(env_var):
+    candidate = "abcdefghijklmno6"  # 16 characters
+    assert len(candidate) == 16
+    assert check_raw_secret_values({env_var: _as_value(env_var, candidate)}) == []
+
+
+@pytest.mark.parametrize("env_var", ["DATABASE_URL", "DATABASE_URL_MIGRATE"])
+def test_dsn_password_length_is_measured_after_percent_decoding(env_var):
+    # "%40" is ONE character ("@") once decoded: 13 + 1 + 1 = 15 decoded
+    # characters, even though the raw text is 17 long -- must be rejected.
+    raw = "abcdefghijklm%40z"
+    assert len(raw) == 17
+    violations = check_raw_secret_values({env_var: _as_value(env_var, raw)})
+    assert violations and "shorter than its required minimum" in violations[0]
+    # 16 decoded characters passes.
+    assert check_raw_secret_values({env_var: _as_value(env_var, "abcdefghijklmn%40z")}) == []

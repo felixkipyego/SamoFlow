@@ -32,6 +32,10 @@ from urllib.parse import unquote, urlsplit
 
 WEAK_VALUE_PREFIXES: tuple[str, ...] = ("change-me", "test-", "smoke-", "placeholder-")
 
+# [SECURITY] 2026-10-24 (Felix-approved, D-db-password-min-length): the
+# minimum length for all four database passwords (see their entries below).
+DB_PASSWORD_MIN_LENGTH = 16
+
 
 @dataclass(frozen=True)
 class SecretClassSetting:
@@ -75,7 +79,15 @@ class SecretClassSetting:
 # policy_guard.py fails if a new one is ever added here without a matching
 # SecretClassSetting entry.
 SECRET_CLASS_SETTINGS: tuple[SecretClassSetting, ...] = (
-    SecretClassSetting("database_url", "DATABASE_URL", None, optional=False, is_dsn=True),
+    # [SECURITY] 2026-10-24 (Felix-approved, D-db-password-min-length): the
+    # four database passwords -- this DSN's, DATABASE_URL_MIGRATE's,
+    # POSTGRES_PASSWORD and POSTGRES_OWNER_PASSWORD (DEPLOY_SECRET_SETTINGS
+    # below) -- must be at least DB_PASSWORD_MIN_LENGTH characters. For a
+    # DSN the check runs on the decoded embedded password, never the whole
+    # string.
+    SecretClassSetting(
+        "database_url", "DATABASE_URL", DB_PASSWORD_MIN_LENGTH, optional=False, is_dsn=True
+    ),
     # [SECURITY] L2 (Phase 7 role split, 2026-10-18): the OWNER/MIGRATOR
     # role's own DSN (app/config.py's database_url_migrate) -- covers that
     # role's own password the identical way DATABASE_URL above already
@@ -86,7 +98,11 @@ SECRET_CLASS_SETTINGS: tuple[SecretClassSetting, ...] = (
     # without it -- see this dataclass's own `optional` field comment for
     # why those are different questions.
     SecretClassSetting(
-        "database_url_migrate", "DATABASE_URL_MIGRATE", None, optional=False, is_dsn=True
+        "database_url_migrate",
+        "DATABASE_URL_MIGRATE",
+        DB_PASSWORD_MIN_LENGTH,
+        optional=False,
+        is_dsn=True,
     ),
     SecretClassSetting("qdrant_api_key", "QDRANT_API_KEY", None, optional=False),
     SecretClassSetting(
@@ -113,18 +129,18 @@ SECRET_CLASS_SETTINGS: tuple[SecretClassSetting, ...] = (
 # (backend/tests/test_secrets_policy_guard.py) could never see them, and
 # after the role split POSTGRES_PASSWORD no longer duplicates any checked
 # DSN: a production .env could carry the bootstrap superuser's own
-# "change-me" and pass preflight.sh. Same weak-value rules, same "no
-# minimum length invented here" stance as the DSN passwords above.
+# "change-me" and pass preflight.sh. Same weak-value rules, and (since
+# 2026-10-24) the same DB_PASSWORD_MIN_LENGTH as the DSN passwords above.
 # test_secrets_policy_guard.py's .env.example-driven guard now fails if a
 # secret-looking .env.example variable is classified in neither tuple.
 DEPLOY_SECRET_SETTINGS: tuple[SecretClassSetting, ...] = (
     # The BOOTSTRAP superuser (deploy/docker-compose.yml's postgres
     # service, and app/db_provisioning.py's own connection).
-    SecretClassSetting(None, "POSTGRES_PASSWORD", None, optional=False),
+    SecretClassSetting(None, "POSTGRES_PASSWORD", DB_PASSWORD_MIN_LENGTH, optional=False),
     # The OWNER role's bare password, for ops/backup/docker-compose.yml's
     # PGPASSWORD -- must equal DATABASE_URL_MIGRATE's own embedded
     # password (check_credential_consistency() below).
-    SecretClassSetting(None, "POSTGRES_OWNER_PASSWORD", None, optional=False),
+    SecretClassSetting(None, "POSTGRES_OWNER_PASSWORD", DB_PASSWORD_MIN_LENGTH, optional=False),
     # The backup bucket's secret key (ops/backup/docker-compose.yml).
     # optional=True: preflight.sh gates the app deploy, and the backup
     # stack's own `${...:?}` interpolation already refuses to start

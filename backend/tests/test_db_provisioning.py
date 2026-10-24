@@ -165,3 +165,33 @@ def test_main_prints_the_safe_message_for_a_database_error(monkeypatch, capsys, 
     err = capsys.readouterr().err
     assert "role option rejected" in err
     assert "leaked-value" not in err
+
+
+# --- [SECURITY] 2026-10-24 (Felix-approved, D-db-password-min-length) ---
+
+
+@pytest.mark.parametrize(
+    ("env_var", "template"),
+    [
+        ("POSTGRES_PASSWORD", "{pw}"),
+        (
+            "DATABASE_URL_MIGRATE",
+            "postgresql+psycopg://widgetplatform_owner:{pw}@postgres:5432/widgetplatform",
+        ),
+        ("DATABASE_URL", "postgresql+psycopg://widgetplatform_app:{pw}@postgres:5432/widgetplatform"),
+    ],
+)
+def test_production_refuses_a_15_character_password_and_accepts_16(
+    monkeypatch, capsys, provision_calls, env_var, template
+):
+    short, ok = "abcdefghijklmn5", "abcdefghijklmno6"
+    _set_env(monkeypatch, APP_ENV="production", **{env_var: template.format(pw=short)})
+    with pytest.raises(SystemExit):
+        db_provisioning.main()
+    assert provision_calls == []
+    err = capsys.readouterr().err
+    assert f"{env_var} is shorter than its required minimum (16 characters)" in err
+    assert short not in err
+    _set_env(monkeypatch, APP_ENV="production", **{env_var: template.format(pw=ok)})
+    db_provisioning.main()
+    assert len(provision_calls) == 1
