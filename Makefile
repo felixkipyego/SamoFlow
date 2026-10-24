@@ -51,7 +51,7 @@ ACTIONLINT_IMAGE = rhysd/actionlint:1.7.12@sha256:b1934ee5f1c509618f2508e6eb47ee
 
 .DEFAULT_GOAL := help
 
-.PHONY: help env up down down-volumes provision-roles migrate test test-db test-db-down test-qdrant test-qdrant-down test-all lint evals eval eval-answers eval-calibrate install lock lock-upgrade lock-check audit hooks openapi dashboard-install dashboard-lint dashboard-test dashboard-build dashboard-audit dashboard-e2e
+.PHONY: help env up down down-volumes provision-roles migrate db-bootstrap test test-db test-db-down test-qdrant test-qdrant-down test-all lint evals eval eval-answers eval-calibrate install lock lock-upgrade lock-check audit hooks openapi dashboard-install dashboard-lint dashboard-test dashboard-build dashboard-audit dashboard-e2e
 
 help:
 	@echo "make env          create .env from .env.example if it does not exist yet"
@@ -60,6 +60,7 @@ help:
 	@echo "make down-volumes stop and remove containers AND volumes (destroys data)"
 	@echo "make provision-roles  one-time, idempotent: create/update the owner+app Postgres roles"
 	@echo "make migrate      run alembic upgrade head in Docker (run provision-roles first)"
+	@echo "make db-bootstrap fresh volume: start postgres+qdrant, provision-roles, migrate (run before make up)"
 	@echo "make test         run the backend test suite (no database required)"
 	@echo "make test-db      start the disposable test database and wait until ready"
 	@echo "make test-db-down stop and remove the test database"
@@ -115,6 +116,21 @@ provision-roles: env
 # not depend on the caller's working directory or local Python environment.
 migrate: env
 	$(COMPOSE) run --rm migrate
+
+# From-scratch database setup, in the one safe order (2026-10-24, after the
+# L2 PR's dashboard e2e job failed: CI ran `make up` -> `make migrate` with
+# no provision step, so the owner/app roles never existed): postgres and
+# qdrant ONLY, healthy -> provision-roles -> migrate. Run it BEFORE `make up`
+# on a fresh volume, so api/worker never start before their roles exist.
+# provision-roles stays its own explicit target and is never chained inside
+# `migrate` or `up` themselves (the L2 design: it connects as the bootstrap
+# superuser, so it runs only where a from-scratch setup is intended).
+# test_provision_before_migrate_guard.py fails if any workflow or script
+# runs migrate without provisioning first.
+db-bootstrap: env
+	$(COMPOSE) up -d --wait postgres qdrant
+	$(MAKE) provision-roles
+	$(MAKE) migrate
 
 # No database: the Alembic integration test skips itself when
 # TEST_DATABASE_URL is unset (see backend/tests/conftest.py).

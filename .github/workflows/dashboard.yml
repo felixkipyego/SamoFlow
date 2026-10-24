@@ -83,11 +83,17 @@ jobs:
 
       # Real backend, real Postgres/Qdrant -- the authenticated-shell/
       # Dialog half of e2e/csp.spec.ts needs a real login, not a mock.
+      # [SECURITY] L2 (2026-10-24): a fresh volume needs the owner/app roles
+      # BEFORE migrate connects as the owner role and BEFORE api/worker
+      # start as the app role -- db-bootstrap brings up only postgres+qdrant,
+      # then provision-roles, then migrate (Makefile). The previous order
+      # (`make up` -> `make migrate`, no provision step) failed with
+      # "password authentication failed for user widgetplatform_owner".
+      - name: Bootstrap the database (postgres+qdrant, provision roles, migrate)
+        run: make db-bootstrap
+
       - name: Start the backend stack
         run: make up
-
-      - name: Run migrations
-        run: make migrate
 
       # The password is piped over stdin, never a CLI argument (app/
       # dashboard/seed_cli.py's own getpass.getpass() falls back to

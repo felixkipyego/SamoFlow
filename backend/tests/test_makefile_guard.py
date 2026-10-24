@@ -16,6 +16,8 @@ _EXPECTED_TARGETS = {
     "down",
     "down-volumes",
     "migrate",
+    "provision-roles",
+    "db-bootstrap",
     "test",
     "test-db",
     "test-db-down",

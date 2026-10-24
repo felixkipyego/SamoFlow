@@ -582,6 +582,16 @@ either direction.
 
 ## 11. Local demo
 
+**A plain local dev stack from a fresh volume** (not the demo below): run
+`make db-bootstrap` FIRST -- it starts only postgres+qdrant, waits until
+healthy, then `make provision-roles` and `make migrate` -- and only then
+`make up`. `make up` -> `make migrate` on a fresh volume fails with
+"password authentication failed for user widgetplatform_owner": the
+owner/app roles do not exist until provision-roles creates them
+([SECURITY] L2; the exact failure the L2 PR's dashboard e2e CI job hit,
+2026-10-24). `.github/workflows/dashboard.yml` runs the same sequence.
+
+
 `ops/demo/start.sh` brings up a full local stack -- postgres/qdrant/api/
 worker (Docker, its own Compose project `samoflow-demo`, distinct ports
 from any other stack already running), the real dashboard dev server,
