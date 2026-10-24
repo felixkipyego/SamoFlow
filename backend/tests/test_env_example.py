@@ -19,6 +19,17 @@ EXTRA_EXAMPLE_KEYS: tuple[str, ...] = (
     "POSTGRES_USER",
     "POSTGRES_PASSWORD",
     "POSTGRES_DB",
+    # [SECURITY] L2 follow-up (advisor review, 2026-10-18): Settings.
+    # database_url_migrate is now Optional (SecretStr | None, no
+    # unconditional default REQUIRED everywhere) -- api/worker's own
+    # Settings() construction must succeed without it (deploy/docker-
+    # compose.yml's x-app-env no longer carries it at all), so
+    # REQUIRED_VARS (derived from field.is_required()) no longer
+    # includes it. .env.example still declares a REAL value here (never
+    # left empty): migrate/provision-roles genuinely need one, and
+    # ops/deploy/check_env_secrets.py's own SECRET_CLASS_SETTINGS entry
+    # (app/secrets_policy.py) still enforces that on the real server.
+    "DATABASE_URL_MIGRATE",
     "JWT_SIGNING_KEY_PREVIOUS",
     "ANTHROPIC_API_KEY",
     # Step 4.5: PHOENIX_COLLECTOR_ENDPOINT is the identical shape --
@@ -96,6 +107,14 @@ EXTRA_EXAMPLE_KEYS: tuple[str, ...] = (
 # "this duplicates a Settings field under a new name" mistake. See
 # docs/deploy/RUNBOOK.md for what each one configures.
 OPS_ONLY_EXAMPLE_KEYS: tuple[str, ...] = (
+    # [SECURITY] L2 (Phase 7 role split, 2026-10-18): bare OWNER-role
+    # credentials -- no Settings field reads these directly (the backend
+    # reads DATABASE_URL_MIGRATE, a real Settings field, instead); only
+    # ops/backup/docker-compose.yml's PGUSER/PGPASSWORD need the bare
+    # username/password, which a DSN cannot supply to plain YAML
+    # interpolation.
+    "POSTGRES_OWNER_USER",
+    "POSTGRES_OWNER_PASSWORD",
     "WIDGET_HOSTNAME",
     "CADDY_ACME_EMAIL",
     "DASHBOARD_DIST_DIR",

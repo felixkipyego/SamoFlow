@@ -47,6 +47,23 @@ case "$mode" in
         python -m app.agent.checkpointer
         exec python -m app.qdrant
         ;;
+    provision-roles)
+        # [SECURITY] L2 (Phase 7 role split, 2026-10-18): one-time,
+        # idempotent -- creates/updates the OWNER and APP roles, grants
+        # them correctly, and (on an existing volume) reassigns ownership
+        # of every object the old single shared role created. Connects as
+        # BOOTSTRAP (the real Postgres superuser) -- never exec'd (this is
+        # not a long-running process; app/db_provisioning.py's own main()
+        # exits on its own), and never wired into the "migrate" case
+        # above: BOOTSTRAP credentials must never be part of api/worker/
+        # migrate's own always-on runtime environment.
+        #   docker compose --env-file .env -f deploy/docker-compose.yml \
+        #     run --rm provision-roles
+        # See docs/deploy/RUNBOOK.md for the fresh-volume and existing-
+        # volume walkthroughs.
+        shift
+        exec python -m app.db_provisioning "$@"
+        ;;
     seed-owner)
         # Step 6.1: one-off operator command, never part of `up` --
         #   docker compose --env-file .env -f deploy/docker-compose.yml \
@@ -68,7 +85,7 @@ case "$mode" in
         exec python -m app.dashboard.admin_cli "$@"
         ;;
     *)
-        echo "Usage: entrypoint.sh {api|worker|migrate|seed-owner|admin}" >&2
+        echo "Usage: entrypoint.sh {api|worker|migrate|provision-roles|seed-owner|admin}" >&2
         exit 2
         ;;
 esac

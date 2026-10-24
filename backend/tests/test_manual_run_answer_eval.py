@@ -28,16 +28,22 @@ import uuid
 
 import pytest
 
+# [SECURITY] L2 (Phase 7 role split, 2026-10-18): TEST_DATABASE_URL_APP/
+# DATABASE_URL_MIGRATE added -- _point_env_at_test_services() now
+# requires BOTH TEST_DATABASE_URL (owner) and TEST_DATABASE_URL_APP (app)
+# present, and copies them into DATABASE_URL_MIGRATE/DATABASE_URL
+# respectively.
 _ENV_KEYS_TOUCHED_BY_IMPORT = (
     "TEST_QDRANT_URL", "TEST_QDRANT_API_KEY", "TEST_QDRANT_READ_ONLY_API_KEY",
-    "TEST_DATABASE_URL", "QDRANT_URL", "QDRANT_API_KEY", "QDRANT_READ_ONLY_API_KEY",
-    "DATABASE_URL",
+    "TEST_DATABASE_URL", "TEST_DATABASE_URL_APP", "QDRANT_URL", "QDRANT_API_KEY",
+    "QDRANT_READ_ONLY_API_KEY", "DATABASE_URL", "DATABASE_URL_MIGRATE",
 )
 _original_env = {key: os.environ.get(key) for key in _ENV_KEYS_TOUCHED_BY_IMPORT}
 os.environ["TEST_QDRANT_URL"] = "http://127.0.0.1:1"
 os.environ["TEST_QDRANT_API_KEY"] = "fake-key"
 os.environ["TEST_QDRANT_READ_ONLY_API_KEY"] = "fake-readonly-key"
 os.environ["TEST_DATABASE_URL"] = "postgresql+psycopg://u:p@127.0.0.1:1/db"
+os.environ["TEST_DATABASE_URL_APP"] = "postgresql+psycopg://u:p@127.0.0.1:1/db"
 
 from langchain_core.messages import AIMessage, HumanMessage  # noqa: E402
 

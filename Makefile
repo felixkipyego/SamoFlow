@@ -51,14 +51,16 @@ ACTIONLINT_IMAGE = rhysd/actionlint:1.7.12@sha256:b1934ee5f1c509618f2508e6eb47ee
 
 .DEFAULT_GOAL := help
 
-.PHONY: help env up down down-volumes migrate test test-db test-db-down test-qdrant test-qdrant-down test-all lint evals eval eval-answers eval-calibrate install lock lock-upgrade lock-check audit hooks openapi dashboard-install dashboard-lint dashboard-test dashboard-build dashboard-audit dashboard-e2e
+.PHONY: help env up down down-volumes provision-roles migrate db-bootstrap test test-db test-db-down test-qdrant test-qdrant-down test-all lint evals eval eval-answers eval-calibrate install lock lock-upgrade lock-check audit hooks openapi dashboard-install dashboard-lint dashboard-test dashboard-build dashboard-audit dashboard-e2e
 
 help:
 	@echo "make env          create .env from .env.example if it does not exist yet"
 	@echo "make up           build and start postgres, qdrant, api, worker"
 	@echo "make down         stop and remove containers (volumes are kept)"
 	@echo "make down-volumes stop and remove containers AND volumes (destroys data)"
-	@echo "make migrate      run alembic upgrade head in Docker"
+	@echo "make provision-roles  one-time, idempotent: create/update the owner+app Postgres roles"
+	@echo "make migrate      run alembic upgrade head in Docker (run provision-roles first)"
+	@echo "make db-bootstrap fresh volume: start postgres+qdrant, provision-roles, migrate (run before make up)"
 	@echo "make test         run the backend test suite (no database required)"
 	@echo "make test-db      start the disposable test database and wait until ready"
 	@echo "make test-db-down stop and remove the test database"
@@ -102,10 +104,33 @@ down-volumes:
 	@echo "WARNING: this stops the stack AND deletes the postgres/qdrant data volumes."
 	$(COMPOSE) down -v
 
+# [SECURITY] L2 (Phase 7 role split, 2026-10-18): one-time, idempotent --
+# safe to rerun against a fresh volume (the real server, on first setup)
+# or an existing one (Felix's local demo/dev data, with zero data loss).
+# Must run at least once before `make migrate` ever connects as the owner
+# role; see docs/deploy/RUNBOOK.md for the rollback path.
+provision-roles: env
+	$(COMPOSE) run --rm provision-roles
+
 # Runs in Docker (not "cd backend && alembic upgrade head"), so this does
 # not depend on the caller's working directory or local Python environment.
 migrate: env
 	$(COMPOSE) run --rm migrate
+
+# From-scratch database setup, in the one safe order (2026-10-24, after the
+# L2 PR's dashboard e2e job failed: CI ran `make up` -> `make migrate` with
+# no provision step, so the owner/app roles never existed): postgres and
+# qdrant ONLY, healthy -> provision-roles -> migrate. Run it BEFORE `make up`
+# on a fresh volume, so api/worker never start before their roles exist.
+# provision-roles stays its own explicit target and is never chained inside
+# `migrate` or `up` themselves (the L2 design: it connects as the bootstrap
+# superuser, so it runs only where a from-scratch setup is intended).
+# test_provision_before_migrate_guard.py fails if any workflow or script
+# runs migrate without provisioning first.
+db-bootstrap: env
+	$(COMPOSE) up -d --wait postgres qdrant
+	$(MAKE) provision-roles
+	$(MAKE) migrate
 
 # No database: the Alembic integration test skips itself when
 # TEST_DATABASE_URL is unset (see backend/tests/conftest.py).
@@ -122,6 +147,11 @@ test-db: env
 	  fi; \
 	  sleep 1; \
 	done
+	# [SECURITY] L2 (Phase 7 role split, 2026-10-18): test-db is tmpfs-
+	# backed (fresh on every `up`), so the owner/app roles never survive a
+	# restart -- this must run every time, not just once like the real
+	# postgres service's own provision-roles.
+	$(COMPOSE) --profile test run --rm provision-roles-test
 
 test-db-down:
 	$(COMPOSE) --profile test stop test-db
@@ -153,8 +183,13 @@ test-qdrant-down:
 # follow) instead of relying on make's own error handling for cleanup.
 # TEST_QDRANT_API_KEY/TEST_QDRANT_READ_ONLY_API_KEY match the literal keys
 # test-qdrant sets above.
+# [SECURITY] L2 (Phase 7 role split, 2026-10-18): TEST_DATABASE_URL_APP
+# (the APP role) is new -- reset_test_database()/reset_checkpoint_env()
+# (backend/tests/conftest.py) point application code under test at this
+# one, not TEST_DATABASE_URL, so a missing grant fails here, locally,
+# instead of only in production.
 test-all: test-db test-qdrant
-	@(cd backend && TEST_DATABASE_URL=postgresql+psycopg://widgetplatform:change-me@127.0.0.1:55432/widgetplatform_test TEST_QDRANT_URL=http://127.0.0.1:56333 TEST_QDRANT_API_KEY=test-qdrant-key TEST_QDRANT_READ_ONLY_API_KEY=test-qdrant-readonly-key python -m pytest tests -q); \
+	@(cd backend && TEST_DATABASE_URL=postgresql+psycopg://widgetplatform_owner:change-me-owner@127.0.0.1:55432/widgetplatform_test TEST_DATABASE_URL_APP=postgresql+psycopg://widgetplatform_app:change-me-app@127.0.0.1:55432/widgetplatform_test TEST_QDRANT_URL=http://127.0.0.1:56333 TEST_QDRANT_API_KEY=test-qdrant-key TEST_QDRANT_READ_ONLY_API_KEY=test-qdrant-readonly-key python -m pytest tests -q); \
 	rc=$$?; \
 	$(MAKE) test-db-down; \
 	$(MAKE) test-qdrant-down; \
@@ -191,7 +226,7 @@ eval: test-qdrant
 # production Qdrant/Postgres.
 eval-answers: test-db test-qdrant
 	@(set -a; . ./.env; set +a; \
-	  cd backend && TEST_DATABASE_URL=postgresql+psycopg://widgetplatform:change-me@127.0.0.1:55432/widgetplatform_test TEST_QDRANT_URL=http://127.0.0.1:56333 TEST_QDRANT_API_KEY=test-qdrant-key TEST_QDRANT_READ_ONLY_API_KEY=test-qdrant-readonly-key python scripts/manual_run_answer_eval.py $(ARGS)); \
+	  cd backend && TEST_DATABASE_URL=postgresql+psycopg://widgetplatform_owner:change-me-owner@127.0.0.1:55432/widgetplatform_test TEST_DATABASE_URL_APP=postgresql+psycopg://widgetplatform_app:change-me-app@127.0.0.1:55432/widgetplatform_test TEST_QDRANT_URL=http://127.0.0.1:56333 TEST_QDRANT_API_KEY=test-qdrant-key TEST_QDRANT_READ_ONLY_API_KEY=test-qdrant-readonly-key python scripts/manual_run_answer_eval.py $(ARGS)); \
 	rc=$$?; \
 	$(MAKE) test-db-down; \
 	$(MAKE) test-qdrant-down; \
@@ -267,8 +302,67 @@ lock-check:
 # --require-hashes is already implied by the lockfiles' own --hash entries;
 # kept explicit for readability. Exits non-zero on any finding (pip-audit's
 # default) -- never swallowed here.
+# 2026-10-24 (Felix's decision, D-pillow-audit-ignores): pillow 12.3.0's
+# 41 approved findings, ignored ONE ID AT A TIME -- never package-wide: the
+# 37 pip-audit reported, plus 4 only Grype reports so far (CVE-2026-112394/
+# 112403/112898/112902, D-pillow-grype-unapproved, approved the same day),
+# pre-approved here for when pip-audit's database catches up.
+# pillow 13.0.0 fixes all 41 but cannot be installed: every fastembed
+# release (0.9.0 included) declares pillow<13.0, and pip enforces that at
+# install time. Proven unreachable from tenant input, and kept that way by
+# guard tests: app/ never imports PIL (test_pillow_reachability_guard.py),
+# extract_pdf() works with PIL import-blocked, and the only fastembed model
+# is the text-only SparseTextEmbedding("Qdrant/bm25"). Any NEW pillow
+# finding, or any finding in another package, still fails this target.
+# .grype.yaml carries the identical IDs, scoped to pillow 12.3.0 --
+# test_grype_guard.py fails if the two lists ever differ. Remove both once
+# fastembed allows pillow>=13 (§9 marker; review by 2026-12-31). Any image-
+# decoding feature (OCR, image uploads) is BLOCKED until then.
+PILLOW_AUDIT_IGNORES = \
+	CVE-2026-96636 \
+	CVE-2026-96637 \
+	CVE-2026-96638 \
+	CVE-2026-96639 \
+	CVE-2026-96640 \
+	CVE-2026-96641 \
+	CVE-2026-96642 \
+	CVE-2026-96643 \
+	CVE-2026-96644 \
+	CVE-2026-96778 \
+	CVE-2026-112390 \
+	CVE-2026-112391 \
+	CVE-2026-112392 \
+	CVE-2026-112393 \
+	CVE-2026-112395 \
+	CVE-2026-112396 \
+	CVE-2026-112397 \
+	CVE-2026-112398 \
+	CVE-2026-112399 \
+	CVE-2026-112400 \
+	CVE-2026-112401 \
+	CVE-2026-112402 \
+	CVE-2026-112404 \
+	CVE-2026-112405 \
+	CVE-2026-112406 \
+	CVE-2026-112891 \
+	CVE-2026-112892 \
+	CVE-2026-112893 \
+	CVE-2026-112894 \
+	CVE-2026-112895 \
+	CVE-2026-112896 \
+	CVE-2026-112897 \
+	CVE-2026-112899 \
+	CVE-2026-112900 \
+	CVE-2026-112901 \
+	CVE-2026-114501 \
+	CVE-2026-112394 \
+	CVE-2026-112403 \
+	CVE-2026-112898 \
+	CVE-2026-112902 \
+	GHSA-78g4-xqwv-q3g8
+
 audit:
-	pip-audit --require-hashes -r backend/requirements.lock -r backend/requirements-dev.lock
+	pip-audit --require-hashes $(foreach id,$(PILLOW_AUDIT_IGNORES),--ignore-vuln $(id)) -r backend/requirements.lock -r backend/requirements-dev.lock
 
 # Task 1.1c: a visibility tool, not a gate -- never fails because markers
 # exist (hooks.py's own exit code is 0 unless the scan itself errors, e.g.

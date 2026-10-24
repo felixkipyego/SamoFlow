@@ -275,8 +275,17 @@ async def _connect(user: str, password: str) -> asyncpg.Connection:
 
 
 async def _admin_connection() -> asyncpg.Connection:
-    parts = urlsplit(require_test_database())
-    return await _connect(parts.username, parts.password)
+    # [SECURITY] L2 (Phase 7 role split, 2026-10-18): the BOOTSTRAP role,
+    # not require_test_database()'s own OWNER role -- OWNER is
+    # deliberately NOCREATEROLE (app/db_provisioning.py), but this
+    # fixture's own CREATE ROLE/DROP ROLE calls below need real
+    # CREATEROLE, which only BOOTSTRAP has. Literal, matching deploy/
+    # docker-compose.yml's own test-db service, which hardcodes these
+    # same two values directly (never from .env -- "throwaway, never
+    # real data", that service's own comment) -- host/port/database still
+    # come from require_test_database() itself (_connect()'s own job),
+    # only the role differs.
+    return await _connect("widgetplatform", "change-me")
 
 
 @pytest.fixture

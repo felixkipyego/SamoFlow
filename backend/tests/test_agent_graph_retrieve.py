@@ -173,9 +173,9 @@ async def _fresh_real_graph(monkeypatch):
         QDRANT_API_KEY=qdrant_key,
         QDRANT_READ_ONLY_API_KEY=qdrant_read_only_key,
     )
+    await checkpointer.run_checkpointer_setup()
     await checkpointer.open_checkpointer_pool()
     cp = checkpointer.get_checkpointer()
-    await cp.setup()
     return build_graph(cp)
 
 

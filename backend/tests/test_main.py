@@ -60,7 +60,14 @@ from tests.conftest import (
 # routable. Used here to prove /health answers without contacting anything.
 VALID_ENV = {
     "APP_ENV": "development",
-    "DATABASE_URL": "postgresql+psycopg://user:pw@203.0.113.1:5432/widgetplatform",
+    "DATABASE_URL": "postgresql+psycopg://user:valid-env-db-password@203.0.113.1:5432/widgetplatform",
+    # [SECURITY] L2 follow-up (advisor review, 2026-10-18): deliberately
+    # NOT included -- database_url_migrate is Optional on Settings
+    # (app/config.py); app/main.py's own create_app() never calls
+    # database_url_migrate_str() (only alembic/env.py and app/agent/
+    # checkpointer.py do), so every test in this file must construct
+    # Settings and start the app correctly with this absent entirely --
+    # proven by this file's own tests all still passing without it.
     "QDRANT_URL": "http://203.0.113.1:6333",
     "QDRANT_API_KEY": "test-qdrant-key",  # noqa: S105 (test fixture value, not a real secret)
     "QDRANT_READ_ONLY_API_KEY": "test-qdrant-readonly-key",  # noqa: S105 (test fixture value, not a real secret)

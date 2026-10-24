@@ -4,14 +4,257 @@
 # (auto-detection proved unreliable in a real run; see PROJECT_SPEC.md,
 # Step 1.1.o.f follow-up).
 #
-# No rule currently needed. The one rule this file used to carry
-# (CVE-2026-82049 against python 3.12.14) was removed at the out-of-band
-# base-image maintenance that bumped PYTHON_IMAGE to python:3.12.15-slim-
-# trixie (see PROJECT_SPEC.md's out-of-band maintenance entry, 2026-10-10):
-# a fresh scan against 3.12.15 no longer reports that CVE at all (fixed
-# upstream, not merely re-scoped), and the rule's own `version: 3.12.14`
-# field would no longer match the new tag anyway. Add a new rule here,
-# fully scoped (vulnerability/package.name/package.version/package.type,
-# `test_grype_guard.py` enforces this), only once a real, investigated,
-# currently-unfixable finding needs one again -- never speculatively.
-ignore: []
+# 2026-10-24 (Felix's decision, D-pillow-audit-ignores): pillow 12.3.0's
+# findings that correspond to the APPROVED pip-audit IDs in the Makefile's
+# PILLOW_AUDIT_IGNORES -- see that list's own comment for why pillow 13
+# cannot be installed and why pillow is unreachable from tenant input.
+# Every rule is scoped to vulnerability + package name + version 12.3.0 +
+# type python, so it stops applying the moment pillow's version changes
+# (confirmed live: a rule scoped to another version suppresses nothing).
+# Grype keys these advisories by GHSA ID and, confirmed live on grype
+# v0.119.0, does NOT match a rule written with the related CVE ID -- so
+# each rule names the GHSA ID, and `reason` names the approved CVE it maps
+# to. test_grype_guard.py fails if any rule's CVE is not in the Makefile
+# list, or if the two lists drift.
+#
+# 39 rules for 41 approved IDs: two (CVE-2026-112398, CVE-2026-114501) are
+# not in Grype's database at all, so there is nothing to ignore here. The
+# last 4 rules are the advisories only Grype reported at first, approved by
+# Felix on 2026-10-24 under the same terms (D-pillow-grype-unapproved). Any
+# FURTHER new pillow advisory is deliberately NOT ignored: it must fail the
+# scan until Felix approves it.
+ignore:
+  - vulnerability: GHSA-22hg-r758-rrw9
+    package:
+      name: pillow
+      version: 12.3.0
+      type: python
+    reason: "CVE-2026-112390 -- pillow 12.3.0, unreachable from tenant input (D-pillow-audit-ignores)"
+  - vulnerability: GHSA-24rc-8hj2-v98c
+    package:
+      name: pillow
+      version: 12.3.0
+      type: python
+    reason: "CVE-2026-96638 -- pillow 12.3.0, unreachable from tenant input (D-pillow-audit-ignores)"
+  - vulnerability: GHSA-254f-3936-288h
+    package:
+      name: pillow
+      version: 12.3.0
+      type: python
+    reason: "CVE-2026-112391 -- pillow 12.3.0, unreachable from tenant input (D-pillow-audit-ignores)"
+  - vulnerability: GHSA-27h8-gf7j-v5hc
+    package:
+      name: pillow
+      version: 12.3.0
+      type: python
+    reason: "CVE-2026-112392 -- pillow 12.3.0, unreachable from tenant input (D-pillow-audit-ignores)"
+  - vulnerability: GHSA-332p-7hrc-92wf
+    package:
+      name: pillow
+      version: 12.3.0
+      type: python
+    reason: "CVE-2026-112393 -- pillow 12.3.0, unreachable from tenant input (D-pillow-audit-ignores)"
+  - vulnerability: GHSA-3j72-p6qg-6xp7
+    package:
+      name: pillow
+      version: 12.3.0
+      type: python
+    reason: "CVE-2026-96642 -- pillow 12.3.0, unreachable from tenant input (D-pillow-audit-ignores)"
+  - vulnerability: GHSA-462x-pgg6-55fp
+    package:
+      name: pillow
+      version: 12.3.0
+      type: python
+    reason: "CVE-2026-112395 -- pillow 12.3.0, unreachable from tenant input (D-pillow-audit-ignores)"
+  - vulnerability: GHSA-4rm8-3hmm-39fg
+    package:
+      name: pillow
+      version: 12.3.0
+      type: python
+    reason: "CVE-2026-96641 -- pillow 12.3.0, unreachable from tenant input (D-pillow-audit-ignores)"
+  - vulnerability: GHSA-4rr5-89j8-mwwm
+    package:
+      name: pillow
+      version: 12.3.0
+      type: python
+    reason: "CVE-2026-112396 -- pillow 12.3.0, unreachable from tenant input (D-pillow-audit-ignores)"
+  - vulnerability: GHSA-58r4-6rv3-gfh8
+    package:
+      name: pillow
+      version: 12.3.0
+      type: python
+    reason: "CVE-2026-112397 -- pillow 12.3.0, unreachable from tenant input (D-pillow-audit-ignores)"
+  - vulnerability: GHSA-5xm2-6676-qcp9
+    package:
+      name: pillow
+      version: 12.3.0
+      type: python
+    reason: "CVE-2026-112399 -- pillow 12.3.0, unreachable from tenant input (D-pillow-audit-ignores)"
+  - vulnerability: GHSA-65qm-jvmh-6pqg
+    package:
+      name: pillow
+      version: 12.3.0
+      type: python
+    reason: "CVE-2026-112400 -- pillow 12.3.0, unreachable from tenant input (D-pillow-audit-ignores)"
+  - vulnerability: GHSA-74r2-7ff9-mjj2
+    package:
+      name: pillow
+      version: 12.3.0
+      type: python
+    reason: "CVE-2026-112401 -- pillow 12.3.0, unreachable from tenant input (D-pillow-audit-ignores)"
+  - vulnerability: GHSA-78g4-xqwv-q3g8
+    package:
+      name: pillow
+      version: 12.3.0
+      type: python
+    reason: "GHSA-78g4-xqwv-q3g8 -- pillow 12.3.0, unreachable from tenant input (D-pillow-audit-ignores)"
+  - vulnerability: GHSA-7mwm-ghpf-9vrm
+    package:
+      name: pillow
+      version: 12.3.0
+      type: python
+    reason: "CVE-2026-112402 -- pillow 12.3.0, unreachable from tenant input (D-pillow-audit-ignores)"
+  - vulnerability: GHSA-9v9v-9qvf-h2hj
+    package:
+      name: pillow
+      version: 12.3.0
+      type: python
+    reason: "CVE-2026-96644 -- pillow 12.3.0, unreachable from tenant input (D-pillow-audit-ignores)"
+  - vulnerability: GHSA-c6hw-5grf-ff96
+    package:
+      name: pillow
+      version: 12.3.0
+      type: python
+    reason: "CVE-2026-112404 -- pillow 12.3.0, unreachable from tenant input (D-pillow-audit-ignores)"
+  - vulnerability: GHSA-cp9v-662q-vvx9
+    package:
+      name: pillow
+      version: 12.3.0
+      type: python
+    reason: "CVE-2026-112405 -- pillow 12.3.0, unreachable from tenant input (D-pillow-audit-ignores)"
+  - vulnerability: GHSA-f2g6-542v-9j58
+    package:
+      name: pillow
+      version: 12.3.0
+      type: python
+    reason: "CVE-2026-112406 -- pillow 12.3.0, unreachable from tenant input (D-pillow-audit-ignores)"
+  - vulnerability: GHSA-fc9g-5qg7-mf45
+    package:
+      name: pillow
+      version: 12.3.0
+      type: python
+    reason: "CVE-2026-112891 -- pillow 12.3.0, unreachable from tenant input (D-pillow-audit-ignores)"
+  - vulnerability: GHSA-g4qv-2jxx-769h
+    package:
+      name: pillow
+      version: 12.3.0
+      type: python
+    reason: "CVE-2026-96643 -- pillow 12.3.0, unreachable from tenant input (D-pillow-audit-ignores)"
+  - vulnerability: GHSA-g7cr-3p24-7wf7
+    package:
+      name: pillow
+      version: 12.3.0
+      type: python
+    reason: "CVE-2026-96778 -- pillow 12.3.0, unreachable from tenant input (D-pillow-audit-ignores)"
+  - vulnerability: GHSA-g842-9rc4-69pw
+    package:
+      name: pillow
+      version: 12.3.0
+      type: python
+    reason: "CVE-2026-96637 -- pillow 12.3.0, unreachable from tenant input (D-pillow-audit-ignores)"
+  - vulnerability: GHSA-gg2r-wvfm-q9rx
+    package:
+      name: pillow
+      version: 12.3.0
+      type: python
+    reason: "CVE-2026-112892 -- pillow 12.3.0, unreachable from tenant input (D-pillow-audit-ignores)"
+  - vulnerability: GHSA-j4m9-6w36-pw47
+    package:
+      name: pillow
+      version: 12.3.0
+      type: python
+    reason: "CVE-2026-112893 -- pillow 12.3.0, unreachable from tenant input (D-pillow-audit-ignores)"
+  - vulnerability: GHSA-jg86-v3jv-hrpm
+    package:
+      name: pillow
+      version: 12.3.0
+      type: python
+    reason: "CVE-2026-112894 -- pillow 12.3.0, unreachable from tenant input (D-pillow-audit-ignores)"
+  - vulnerability: GHSA-mrfp-p49p-3hf2
+    package:
+      name: pillow
+      version: 12.3.0
+      type: python
+    reason: "CVE-2026-96640 -- pillow 12.3.0, unreachable from tenant input (D-pillow-audit-ignores)"
+  - vulnerability: GHSA-p4wg-p73j-c528
+    package:
+      name: pillow
+      version: 12.3.0
+      type: python
+    reason: "CVE-2026-112895 -- pillow 12.3.0, unreachable from tenant input (D-pillow-audit-ignores)"
+  - vulnerability: GHSA-p8hx-v2p6-rp84
+    package:
+      name: pillow
+      version: 12.3.0
+      type: python
+    reason: "CVE-2026-96636 -- pillow 12.3.0, unreachable from tenant input (D-pillow-audit-ignores)"
+  - vulnerability: GHSA-pchr-8j38-3x4p
+    package:
+      name: pillow
+      version: 12.3.0
+      type: python
+    reason: "CVE-2026-112896 -- pillow 12.3.0, unreachable from tenant input (D-pillow-audit-ignores)"
+  - vulnerability: GHSA-q45j-58j2-45rg
+    package:
+      name: pillow
+      version: 12.3.0
+      type: python
+    reason: "CVE-2026-112897 -- pillow 12.3.0, unreachable from tenant input (D-pillow-audit-ignores)"
+  - vulnerability: GHSA-v9pv-5gc8-w2m6
+    package:
+      name: pillow
+      version: 12.3.0
+      type: python
+    reason: "CVE-2026-96639 -- pillow 12.3.0, unreachable from tenant input (D-pillow-audit-ignores)"
+  - vulnerability: GHSA-vx6w-vv9f-6gvg
+    package:
+      name: pillow
+      version: 12.3.0
+      type: python
+    reason: "CVE-2026-112899 -- pillow 12.3.0, unreachable from tenant input (D-pillow-audit-ignores)"
+  - vulnerability: GHSA-w889-685w-c8fh
+    package:
+      name: pillow
+      version: 12.3.0
+      type: python
+    reason: "CVE-2026-112900 -- pillow 12.3.0, unreachable from tenant input (D-pillow-audit-ignores)"
+  - vulnerability: GHSA-xgh8-jp6q-p5x8
+    package:
+      name: pillow
+      version: 12.3.0
+      type: python
+    reason: "CVE-2026-112901 -- pillow 12.3.0, unreachable from tenant input (D-pillow-audit-ignores)"
+  - vulnerability: GHSA-4558-3h8r-v8xp
+    package:
+      name: pillow
+      version: 12.3.0
+      type: python
+    reason: "CVE-2026-112394 -- pillow 12.3.0, unreachable from tenant input (D-pillow-audit-ignores)"
+  - vulnerability: GHSA-8g5g-8vmr-9782
+    package:
+      name: pillow
+      version: 12.3.0
+      type: python
+    reason: "CVE-2026-112403 -- pillow 12.3.0, unreachable from tenant input (D-pillow-audit-ignores)"
+  - vulnerability: GHSA-rfgq-q3w2-pmv2
+    package:
+      name: pillow
+      version: 12.3.0
+      type: python
+    reason: "CVE-2026-112898 -- pillow 12.3.0, unreachable from tenant input (D-pillow-audit-ignores)"
+  - vulnerability: GHSA-xvh5-g6gv-559v
+    package:
+      name: pillow
+      version: 12.3.0
+      type: python
+    reason: "CVE-2026-112902 -- pillow 12.3.0, unreachable from tenant input (D-pillow-audit-ignores)"

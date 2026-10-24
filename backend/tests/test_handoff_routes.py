@@ -74,9 +74,9 @@ ORIGIN = "https://widget.example"
 
 async def _build_app(monkeypatch):
     await reset_checkpoint_env(monkeypatch)
+    await checkpointer.run_checkpointer_setup()
     await checkpointer.open_checkpointer_pool()
     cp = checkpointer.get_checkpointer()
-    await cp.setup()
     graph = build_graph(cp)
     app = create_app()
     app.state.graph = graph

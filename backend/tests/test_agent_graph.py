@@ -378,9 +378,9 @@ async def test_retrieve_node_catches_a_retrieve_failure_and_sets_dependency_fail
 
 async def _fresh_real_graph(monkeypatch):
     await reset_checkpoint_env(monkeypatch)
+    await checkpointer.run_checkpointer_setup()
     await checkpointer.open_checkpointer_pool()
     cp = checkpointer.get_checkpointer()
-    await cp.setup()
     return build_graph(cp)
 
 

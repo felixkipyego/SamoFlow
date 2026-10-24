@@ -51,8 +51,15 @@ services:
     environment:
       PGHOST: postgres
       PGPORT: 5432
-      PGUSER: ${POSTGRES_USER:?POSTGRES_USER must be set in .env}
-      PGPASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set in .env}
+      # [SECURITY] L2 (Phase 7 role split, 2026-10-18): pg_dump runs as
+      # the OWNER role, never BOOTSTRAP (the real Postgres superuser) --
+      # OWNER already has unrestricted read access to every object it
+      # owns, so a nightly backup never needs superuser rights, and
+      # `pg_dump --no-owner --no-privileges` (backup.sh) produces a dump
+      # with no embedded role names anyway, so OWNER vs. any other role
+      # never affects what a restore can do with it.
+      PGUSER: ${POSTGRES_OWNER_USER:?POSTGRES_OWNER_USER must be set in .env}
+      PGPASSWORD: ${POSTGRES_OWNER_PASSWORD:?POSTGRES_OWNER_PASSWORD must be set in .env}
       PGDATABASE: ${POSTGRES_DB:?POSTGRES_DB must be set in .env}
       QDRANT_URL: ${QDRANT_URL:?QDRANT_URL must be set in .env}
       QDRANT_API_KEY: ${QDRANT_API_KEY:?QDRANT_API_KEY must be set in .env}

@@ -33,6 +33,7 @@ from app.agent.entrypoint import (
 )
 from app.agent.graph import AgentState
 from app.auth.dependencies import VerifiedIdentity
+from app.config import get_settings
 from tests.conftest import reset_checkpoint_env
 
 pytestmark = pytest.mark.usefixtures("close_any_checkpointer_pool_left_open")
@@ -60,9 +61,14 @@ def _build_test_graph(cp):
 
 async def _fresh_graph(monkeypatch):
     await reset_checkpoint_env(monkeypatch)
+    # [SECURITY] L2 (Phase 7 role split, 2026-10-18): setup() is genuine
+    # DDL -- run via run_checkpointer_setup() (the OWNER role), never
+    # through the live pool below (APP role, no CREATE on the schema;
+    # `cp.setup()` through that pool would now fail outright, the exact
+    # "runtime DDL trap" this split exists to find and remove).
+    await checkpointer.run_checkpointer_setup()
     await checkpointer.open_checkpointer_pool()
     cp = checkpointer.get_checkpointer()
-    await cp.setup()
     return _build_test_graph(cp)
 
 
@@ -91,7 +97,7 @@ async def test_a_real_turn_persists_a_checkpoint_with_the_expected_thread_id(mon
     await _collect(run_turn(graph, identity, conversation_id, {"messages": ["hi"]}))
 
     expected_thread_id = f"{identity.tenant_id}:{identity.vid}:{conversation_id}"
-    conninfo = checkpointer.checkpointer_conninfo()
+    conninfo = checkpointer.checkpointer_conninfo(get_settings().database_url_str())
     async with await psycopg.AsyncConnection.connect(conninfo, autocommit=True) as conn:
         row = await (
             await conn.execute(
@@ -130,7 +136,7 @@ async def test_tenant_id_is_never_persisted_in_checkpoint_metadata(monkeypatch):
     await _collect(run_turn(graph, identity, conversation_id, {"messages": ["hi"]}))
 
     expected_thread_id = f"{identity.tenant_id}:{identity.vid}:{conversation_id}"
-    conninfo = checkpointer.checkpointer_conninfo()
+    conninfo = checkpointer.checkpointer_conninfo(get_settings().database_url_str())
     async with await psycopg.AsyncConnection.connect(conninfo, autocommit=True) as conn:
         row = await (
             await conn.execute(
@@ -167,7 +173,7 @@ async def test_support_text_is_never_persisted_in_checkpoint_metadata(monkeypatc
     )
 
     expected_thread_id = f"{identity.tenant_id}:{identity.vid}:{conversation_id}"
-    conninfo = checkpointer.checkpointer_conninfo()
+    conninfo = checkpointer.checkpointer_conninfo(get_settings().database_url_str())
     async with await psycopg.AsyncConnection.connect(conninfo, autocommit=True) as conn:
         row = await (
             await conn.execute(
@@ -411,9 +417,9 @@ async def test_agent_state_retrieved_chunks_round_trips_with_no_serialization_wa
     # regardless of whether the underlying behavior fired; caplog is the
     # real mechanism this needs.
     await reset_checkpoint_env(monkeypatch)
+    await checkpointer.run_checkpointer_setup()
     await checkpointer.open_checkpointer_pool()
     cp = checkpointer.get_checkpointer()
-    await cp.setup()
     graph = _build_agent_state_graph(cp)
 
     config = {"configurable": {"thread_id": str(uuid.uuid4())}}

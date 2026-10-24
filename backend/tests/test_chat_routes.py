@@ -122,9 +122,9 @@ async def _build_app(
     if retrieve_chunks is not None:
         fake_node = await _fake_retrieve_node_with(retrieve_chunks, best_dense_score)
         monkeypatch.setattr(graph_module, "_retrieve_node", fake_node)
+    await checkpointer.run_checkpointer_setup()
     await checkpointer.open_checkpointer_pool()
     cp = checkpointer.get_checkpointer()
-    await cp.setup()
     graph = build_graph(cp)
     app = create_app()
     app.state.graph = graph
@@ -1019,7 +1019,10 @@ async def test_cancelling_the_stream_releases_the_lease_and_leaves_valid_state(
         )
     assert follow_up.status_code == 200
 
-    conninfo = checkpointer.checkpointer_conninfo()
+    # [SECURITY] L2 (Phase 7 role split, 2026-10-18): a plain SELECT, so
+    # the APP role's own conninfo (what the live pool actually used to
+    # write this checkpoint) is both correct and sufficient here.
+    conninfo = checkpointer.checkpointer_conninfo(get_settings().database_url_str())
     async with await psycopg.AsyncConnection.connect(conninfo, autocommit=True) as conn:
         row = await (
             await conn.execute(

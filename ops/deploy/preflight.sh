@@ -29,7 +29,11 @@
 #      minimum -- reusing backend/app/secrets_policy.py directly, via
 #      check_env_secrets.py (this directory), so this is the SAME policy
 #      Settings' own production startup gate enforces, never a second,
-#      independently-maintained copy of the same rules.
+#      independently-maintained copy of the same rules. Covers the
+#      deploy-layer secrets no Settings field reads too (POSTGRES_PASSWORD,
+#      POSTGRES_OWNER_PASSWORD -- [SECURITY] L2 follow-up, 2026-10-18), and
+#      fails if POSTGRES_OWNER_USER/POSTGRES_OWNER_PASSWORD disagree with
+#      the username/password inside DATABASE_URL_MIGRATE.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -80,6 +84,6 @@ fi
 if ! python3 "$SCRIPT_DIR/check_env_secrets.py" "$ENV_FILE"; then
     exit 1
 fi
-echo "PASS: every required secret-class variable is present and not a known placeholder/weak value"
+echo "PASS: every required secret-class variable is present, not a known placeholder/weak value, and consistent"
 
 echo "preflight.sh: all checks passed."
