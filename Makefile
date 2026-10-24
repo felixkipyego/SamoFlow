@@ -286,8 +286,60 @@ lock-check:
 # --require-hashes is already implied by the lockfiles' own --hash entries;
 # kept explicit for readability. Exits non-zero on any finding (pip-audit's
 # default) -- never swallowed here.
+# 2026-10-24 (Felix's decision, D-pillow-audit-ignores): pillow 12.3.0's
+# 37 pip-audit findings, ignored ONE ID AT A TIME -- never package-wide.
+# pillow 13.0.0 fixes all 37 but cannot be installed: every fastembed
+# release (0.9.0 included) declares pillow<13.0, and pip enforces that at
+# install time. Proven unreachable from tenant input, and kept that way by
+# guard tests: app/ never imports PIL (test_pillow_reachability_guard.py),
+# extract_pdf() works with PIL import-blocked, and the only fastembed model
+# is the text-only SparseTextEmbedding("Qdrant/bm25"). Any NEW pillow
+# finding, or any finding in another package, still fails this target.
+# .grype.yaml carries the identical IDs, scoped to pillow 12.3.0 --
+# test_grype_guard.py fails if the two lists ever differ. Remove both once
+# fastembed allows pillow>=13 (§9 marker; review by 2026-12-31). Any image-
+# decoding feature (OCR, image uploads) is BLOCKED until then.
+PILLOW_AUDIT_IGNORES = \
+	CVE-2026-96636 \
+	CVE-2026-96637 \
+	CVE-2026-96638 \
+	CVE-2026-96639 \
+	CVE-2026-96640 \
+	CVE-2026-96641 \
+	CVE-2026-96642 \
+	CVE-2026-96643 \
+	CVE-2026-96644 \
+	CVE-2026-96778 \
+	CVE-2026-112390 \
+	CVE-2026-112391 \
+	CVE-2026-112392 \
+	CVE-2026-112393 \
+	CVE-2026-112395 \
+	CVE-2026-112396 \
+	CVE-2026-112397 \
+	CVE-2026-112398 \
+	CVE-2026-112399 \
+	CVE-2026-112400 \
+	CVE-2026-112401 \
+	CVE-2026-112402 \
+	CVE-2026-112404 \
+	CVE-2026-112405 \
+	CVE-2026-112406 \
+	CVE-2026-112891 \
+	CVE-2026-112892 \
+	CVE-2026-112893 \
+	CVE-2026-112894 \
+	CVE-2026-112895 \
+	CVE-2026-112896 \
+	CVE-2026-112897 \
+	CVE-2026-112899 \
+	CVE-2026-112900 \
+	CVE-2026-112901 \
+	CVE-2026-114501 \
+	GHSA-78g4-xqwv-q3g8
+
 audit:
-	pip-audit --require-hashes -r backend/requirements.lock -r backend/requirements-dev.lock
+	pip-audit --require-hashes $(foreach id,$(PILLOW_AUDIT_IGNORES),--ignore-vuln $(id)) -r backend/requirements.lock -r backend/requirements-dev.lock
 
 # Task 1.1c: a visibility tool, not a gate -- never fails because markers
 # exist (hooks.py's own exit code is 0 unless the scan itself errors, e.g.

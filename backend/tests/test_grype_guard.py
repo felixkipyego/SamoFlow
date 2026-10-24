@@ -1,92 +1,113 @@
 # backend/tests/test_grype_guard.py
-# Duplication/simplification review after 1.1.o.e/f/g, item C1: a plain-text
-# regression guard for .grype.yaml's ignore rule, so a future edit cannot
-# silently widen it (e.g. dropping a field, so it starts matching a
-# different package/version's CVE by coincidence) or add a second,
-# unreviewed rule. Deliberately no YAML parser (no new dependency): a
-# small hand-rolled parser reads only what this file's own shape needs
-# (one "ignore:" list with dict entries), matching the line-based style
-# the other guard tests already use.
-from tests.conftest import REPO_ROOT, read_lines
+# Regression guard for .grype.yaml's ignore rules, so a future edit cannot
+# silently widen them (e.g. dropping a field, so a rule starts matching a
+# different package/version's CVE by coincidence) or add an unreviewed one.
+#
+# 2026-10-24 (Felix's decision, D-pillow-audit-ignores): the ONLY approved
+# ignores are pillow 12.3.0 findings that map to an ID in the Makefile's
+# PILLOW_AUDIT_IGNORES (the pip-audit list) -- every rule must be scoped to
+# exactly pillow / 12.3.0 / python, and its `reason` must name the approved
+# ID it maps to (Grype keys these advisories by GHSA ID and, confirmed live
+# on grype v0.119.0, does not match a rule written with the related CVE).
+# Uses PyYAML (already a runtime dependency, app/agent/escalation_phrases.py)
+# instead of the earlier hand-rolled line parser, which could only check
+# that fields existed, not what they said.
+import re
+
+import yaml
+
+from tests.conftest import REPO_ROOT
 
 GRYPE_YAML_PATH = REPO_ROOT / ".grype.yaml"
+MAKEFILE_PATH = REPO_ROOT / "Makefile"
 
-_REQUIRED_FIELDS = ("vulnerability", "package.name", "package.version", "package.type")
+APPROVED_PACKAGE = {"name": "pillow", "version": "12.3.0", "type": "python"}
+# Approved pip-audit IDs that Grype's own database does not carry at all
+# (confirmed by a full unfiltered scan of the built image, 2026-10-24), so
+# they legitimately have no .grype.yaml rule. Anything else in the Makefile
+# list must have one.
+APPROVED_IDS_GRYPE_DOES_NOT_REPORT = {"CVE-2026-112398", "CVE-2026-114501"}
 
 
-def _ignore_rules(lines):
-    # Each "- vulnerability: ..." line starts a new rule; every following
-    # line more indented than it (up to the next "- " list item at the
-    # same indent, or EOF) belongs to that rule. Returns a list of sets of
-    # "key" and "key.subkey" strings actually set in each rule, e.g.
-    # {"vulnerability", "package.name", ...}.
-    rules = []
-    current_fields = None
-    current_indent = None
-    package_indent = None
-    for line in lines:
-        stripped = line.strip()
-        if not stripped or stripped.startswith("#"):
+def _rules() -> list[dict]:
+    return yaml.safe_load(GRYPE_YAML_PATH.read_text())["ignore"] or []
+
+
+def _approved_ids() -> set[str]:
+    makefile = MAKEFILE_PATH.read_text()
+    block = re.search(r"^PILLOW_AUDIT_IGNORES = \\\n((?:\t\S+(?: \\)?\n)+)", makefile, re.M)
+    assert block, "Makefile no longer defines PILLOW_AUDIT_IGNORES in the expected shape"
+    return set(re.findall(r"\t(\S+)", block.group(1)))
+
+
+def test_approved_list_is_exactly_the_37_pillow_ids():
+    ids = _approved_ids()
+    assert len(ids) == 37
+    assert all(re.fullmatch(r"(CVE-\d{4}-\d+|GHSA(-[a-z0-9]{4}){3})", i) for i in ids)
+
+
+def test_audit_target_ignores_by_id_from_that_list_only():
+    makefile = MAKEFILE_PATH.read_text()
+    audit = re.search(r"^audit:\n\t(.+)$", makefile, re.M).group(1)
+    assert "$(foreach id,$(PILLOW_AUDIT_IGNORES),--ignore-vuln $(id))" in audit
+    # No other ignore mechanism, and no severity/skip softening.
+    assert audit.count("--ignore-vuln") == 1
+    for forbidden in ("--skip-editable", "--ignore-vuln CVE", "--ignore-vuln GHSA", "|| true"):
+        assert forbidden not in audit
+
+
+def _violations(rules: list[dict], approved: set[str]) -> list[str]:
+    # Every reason a rule set is NOT the approved exception. Shared by the
+    # real-file test and the widening cases below, so both run one check.
+    found = []
+    vulns = [rule.get("vulnerability") for rule in rules]
+    if len(vulns) != len(set(vulns)):
+        found.append("duplicate .grype.yaml rule")
+    mapped = []
+    for rule in rules:
+        if set(rule) != {"vulnerability", "package", "reason"}:
+            found.append(f"{rule.get('vulnerability')}: fields {sorted(rule)}")
             continue
-        indent = len(line) - len(line.lstrip(" "))
-
-        if stripped.startswith("- vulnerability:"):
-            current_fields = {"vulnerability"}
-            rules.append(current_fields)
-            current_indent = indent
-            package_indent = None
-            continue
-
-        if current_fields is None or indent <= current_indent:
-            # A list item at or above the rule's own indent (or nothing
-            # in progress yet) means we've left the current rule.
-            current_fields = None
-            continue
-
-        if stripped == "package:":
-            package_indent = indent
-            continue
-
-        if package_indent is not None and indent > package_indent:
-            if stripped.startswith("name:"):
-                current_fields.add("package.name")
-            elif stripped.startswith("version:"):
-                current_fields.add("package.version")
-            elif stripped.startswith("type:"):
-                current_fields.add("package.type")
-            continue
-
-        if stripped.startswith("reason:"):
-            current_fields.add("reason")
-
-    return rules
+        if rule["package"] != APPROVED_PACKAGE:
+            found.append(f"{rule['vulnerability']}: not scoped to pillow/12.3.0/python")
+        approved_id = str(rule["reason"]).split(" ", 1)[0]
+        if approved_id not in approved:
+            found.append(
+                f"{rule['vulnerability']}: reason names {approved_id!r}, not in the "
+                "Makefile's PILLOW_AUDIT_IGNORES -- a new pillow finding needs "
+                "Felix's approval first, never a silent .grype.yaml rule"
+            )
+        if not (rule["vulnerability"] == approved_id or rule["vulnerability"].startswith("GHSA-")):
+            found.append(f"{rule['vulnerability']}: not a GHSA ID or the approved ID itself")
+        mapped.append(approved_id)
+    if len(mapped) != len(set(mapped)):
+        found.append("two rules claim the same approved ID")
+    return found
 
 
-def test_grype_yaml_has_at_most_one_fully_scoped_ignore_rule():
-    # At most one, not exactly one (out-of-band maintenance, 2026-10-10,
-    # PROJECT_SPEC.md): zero rules is a real, legitimate state -- it means
-    # no currently-investigated, currently-unfixable finding needs
-    # suppressing right now, not that this guard has gone unmaintained.
-    # The actual property this guard protects -- no silent, unreviewed
-    # SECOND (or more) rule ever gets added alongside an existing one, and
-    # whatever rule does exist is always fully scoped -- holds just as
-    # well at zero rules as it did at exactly one.
-    lines = read_lines(GRYPE_YAML_PATH)
-    rules = _ignore_rules(lines)
+def test_every_rule_is_the_approved_scoped_pillow_exception():
+    assert _violations(_rules(), _approved_ids()) == []
 
-    assert len(rules) <= 1, (
-        f".grype.yaml must have at most one ignore rule, found {len(rules)} "
-        "(an unreviewed second rule must not be added silently)"
-    )
 
-    if not rules:
-        return
+def test_the_two_lists_cannot_drift():
+    covered = {rule["reason"].split(" ", 1)[0] for rule in _rules()}
+    missing = _approved_ids() - covered - APPROVED_IDS_GRYPE_DOES_NOT_REPORT
+    assert not missing, f"approved IDs with no .grype.yaml rule: {sorted(missing)}"
+    assert APPROVED_IDS_GRYPE_DOES_NOT_REPORT <= _approved_ids()
+    assert not (APPROVED_IDS_GRYPE_DOES_NOT_REPORT & covered)
 
-    fields = rules[0]
-    missing = [f for f in _REQUIRED_FIELDS if f not in fields]
-    assert not missing, (
-        ".grype.yaml's ignore rule is missing required field(s) "
-        f"{missing} -- a rule must be scoped by vulnerability ID, package "
-        "name, version and type, not a looser subset that could match a "
-        "different CVE or package by coincidence"
-    )
+
+def test_each_kind_of_widening_is_rejected():
+    # Non-vacuous: the real check above rejects every way a rule could widen.
+    good = _rules()[0]
+    widened = {
+        "another version": {**good, "package": {**APPROVED_PACKAGE, "version": "13.0.0"}},
+        "no type field": {**good, "package": {"name": "pillow", "version": "12.3.0"}},
+        "another package": {**good, "package": {**APPROVED_PACKAGE, "name": "pypdf"}},
+        "unapproved id": {**good, "reason": "CVE-2026-112403 -- not approved"},
+        "no reason": {k: v for k, v in good.items() if k != "reason"},
+        "no package": {k: v for k, v in good.items() if k != "package"},
+    }
+    for label, rule in widened.items():
+        assert _violations([rule], _approved_ids()), label
+    assert _violations([good, good], _approved_ids()), "duplicate"

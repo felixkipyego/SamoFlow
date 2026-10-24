@@ -69,6 +69,9 @@ jobs:
 
       # pip-audit's own default: exits non-zero on any finding. Never
       # soften this with a fail-on-severity-style flag.
+      # The ONLY ignores are the per-ID pillow 12.3.0 list in the Makefile's
+      # PILLOW_AUDIT_IGNORES (D-pillow-audit-ignores) -- never add a second
+      # list here; test_grype_guard.py keeps it in sync with .grype.yaml.
       - name: Audit
         run: make audit
 
