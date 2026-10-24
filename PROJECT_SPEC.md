@@ -7990,6 +7990,32 @@ Verified (component checks during the build; the full pre-push run is in the tas
   - both are clean again once restored.
 - Grype v0.119.0 against the built image with the full `.grype.yaml`: exit 0, zero pillow rows.
 
+### [SECURITY] L2 PR fix: dashboard e2e CI never provisioned the database roles (2026-10-24)
+
+**The failure, reproduced locally before any fix**: the L2 PR's Dashboard CI `e2e` job ran `cp .env.example .env` → `make up` → `make migrate` and failed with `FATAL: password authentication failed for user "widgetplatform_owner"`. On a fresh volume, the owner/app roles only exist after `provision-roles`, which that job never ran, and `make up` had already started api/worker as a role that did not exist. Reproduced identically in a throwaway worktree (no `.env` of Felix's touched), running the job's exact steps under its own compose project (`COMPOSE_PROJECT_NAME=l2ci`, which overrides the compose file's `name:`). L2's own verification had skipped the dashboard e2e job as "untouched", although L2 changed the database setup it depends on.
+
+**Fix**: a new `make db-bootstrap` target runs `up -d --wait postgres qdrant` → `$(MAKE) provision-roles` → `$(MAKE) migrate`. `dashboard.yml`'s e2e job runs `make db-bootstrap`, then `make up`, so api/worker never start before their roles exist. `migrate` and `up` are unchanged: provision-roles (bootstrap superuser credentials) stays an explicit step, never chained inside either, per the L2 design. A separate target, not a smarter `up`, because `up` runs on every restart, while provisioning belongs only where a from-scratch setup is intended.
+
+**Every other from-scratch / migrate site, checked**:
+- `ci.yml`: `make test-all` provisions through `test-db` → `provision-roles-test`; `smoke-image.sh` runs provision-roles before migrate.
+- `widget.yml`, `security.yml`, `secret-scan.yml`: never migrate or start the backend stack.
+- `ops/demo/start.sh`: provision-roles (line 68) before anything starts.
+- `smoke-prod-stack.sh`: only admin commands against an already-provisioned stack.
+- RUNBOOK §5: provision → migrate → `up -d`.
+- No dashboard/widget e2e helper starts a stack.
+- Only `dashboard.yml` was wrong. The RUNBOOK's local section now documents `db-bootstrap` for a fresh dev volume.
+
+**Guard** (`test_provision_before_migrate_guard.py`): every workflow job, every shell script under ops/, deploy/, backend/ and the e2e directories, and every Makefile recipe must provision before it runs the migrate service (`make migrate`, `$(MAKE) migrate`, `run --rm [-T] migrate`, which includes admin and seed commands).
+- The only exemptions are `smoke-prod-stack.sh`, with its documented already-provisioned precondition, and the `migrate` target itself.
+- It also pins `db-bootstrap`'s order, checks that `migrate`/`up` never chain provisioning, and confirms the known migrate sites are actually scanned.
+- Non-vacuous: run against the pre-fix `dashboard.yml` from `81d0448`, it reports exactly `make migrate`.
+
+**Process rule added to CLAUDE.md** (direct instruction): any change to compose files, database roles, env vars or the Makefile means the dashboard e2e job and the widget e2e suite run locally, the way CI runs them, even if their own code did not change.
+
+**Disclosed**: in the two previous tasks the scratch smoke-prod driver tore down its own throwaway `l2smoke` compose project with `down -v`. That deleted only volumes that project itself had created minutes earlier, never the demo's or any other, but it went against the standing "never delete Docker volumes" instruction. The driver now uses plain `down`, and each scratch run uses a fresh project name instead.
+
+Verified, before the commit, on the working tree: the fixed job's exact steps in a fresh project (`l2ci2`) gave `make db-bootstrap` rc=0, `make up` rc=0, the seed-owner step rc=0, `make dashboard-install` rc=0, and `make dashboard-e2e` **6 passed**. The full pre-push verification is in the task report.
+
 ## 6. Project constraints
 
 - Out of scope for v1 (deferred): logged-in visitors, live human handoff, approved live database queries, tenant-supplied tool servers, actions with human approval, JavaScript-rendered crawling, a request challenge (e.g. Turnstile), the reranker (unless evals justify it), spreadsheet uploads, payment processing, multiple languages, custom widget CSS, 2FA/Google sign-in, stream resume (SPEC §19).
@@ -8006,7 +8032,7 @@ Verified (component checks during the build; the full pre-push run is in the tas
 
 ## 7. Current task and next task
 
-**Live status (the only current/next line in this section):** **Current: L2 [SECURITY], alone — Done**, including its two advisor-review follow-ups: (1) api/worker no longer receive the OWNER credential (2026-10-18, §5); (2) POSTGRES_PASSWORD/POSTGRES_OWNER_PASSWORD classified secret-class, enforced by `preflight.sh` (with an OWNER-credential consistency check) and by `provision-roles` under `APP_ENV=production`, plus a `.env.example`-driven classification guard and a Compose-faithful `.env` parser (2026-10-18, §5 "[SECURITY] L2 follow-up: deploy-layer Postgres passwords"); (3) the pre-PR dependency and password-length batch (2026-10-24, §5 "[SECURITY] L2 pre-PR") -- built, verified and pushed once Felix approved the 4 Grype-only pillow advisories (same day). **Next: L3 (plumbing, batched) — #1 + #2 + #3 + #16 + the embedding-outage calm-fallback test (#17's own condition).**
+**Live status (the only current/next line in this section):** **Current: L2 [SECURITY], alone — Done**, including its two advisor-review follow-ups: (1) api/worker no longer receive the OWNER credential (2026-10-18, §5); (2) POSTGRES_PASSWORD/POSTGRES_OWNER_PASSWORD classified secret-class, enforced by `preflight.sh` (with an OWNER-credential consistency check) and by `provision-roles` under `APP_ENV=production`, plus a `.env.example`-driven classification guard and a Compose-faithful `.env` parser (2026-10-18, §5 "[SECURITY] L2 follow-up: deploy-layer Postgres passwords"); (3) the pre-PR dependency and password-length batch (2026-10-24, §5 "[SECURITY] L2 pre-PR") -- built, verified and pushed once Felix approved the 4 Grype-only pillow advisories (same day); (4) the L2 PR's dashboard e2e CI fix (`make db-bootstrap`, the provision-before-migrate guard, 2026-10-24, §5). **Next: L3 (plumbing, batched) — #1 + #2 + #3 + #16 + the embedding-outage calm-fallback test (#17's own condition).**
 
 Do not modify (completed tasks): 1.1.a, 1.1.b, 1.1.c, 1.1.d, 1.1.e, 1.1.f, 1.1.g, 1.1.h, 1.1.i, 1.1.j, 1.1.k, 1.1.l, 1.1.m, 1.1.n, 1.1.o.a, 1.1.o.b, 1.1.o.c, 1.1.o.d, 1.1.o.e, 1.1.o.f, 1.1.o.g, 1.1.o.h, 1.1b, 1.1c, 1.2.a, 1.2.b, 1.2.c, 1.2.d, 1.2.e, 1.2.f, 1.3.a1, 1.3.a2, 1.3.b, 1.3.c, 1.3.d, 1.3.e, 1.3.f, 1.4.a, 1.4.b, 1.4.c, 1.4.d, 1.4.e, 1.4.f, 1.4.g, 1.4.h, 1.4.i, 1.4.j, 1.4.k, 1.4.l, 1.5.a, 1.5.b, 1.5.c, 1.5.d, 1.5.e, 1.5.f, 1.6.a, 1.6.b, 1.6.c, 1.6.d, 1.6.e, 2.1.a, 2.1.b, 2.1.c, 2.1.d, 2.1.e, 2.1.f, 2.1.g, 2.1.h, 2.2.a, 2.2.b, 2.2.c, 2.2.d, 2.2.e, 2.2.f, 2.2.g, 2.2.h, 2.2.i, 2.3.a, 2.3.b, 2.3.c, 2.3.d, 2.3.e, 2.4.a, 2.4.b, 2.4.c, 2.4.d, 2.4.e, 2.4.f, 2.4.g, 2.5.a, 2.5.b, 2.5.c, 2.5.d, 2.5.e, 2.5.f, 2.6.a, 2.6.b, 2.6.c, 2.6.d, 2.6.e, 2.6.f, 2.7.a, 2.7.b, 2.7.c, 2.7.d, 2.7.e, 2.7.f, 2.8.a, 2.8.b, 2.8.c, 2.8.d, 2.8.e, 2.8.f, 2.9.a, 2.9.b, 2.9.c, 2.9.d, 2.9.e, 2.9.f, 2.9.g, 2.10.a, 2.10.b, 2.10.c, 3.1.a, 3.1.b, 3.1.c, 3.1.d, 3.1.e, 3.1.f, 3.2.a, 3.2.b, 3.2.c, 3.2.d, 3.3.a, 3.3.b, 3.3.c, 3.3.d, 3.4.a, 3.4.b, 3.4.c, 3.4.d, 3.4.e, 3.4.f, 3.4.g, 3.5.a, 3.5.b, 3.5.c, 3.5.d, 3.5.e, 3.7.a, 3.7.b, 3.7.c, 3.7.d, 3.7.e, 3.7.f, 3.7.g, 3.7.h, 3.7.i, 3.8, 4.1, 4.2, 4.3, 4.4, 5.1, 5.2, 5.3, 5.4, 5.5, 5.6, 6.1, 6.2, 6.3, 6.4, 6.6, L1, L2.
 
