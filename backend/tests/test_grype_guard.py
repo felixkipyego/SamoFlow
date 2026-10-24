@@ -40,9 +40,12 @@ def _approved_ids() -> set[str]:
     return set(re.findall(r"\t(\S+)", block.group(1)))
 
 
-def test_approved_list_is_exactly_the_37_pillow_ids():
+def test_approved_list_is_exactly_the_41_pillow_ids():
+    # 37 from pip-audit + 4 Grype-only, approved 2026-10-24
+    # (D-pillow-grype-unapproved).
     ids = _approved_ids()
-    assert len(ids) == 37
+    assert len(ids) == 41
+    assert {"CVE-2026-112394", "CVE-2026-112403", "CVE-2026-112898", "CVE-2026-112902"} <= ids
     assert all(re.fullmatch(r"(CVE-\d{4}-\d+|GHSA(-[a-z0-9]{4}){3})", i) for i in ids)
 
 
@@ -104,7 +107,7 @@ def test_each_kind_of_widening_is_rejected():
         "another version": {**good, "package": {**APPROVED_PACKAGE, "version": "13.0.0"}},
         "no type field": {**good, "package": {"name": "pillow", "version": "12.3.0"}},
         "another package": {**good, "package": {**APPROVED_PACKAGE, "name": "pypdf"}},
-        "unapproved id": {**good, "reason": "CVE-2026-112403 -- not approved"},
+        "unapproved id": {**good, "reason": "CVE-2026-999999 -- not approved"},
         "no reason": {k: v for k, v in good.items() if k != "reason"},
         "no package": {k: v for k, v in good.items() if k != "package"},
     }

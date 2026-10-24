@@ -287,8 +287,11 @@ lock-check:
 # kept explicit for readability. Exits non-zero on any finding (pip-audit's
 # default) -- never swallowed here.
 # 2026-10-24 (Felix's decision, D-pillow-audit-ignores): pillow 12.3.0's
-# 37 pip-audit findings, ignored ONE ID AT A TIME -- never package-wide.
-# pillow 13.0.0 fixes all 37 but cannot be installed: every fastembed
+# 41 approved findings, ignored ONE ID AT A TIME -- never package-wide: the
+# 37 pip-audit reported, plus 4 only Grype reports so far (CVE-2026-112394/
+# 112403/112898/112902, D-pillow-grype-unapproved, approved the same day),
+# pre-approved here for when pip-audit's database catches up.
+# pillow 13.0.0 fixes all 41 but cannot be installed: every fastembed
 # release (0.9.0 included) declares pillow<13.0, and pip enforces that at
 # install time. Proven unreachable from tenant input, and kept that way by
 # guard tests: app/ never imports PIL (test_pillow_reachability_guard.py),
@@ -336,6 +339,10 @@ PILLOW_AUDIT_IGNORES = \
 	CVE-2026-112900 \
 	CVE-2026-112901 \
 	CVE-2026-114501 \
+	CVE-2026-112394 \
+	CVE-2026-112403 \
+	CVE-2026-112898 \
+	CVE-2026-112902 \
 	GHSA-78g4-xqwv-q3g8
 
 audit:

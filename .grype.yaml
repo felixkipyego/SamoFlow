@@ -17,11 +17,12 @@
 # to. test_grype_guard.py fails if any rule's CVE is not in the Makefile
 # list, or if the two lists drift.
 #
-# 35 rules, not 37: two approved IDs (CVE-2026-112398, CVE-2026-114501)
-# are not in Grype's database at all, so there is nothing to ignore here.
-# Grype ALSO reports pillow advisories pip-audit does not (see the task
-# report) -- those are deliberately NOT ignored: a new pillow finding must
-# fail the scan until Felix approves it.
+# 39 rules for 41 approved IDs: two (CVE-2026-112398, CVE-2026-114501) are
+# not in Grype's database at all, so there is nothing to ignore here. The
+# last 4 rules are the advisories only Grype reported at first, approved by
+# Felix on 2026-10-24 under the same terms (D-pillow-grype-unapproved). Any
+# FURTHER new pillow advisory is deliberately NOT ignored: it must fail the
+# scan until Felix approves it.
 ignore:
   - vulnerability: GHSA-22hg-r758-rrw9
     package:
@@ -233,3 +234,27 @@ ignore:
       version: 12.3.0
       type: python
     reason: "CVE-2026-112901 -- pillow 12.3.0, unreachable from tenant input (D-pillow-audit-ignores)"
+  - vulnerability: GHSA-4558-3h8r-v8xp
+    package:
+      name: pillow
+      version: 12.3.0
+      type: python
+    reason: "CVE-2026-112394 -- pillow 12.3.0, unreachable from tenant input (D-pillow-audit-ignores)"
+  - vulnerability: GHSA-8g5g-8vmr-9782
+    package:
+      name: pillow
+      version: 12.3.0
+      type: python
+    reason: "CVE-2026-112403 -- pillow 12.3.0, unreachable from tenant input (D-pillow-audit-ignores)"
+  - vulnerability: GHSA-rfgq-q3w2-pmv2
+    package:
+      name: pillow
+      version: 12.3.0
+      type: python
+    reason: "CVE-2026-112898 -- pillow 12.3.0, unreachable from tenant input (D-pillow-audit-ignores)"
+  - vulnerability: GHSA-xvh5-g6gv-559v
+    package:
+      name: pillow
+      version: 12.3.0
+      type: python
+    reason: "CVE-2026-112902 -- pillow 12.3.0, unreachable from tenant input (D-pillow-audit-ignores)"
